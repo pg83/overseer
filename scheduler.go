@@ -456,7 +456,6 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
 	o.TrunkMu.Unlock()
-	wsAbs := wsPath(o.Root, wsID)
 
 	o.Mu.Lock()
 	currentTasks := SerializeTasks(o.Tickets)
@@ -691,7 +690,6 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
 	o.TrunkMu.Unlock()
-	wsAbs := wsPath(o.Root, wsID)
 
 	o.Mu.Lock()
 	currentTasks := SerializeTasks(o.Tickets)
