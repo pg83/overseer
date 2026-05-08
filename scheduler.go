@@ -199,10 +199,14 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 
 	if !planExists(o.Root, t.N) {
 		role = RoleTasker
+		o.TrunkMu.Lock()
 		wsID = NewWorkspace(o.Root, o.Trunk)
+		o.TrunkMu.Unlock()
 		o.appendWorkspaceLocked(t.N, wsID)
 	} else {
+		o.TrunkMu.Lock()
 		wsID = NewWorkspace(o.Root, o.Trunk)
+		o.TrunkMu.Unlock()
 		o.appendWorkspaceLocked(t.N, wsID)
 	}
 
@@ -448,7 +452,9 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
+	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
+	o.TrunkMu.Unlock()
 	wsAbs := wsPath(o.Root, wsID)
 
 	o.Mu.Lock()
@@ -540,22 +546,59 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
-	prevHash := o.GoalsHash
-	newHash := TrunkPull(o.Trunk)
+	o.TrunkMu.Lock()
+	prevGoals := o.GoalsHash
+	TrunkPull(o.Trunk)
+	postPullHash := CurrentTrunkHash(o.Trunk)
+	newGoals := readGoalsHash(o.Trunk)
+	mergerWS := NewWorkspace(o.Root, o.Trunk)
+	o.TrunkMu.Unlock()
 
-	if prevHash != "" && newHash != "" && prevHash != newHash {
-		o.GoalsHash = newHash
+	if prevGoals != "" && newGoals != prevGoals {
+		o.GoalsHash = newGoals
 
 		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: 0, Reason: "GOALS.md changed in trunk"}:
+		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Reason: "GOALS.md changed in trunk pull"}:
 		default:
 		}
 	}
 
-	ok, out := MergeWorkspace(o.Trunk, req.Workspace, o.Root)
+	diggerBranch := "ovs/" + req.Workspace
+	mergerWSAbs := wsPath(o.Root, mergerWS)
 
-	if ok {
-		appendTicketLog(o.Root, req.Ticket, "MERGED", "ws="+req.Workspace)
+	input := fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
+		req.Ticket, diggerBranch, mergerWSAbs, postPullHash)
+	prompt := loadPrompt(o.Root, RoleMerger)
+
+	ctx, cancel := context.WithCancel(o.StopCtx)
+	defer cancel()
+
+	res := runAgent(ctx, RoleMerger, req.Ticket, mergerWSAbs, prompt, input)
+
+	for _, line := range res.ReplanLines {
+		select {
+		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: line}:
+		default:
+		}
+	}
+
+	switch res.Verdict {
+	case VerdictMerged:
+		o.TrunkMu.Lock()
+		ok, out := FfMergeBranch(o.Trunk, "ovs/"+mergerWS)
+		newHead := CurrentTrunkHash(o.Trunk)
+		o.TrunkMu.Unlock()
+
+		MarkWorkspaceReadOnly(o.Root, mergerWS)
+
+		if !ok {
+			appendTicketLog(o.Root, req.Ticket, "MERGE_FF_FAIL", out)
+			o.spawnDiggerWithRebase(req.Ticket, req.Workspace, newHead, out)
+
+			return
+		}
+
+		appendTicketLog(o.Root, req.Ticket, "MERGED", "ws="+req.Workspace+" merger_ws="+mergerWS+" head="+newHead)
 
 		o.Mu.Lock()
 		o.closeTicketLocked(req.Ticket, CloseMerged)
@@ -570,11 +613,20 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 		o.signalWake()
 
-		return
-	}
+	case VerdictMergeFail, VerdictCrashed:
+		MarkWorkspaceReadOnly(o.Root, mergerWS)
+		appendTicketLog(o.Root, req.Ticket, "MERGE_FAIL", res.Detail)
 
-	appendTicketLog(o.Root, req.Ticket, "MERGE_FAIL", out)
-	o.spawnDiggerWithRebase(req.Ticket, req.Workspace, CurrentTrunkHash(o.Trunk), out)
+		o.TrunkMu.Lock()
+		head := CurrentTrunkHash(o.Trunk)
+		o.TrunkMu.Unlock()
+
+		o.spawnDiggerWithRebase(req.Ticket, req.Workspace, head, res.Detail)
+
+	default:
+		MarkWorkspaceReadOnly(o.Root, mergerWS)
+		appendTicketLog(o.Root, req.Ticket, "MERGE_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+	}
 }
 
 func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut string) {
@@ -620,7 +672,9 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
+	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
+	o.TrunkMu.Unlock()
 	wsAbs := wsPath(o.Root, wsID)
 
 	o.Mu.Lock()

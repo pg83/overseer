@@ -100,6 +100,7 @@ type Orchestrator struct {
 	GoalsHash   string
 
 	Mu       sync.Mutex
+	TrunkMu  sync.Mutex
 	Tickets  []Ticket
 	Inflight map[int]*AgentRun
 

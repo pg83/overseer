@@ -50,14 +50,12 @@ func MarkWorkspaceReadOnly(orchRoot, id string) {
 	_ = cmd.Run()
 }
 
-func TrunkPull(trunk string) string {
+func TrunkPull(trunk string) {
 	cmd := exec.Command("git", "-C", trunk, "pull", "--ff-only")
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
 	_ = cmd.Run()
-
-	return readGoalsHash(trunk)
 }
 
 func readGoalsHash(trunk string) string {
@@ -70,9 +68,8 @@ func readGoalsHash(trunk string) string {
 	return sha256hex(data)
 }
 
-func MergeWorkspace(trunk, wsID, orchRoot string) (bool, string) {
-	branch := "ovs/" + wsID
-	cmd := exec.Command("git", "-C", trunk, "merge", "--no-ff", "-m", "ovs merge "+wsID, branch)
+func FfMergeBranch(trunk, branch string) (bool, string) {
+	cmd := exec.Command("git", "-C", trunk, "merge", "--ff-only", branch)
 	out, err := cmd.CombinedOutput()
 
 	if err != nil {
