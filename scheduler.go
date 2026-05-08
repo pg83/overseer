@@ -300,7 +300,14 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 	plan := extractPlan(res.Stdout)
 
 	if plan == "" {
-		appendTicketLog(o.Root, res.Ticket, "TASKER_NO_PLAN", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+		reason := fmt.Sprintf("tasker produced no plan: verdict=%s detail=%s", res.Verdict, res.Detail)
+		appendTicketLog(o.Root, res.Ticket, "TASKER_NO_PLAN", reason)
+		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+
+		select {
+		case o.QReplanner <- ReplanRequest{Source: RoleTasker, Ticket: res.Ticket, Reason: reason}:
+		default:
+		}
 
 		return
 	}
@@ -315,16 +322,32 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_READY", "ws="+res.Workspace+" summary="+res.Detail)
 		o.spawnReviewerLocked(res.Ticket, res.Workspace)
 	case VerdictCantDo:
+		reason := "digger can't do: " + res.Detail
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_CANT_DO", res.Detail)
-	case VerdictCrashed:
-		appendTicketLog(o.Root, res.Ticket, "DIGGER_CRASHED", res.Detail)
+		o.closeTicketLocked(res.Ticket, CloseDiscarded)
 
 		select {
-		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "digger crashed: " + res.Detail}:
+		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
+		default:
+		}
+	case VerdictCrashed:
+		reason := "digger crashed: " + res.Detail
+		appendTicketLog(o.Root, res.Ticket, "DIGGER_CRASHED", res.Detail)
+		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+
+		select {
+		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
 		default:
 		}
 	default:
+		reason := fmt.Sprintf("digger returned unclear verdict=%s detail=%s", res.Verdict, res.Detail)
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+
+		select {
+		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
+		default:
+		}
 	}
 }
 
