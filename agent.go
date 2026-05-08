@@ -21,23 +21,14 @@ var (
 	reCancelTicket = regexp.MustCompile(`(?m)^CANCEL:\s*(\d+)$`)
 )
 
-func runAgent(ctx context.Context, role AgentRole, ticket int, ws string, prompt, input string) AgentResult {
-	args := []string{"-p", "--dangerously-skip-permissions"}
-
-	cwd := ""
+func runAgent(ctx context.Context, role AgentRole, ticket int, ws, stdin string) AgentResult {
+	cmd := exec.CommandContext(ctx, claudeBin, "-p", "--dangerously-skip-permissions")
 
 	if ws != "" {
-		cwd = ws
+		cmd.Dir = ws
 	}
 
-	cmd := exec.CommandContext(ctx, claudeBin, args...)
-	cmd.Dir = cwd
-
-	if prompt != "" {
-		input = prompt + "\n\n" + input
-	}
-
-	cmd.Stdin = strings.NewReader(input)
+	cmd.Stdin = strings.NewReader(stdin)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

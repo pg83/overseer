@@ -116,9 +116,7 @@ func (o *Orchestrator) openCountLocked() int {
 
 func (o *Orchestrator) scheduleReady() {
 	o.Mu.Lock()
-
 	candidates := o.readyCandidatesLocked()
-
 	o.Mu.Unlock()
 
 	for _, t := range candidates {
@@ -195,20 +193,16 @@ func (o *Orchestrator) readyCandidatesLocked() []Ticket {
 
 func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 	role := RoleDigger
-	wsID := ""
 
 	if !planExists(o.Root, t.N) {
 		role = RoleTasker
-		o.TrunkMu.Lock()
-		wsID = NewWorkspace(o.Root, o.Trunk)
-		o.TrunkMu.Unlock()
-		o.appendWorkspaceLocked(t.N, wsID)
-	} else {
-		o.TrunkMu.Lock()
-		wsID = NewWorkspace(o.Root, o.Trunk)
-		o.TrunkMu.Unlock()
-		o.appendWorkspaceLocked(t.N, wsID)
 	}
+
+	o.TrunkMu.Lock()
+	wsID := NewWorkspace(o.Root, o.Trunk)
+	o.TrunkMu.Unlock()
+
+	o.appendWorkspaceLocked(t.N, wsID)
 
 	wsAbs := wsPath(o.Root, wsID)
 
@@ -218,22 +212,22 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 		Ticket:    t.N,
 		Workspace: wsID,
 		Cancel:    cancel,
-		Done:      make(chan AgentResult, 1),
 	}
-
 	o.Inflight[t.N] = run
 
 	appendTicketLog(o.Root, t.N, "AGENT_START", fmt.Sprintf("role=%s ws=%s", role, wsID))
+
+	input := o.buildAgentInput(role, t.N, wsAbs)
+	prompt := loadPrompt(o.Root, role)
+	stdin := concatPromptInput(prompt, input)
 
 	go func() {
 		defer func() {
 			<-o.AgentSem
 		}()
 
-		input := o.buildAgentInput(role, t.N, wsAbs)
-		prompt := loadPrompt(o.Root, role)
-
-		res := runAgent(ctx, role, t.N, wsAbs, prompt, input)
+		res := runAgent(ctx, role, t.N, wsAbs, stdin)
+		dumpAgentRun(o.Root, role, t.N, wsID, stdin, res)
 		o.AgentDone <- res
 	}()
 }
@@ -250,14 +244,16 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string
 		data, err := os.ReadFile(ticketPlanPath(o.Root, ticketN))
 
 		if err == nil {
-			fmt.Fprintf(&sb, "PLAN:\n%s\n", string(data))
+			fmt.Fprintf(&sb, "\nPLAN:\n%s\n", string(data))
 		}
 	}
 
-	data, err := os.ReadFile(ticketLogPath(o.Root, ticketN))
+	if data, err := os.ReadFile(ticketLogPath(o.Root, ticketN)); err == nil {
+		fmt.Fprintf(&sb, "\nLOG:\n%s\n", string(data))
+	}
 
-	if err == nil {
-		fmt.Fprintf(&sb, "LOG:\n%s\n", string(data))
+	if prior := priorRunsForTicket(o.Root, ticketN); prior != "" {
+		fmt.Fprintf(&sb, "\nPRIOR_RUNS:\n%s\n", prior)
 	}
 
 	return sb.String()
@@ -310,24 +306,25 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 }
 
 func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
-	if res.Verdict == VerdictPlanWritten {
-		writePlan(o.Root, res.Ticket, res.Detail)
-		appendTicketLog(o.Root, res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace)
+	plan := extractPlan(res.Stdout)
+
+	if plan == "" {
+		appendTicketLog(o.Root, res.Ticket, "TASKER_NO_PLAN", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
 
 		return
 	}
 
-	appendTicketLog(o.Root, res.Ticket, "TASKER_NO_PLAN", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+	writePlan(o.Root, res.Ticket, plan)
+	appendTicketLog(o.Root, res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace+" summary="+res.Detail)
 }
 
 func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 	switch res.Verdict {
 	case VerdictReady:
-		appendTicketLog(o.Root, res.Ticket, "DIGGER_READY", "ws="+res.Workspace)
+		appendTicketLog(o.Root, res.Ticket, "DIGGER_READY", "ws="+res.Workspace+" summary="+res.Detail)
 		o.spawnReviewerLocked(res.Ticket, res.Workspace)
 	case VerdictCantDo:
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_CANT_DO", res.Detail)
-		MarkWorkspaceReadOnly(o.Root, res.Workspace)
 	case VerdictCrashed:
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_CRASHED", res.Detail)
 
@@ -355,7 +352,6 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 	case VerdictDiscard:
 		appendTicketLog(o.Root, res.Ticket, "REVIEWER_DISCARD", res.Detail)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
-		MarkWorkspaceReadOnly(o.Root, res.Workspace)
 
 		select {
 		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "reviewer discarded: " + res.Detail}:
@@ -376,63 +372,51 @@ func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 }
 
 func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
-	select {
-	case o.AgentSem <- struct{}{}:
-	default:
-		appendTicketLog(o.Root, ticketN, "REVIEWER_DEFERRED", "sem-full")
-
-		return
-	}
-
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	run := &AgentRun{
 		Role:      RoleReviewer,
 		Ticket:    ticketN,
 		Workspace: ws,
 		Cancel:    cancel,
-		Done:      make(chan AgentResult, 1),
 	}
 	o.Inflight[ticketN] = run
 
 	wsAbs := wsPath(o.Root, ws)
 	input := o.buildAgentInput(RoleReviewer, ticketN, wsAbs)
 	prompt := loadPrompt(o.Root, RoleReviewer)
+	stdin := concatPromptInput(prompt, input)
 
 	go func() {
+		o.AgentSem <- struct{}{}
 		defer func() { <-o.AgentSem }()
 
-		res := runAgent(ctx, RoleReviewer, ticketN, wsAbs, prompt, input)
+		res := runAgent(ctx, RoleReviewer, ticketN, wsAbs, stdin)
+		dumpAgentRun(o.Root, RoleReviewer, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
 }
 
 func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
-	select {
-	case o.AgentSem <- struct{}{}:
-	default:
-		appendTicketLog(o.Root, ticketN, "DIGGER_REWORK_DEFERRED", "sem-full")
-
-		return
-	}
-
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	run := &AgentRun{
 		Role:      RoleDigger,
 		Ticket:    ticketN,
 		Workspace: ws,
 		Cancel:    cancel,
-		Done:      make(chan AgentResult, 1),
 	}
 	o.Inflight[ticketN] = run
 
 	wsAbs := wsPath(o.Root, ws)
 	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs)
 	prompt := loadPrompt(o.Root, RoleDigger)
+	stdin := concatPromptInput(prompt, input)
 
 	go func() {
+		o.AgentSem <- struct{}{}
 		defer func() { <-o.AgentSem }()
 
-		res := runAgent(ctx, RoleDigger, ticketN, wsAbs, prompt, input)
+		res := runAgent(ctx, RoleDigger, ticketN, wsAbs, stdin)
+		dumpAgentRun(o.Root, RoleDigger, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
 }
@@ -465,20 +449,21 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 		req.Reason, req.Source, req.Ticket, currentTasks)
 
 	prompt := loadPrompt(o.Root, RoleReplanner)
+	stdin := concatPromptInput(prompt, input)
+
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	defer cancel()
 
-	res := runAgent(ctx, RoleReplanner, 0, wsAbs, prompt, input)
+	res := runAgent(ctx, RoleReplanner, req.Ticket, wsAbs, stdin)
+	dumpAgentRun(o.Root, RoleReplanner, req.Ticket, wsID, stdin, res)
 
 	for _, n := range ExtractCancelTickets(res.Stdout) {
 		o.cancelTicket(n)
 	}
 
-	if res.Verdict == VerdictReplanApplied || strings.Contains(res.Stdout, "TASKS_NEW:") {
+	if strings.Contains(res.Stdout, "TASKS_NEW:") {
 		o.tryApplyReplanOutput(res, req)
 	}
-
-	MarkWorkspaceReadOnly(o.Root, wsID)
 }
 
 func (o *Orchestrator) cancelTicket(n int) {
@@ -502,7 +487,7 @@ func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest) 
 		return
 	}
 
-	body := strings.TrimSpace(res.Stdout[idx+len("TASKS_NEW:"):])
+	body := trimAtVerdict(res.Stdout[idx+len("TASKS_NEW:"):])
 
 	exc := Try(func() {
 		newTickets := ParseTasks(body)
@@ -519,8 +504,11 @@ func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest) 
 		fmt.Fprintln(os.Stderr, "replanner output rejected:", exc.Error())
 		appendTicketLog(o.Root, req.Ticket, "REPLAN_REJECTED", exc.Error())
 
+		feedback := fmt.Sprintf("previous replanner output invalid: %s\n\nREJECTED_OUTPUT:\n%s",
+			exc.Error(), res.Stdout)
+
 		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleReplanner, Ticket: req.Ticket, Reason: "previous replanner output invalid: " + exc.Error()}:
+		case o.QReplanner <- ReplanRequest{Source: RoleReplanner, Ticket: req.Ticket, Reason: feedback}:
 		default:
 		}
 
@@ -569,11 +557,13 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	input := fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
 		req.Ticket, diggerBranch, mergerWSAbs, postPullHash)
 	prompt := loadPrompt(o.Root, RoleMerger)
+	stdin := concatPromptInput(prompt, input)
 
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	defer cancel()
 
-	res := runAgent(ctx, RoleMerger, req.Ticket, mergerWSAbs, prompt, input)
+	res := runAgent(ctx, RoleMerger, req.Ticket, mergerWSAbs, stdin)
+	dumpAgentRun(o.Root, RoleMerger, req.Ticket, mergerWS, stdin, res)
 
 	for _, line := range res.ReplanLines {
 		select {
@@ -589,8 +579,6 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		newHead := CurrentTrunkHash(o.Trunk)
 		o.TrunkMu.Unlock()
 
-		MarkWorkspaceReadOnly(o.Root, mergerWS)
-
 		if !ok {
 			appendTicketLog(o.Root, req.Ticket, "MERGE_FF_FAIL", out)
 			o.spawnDiggerWithRebase(req.Ticket, req.Workspace, newHead, out)
@@ -604,8 +592,6 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		o.closeTicketLocked(req.Ticket, CloseMerged)
 		o.Mu.Unlock()
 
-		MarkWorkspaceReadOnly(o.Root, req.Workspace)
-
 		select {
 		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: "merged"}:
 		default:
@@ -614,7 +600,6 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		o.signalWake()
 
 	case VerdictMergeFail, VerdictCrashed:
-		MarkWorkspaceReadOnly(o.Root, mergerWS)
 		appendTicketLog(o.Root, req.Ticket, "MERGE_FAIL", res.Detail)
 
 		o.TrunkMu.Lock()
@@ -624,16 +609,12 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		o.spawnDiggerWithRebase(req.Ticket, req.Workspace, head, res.Detail)
 
 	default:
-		MarkWorkspaceReadOnly(o.Root, mergerWS)
 		appendTicketLog(o.Root, req.Ticket, "MERGE_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
 	}
 }
 
 func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut string) {
-	o.AgentSem <- struct{}{}
-
 	o.Mu.Lock()
-	defer o.Mu.Unlock()
 
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	run := &AgentRun{
@@ -641,18 +622,23 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 		Ticket:    ticketN,
 		Workspace: ws,
 		Cancel:    cancel,
-		Done:      make(chan AgentResult, 1),
 	}
 	o.Inflight[ticketN] = run
 
 	wsAbs := wsPath(o.Root, ws)
-	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs) + "\nMERGE_FAIL_OUTPUT:\n" + mergeOut + "\nREBASE_TARGET: " + target + "\n"
+	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs) +
+		"\nMERGE_FAIL_OUTPUT:\n" + mergeOut + "\nREBASE_TARGET: " + target + "\n"
 	prompt := loadPrompt(o.Root, RoleDigger)
+	stdin := concatPromptInput(prompt, input)
+
+	o.Mu.Unlock()
 
 	go func() {
+		o.AgentSem <- struct{}{}
 		defer func() { <-o.AgentSem }()
 
-		res := runAgent(ctx, RoleDigger, ticketN, wsAbs, prompt, input)
+		res := runAgent(ctx, RoleDigger, ticketN, wsAbs, stdin)
+		dumpAgentRun(o.Root, RoleDigger, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
 }
@@ -683,12 +669,13 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 
 	input := fmt.Sprintf("REASON: %s\n\nCURRENT_TASKS:\n%s\n", req.Reason, currentTasks)
 	prompt := loadPrompt(o.Root, RoleOverseer)
+	stdin := concatPromptInput(prompt, input)
 
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	defer cancel()
 
-	res := runAgent(ctx, RoleOverseer, 0, wsAbs, prompt, input)
-	MarkWorkspaceReadOnly(o.Root, wsID)
+	res := runAgent(ctx, RoleOverseer, 0, wsAbs, stdin)
+	dumpAgentRun(o.Root, RoleOverseer, 0, wsID, stdin, res)
 
 	switch res.Verdict {
 	case VerdictGoalsAchieved:

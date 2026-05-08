@@ -41,15 +41,6 @@ func NewWorkspace(orchRoot, trunk string) string {
 	return id
 }
 
-func MarkWorkspaceReadOnly(orchRoot, id string) {
-	dst := wsPath(orchRoot, id)
-
-	cmd := exec.Command("chmod", "-R", "a-w", dst)
-	cmd.Stderr = os.Stderr
-
-	_ = cmd.Run()
-}
-
 func TrunkPull(trunk string) {
 	cmd := exec.Command("git", "-C", trunk, "pull", "--ff-only")
 	cmd.Stdout = os.Stderr
