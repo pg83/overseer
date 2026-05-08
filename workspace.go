@@ -1,0 +1,94 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+var wsCounter uint64
+
+func newWorkspaceID() string {
+	n := atomic.AddUint64(&wsCounter, 1)
+
+	return fmt.Sprintf("ws-%s-%04d", time.Now().UTC().Format("2006-01-02-150405"), n)
+}
+
+func wsRoot(orchRoot string) string {
+	return filepath.Join(orchRoot, "workspaces")
+}
+
+func wsPath(orchRoot, id string) string {
+	return filepath.Join(wsRoot(orchRoot), id)
+}
+
+func NewWorkspace(orchRoot, trunk string) string {
+	id := newWorkspaceID()
+	dst := wsPath(orchRoot, id)
+
+	Throw(os.MkdirAll(wsRoot(orchRoot), 0755))
+
+	cmd := exec.Command("git", "-C", trunk, "worktree", "add", "-b", "ovs/"+id, dst)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	Throw(cmd.Run())
+
+	return id
+}
+
+func MarkWorkspaceReadOnly(orchRoot, id string) {
+	dst := wsPath(orchRoot, id)
+
+	cmd := exec.Command("chmod", "-R", "a-w", dst)
+	cmd.Stderr = os.Stderr
+
+	_ = cmd.Run()
+}
+
+func TrunkPull(trunk string) string {
+	cmd := exec.Command("git", "-C", trunk, "pull", "--ff-only")
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	_ = cmd.Run()
+
+	return readGoalsHash(trunk)
+}
+
+func readGoalsHash(trunk string) string {
+	data, err := os.ReadFile(filepath.Join(trunk, "GOALS.md"))
+
+	if err != nil {
+		return ""
+	}
+
+	return sha256hex(data)
+}
+
+func MergeWorkspace(trunk, wsID, orchRoot string) (bool, string) {
+	branch := "ovs/" + wsID
+	cmd := exec.Command("git", "-C", trunk, "merge", "--no-ff", "-m", "ovs merge "+wsID, branch)
+	out, err := cmd.CombinedOutput()
+
+	if err != nil {
+		return false, string(out)
+	}
+
+	return true, string(out)
+}
+
+func CurrentTrunkHash(trunk string) string {
+	cmd := exec.Command("git", "-C", trunk, "rev-parse", "HEAD")
+	out, err := cmd.Output()
+
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(out))
+}
