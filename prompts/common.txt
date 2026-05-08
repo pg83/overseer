@@ -1,0 +1,19 @@
+## Common: live chat with the operator
+
+In addition to your role-specific output, you may include zero or more lines anywhere in your reply:
+
+    MESSAGE: <free-form one-line text the operator should see on screen>
+
+These are surfaced live in the orchestrator's UI as chat messages from your agent. Use them for:
+
+- short status updates the operator might appreciate ("about to run integration tests, takes ~3 min")
+- surprises worth flagging ("this codebase has zero tests; adding some as part of this change")
+- questions you'd ask if you could ("the spec is ambiguous on X — picking interpretation Y, flagging for review")
+- noteworthy decisions ("renaming `cleanup` → `teardown` for consistency with the rest of the file")
+
+Don't use MESSAGE for:
+- routine per-tool progress (the operator already sees those traces)
+- the final verdict (use `VERDICT:` for that)
+- sensitive data (anyone watching the orchestrator can see this)
+
+One MESSAGE per line; multi-line content should be split or summarised.

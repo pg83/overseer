@@ -74,6 +74,7 @@ type AgentResult struct {
 	Verdict     AgentVerdict
 	Detail      string
 	ReplanLines []string
+	Messages    []string
 	Stdout      string
 	Stderr      string
 	RawStream   string

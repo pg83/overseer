@@ -24,6 +24,7 @@ var (
 	reVerdict      = regexp.MustCompile(`(?m)^VERDICT:\s*([A-Z_]+)(?::\s*(.+))?$`)
 	reTargetHash   = regexp.MustCompile(`(?m)^REBASE_TARGET:\s*([0-9a-f]+)$`)
 	reCancelTicket = regexp.MustCompile(`(?m)^CANCEL:\s*(\d+)$`)
+	reMessage      = regexp.MustCompile(`(?m)^MESSAGE:\s*(.+)$`)
 )
 
 func jailRWPaths(home string) []string {
@@ -145,6 +146,10 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 
 	parseAgentOutput(&res)
 
+	for _, m := range res.Messages {
+		uiTicket("💬", role, ticket, "MESSAGE", m)
+	}
+
 	return res
 }
 
@@ -210,6 +215,10 @@ func parseAgentOutput(res *AgentResult) {
 		res.ReplanLines = append(res.ReplanLines, strings.TrimSpace(m[1]))
 	}
 
+	for _, m := range reMessage.FindAllStringSubmatch(res.Stdout, -1) {
+		res.Messages = append(res.Messages, strings.TrimSpace(m[1]))
+	}
+
 	if m := reVerdict.FindStringSubmatch(res.Stdout); m != nil {
 		res.Verdict = AgentVerdict(m[1])
 
@@ -246,6 +255,17 @@ func ExtractRebaseTarget(text string) string {
 }
 
 func loadPrompt(orchRoot string, role AgentRole) string {
+	base := loadRolePrompt(orchRoot, role)
+	common := loadCommonPrompt(orchRoot)
+
+	if common == "" {
+		return base
+	}
+
+	return base + "\n\n" + common
+}
+
+func loadRolePrompt(orchRoot string, role AgentRole) string {
 	path := filepath.Join(orchRoot, "prompts", string(role)+".txt")
 
 	if data, err := os.ReadFile(path); err == nil {
@@ -257,6 +277,20 @@ func loadPrompt(orchRoot string, role AgentRole) string {
 	}
 
 	return defaultPrompt(role)
+}
+
+func loadCommonPrompt(orchRoot string) string {
+	path := filepath.Join(orchRoot, "prompts", "common.txt")
+
+	if data, err := os.ReadFile(path); err == nil {
+		return string(data)
+	}
+
+	if data, err := embeddedPrompts.ReadFile("prompts/common.txt"); err == nil {
+		return string(data)
+	}
+
+	return ""
 }
 
 func defaultPrompt(role AgentRole) string {
