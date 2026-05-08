@@ -12,19 +12,6 @@ import (
 	"strings"
 )
 
-const (
-	claudeBin = "claude"
-	jailBin   = "/home/pg/monorepo/jail/jail"
-)
-
-var jailFixedRW = []string{
-	"/tmp",
-	"/home/pg/.claude",
-	"/home/pg/.claude.json",
-	"/home/pg/.cache",
-	"/home/pg/go",
-}
-
 var (
 	reReplan       = regexp.MustCompile(`(?m)^REPLAN:\s*(.+)$`)
 	reVerdict      = regexp.MustCompile(`(?m)^VERDICT:\s*([A-Z_]+)(?::\s*(.+))?$`)
@@ -32,12 +19,31 @@ var (
 	reCancelTicket = regexp.MustCompile(`(?m)^CANCEL:\s*(\d+)$`)
 )
 
-func runAgent(ctx context.Context, role AgentRole, ticket int, ws, stdin string) AgentResult {
+func jailRWPaths(home string) []string {
+	return []string{
+		"/tmp",
+		filepath.Join(home, ".claude"),
+		filepath.Join(home, ".claude.json"),
+		filepath.Join(home, ".cache"),
+		filepath.Join(home, "go"),
+	}
+}
+
+func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int, ws, stdin string) AgentResult {
+	o.AgentSem <- struct{}{}
+	defer func() { <-o.AgentSem }()
+
 	tmpdir := ""
 
 	if ws != "" {
 		tmpdir = filepath.Join(ws, ".tmp")
 		Throw(os.MkdirAll(tmpdir, 0755))
+	}
+
+	home := os.Getenv("HOME")
+
+	if home == "" {
+		ThrowFmt("HOME env var is empty")
 	}
 
 	args := []string{}
@@ -50,20 +56,19 @@ func runAgent(ctx context.Context, role AgentRole, ticket int, ws, stdin string)
 		args = append(args, "--rw="+tmpdir)
 	}
 
-	for _, p := range jailFixedRW {
+	for _, p := range jailRWPaths(home) {
 		args = append(args, "--rw="+p)
 	}
 
-	args = append(args, "--", claudeBin, "-p", "--dangerously-skip-permissions")
+	args = append(args, "--", o.ClaudeBin, "-p", "--dangerously-skip-permissions")
 
-	cmd := exec.CommandContext(ctx, jailBin, args...)
+	cmd := exec.CommandContext(ctx, o.JailBin, args...)
 
 	if ws != "" {
 		cmd.Dir = ws
 	}
 
 	cmd.Stdin = strings.NewReader(stdin)
-
 	cmd.Env = append(os.Environ(), "TMPDIR="+tmpdir)
 
 	var stdout, stderr bytes.Buffer

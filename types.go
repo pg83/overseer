@@ -98,6 +98,8 @@ type Orchestrator struct {
 	Root        string
 	Trunk       string
 	GoalsHash   string
+	ClaudeBin   string
+	JailBin     string
 
 	Mu       sync.Mutex
 	TrunkMu  sync.Mutex

@@ -11,12 +11,14 @@ import (
 
 const mergerQueueThrottle = 4
 
-func NewOrchestrator(root, trunk string) *Orchestrator {
+func NewOrchestrator(root, trunk, claudeBin, jailBin string) *Orchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	o := &Orchestrator{
 		Root:       root,
 		Trunk:      trunk,
+		ClaudeBin:  claudeBin,
+		JailBin:    jailBin,
 		Inflight:   map[int]*AgentRun{},
 		AgentSem:   make(chan struct{}, 6),
 		QReplanner: make(chan ReplanRequest, 256),
@@ -124,17 +126,10 @@ func (o *Orchestrator) scheduleReady() {
 			break
 		}
 
-		select {
-		case o.AgentSem <- struct{}{}:
-		default:
-			return
-		}
-
 		o.Mu.Lock()
 
 		if _, busy := o.Inflight[t.N]; busy {
 			o.Mu.Unlock()
-			<-o.AgentSem
 
 			continue
 		}
@@ -222,11 +217,7 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		defer func() {
-			<-o.AgentSem
-		}()
-
-		res := runAgent(ctx, role, t.N, wsAbs, stdin)
+		res := o.runAgent(ctx, role, t.N, wsAbs, stdin)
 		dumpAgentRun(o.Root, role, t.N, wsID, stdin, res)
 		o.AgentDone <- res
 	}()
@@ -387,10 +378,7 @@ func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		o.AgentSem <- struct{}{}
-		defer func() { <-o.AgentSem }()
-
-		res := runAgent(ctx, RoleReviewer, ticketN, wsAbs, stdin)
+		res := o.runAgent(ctx, RoleReviewer, ticketN, wsAbs, stdin)
 		dumpAgentRun(o.Root, RoleReviewer, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
@@ -412,10 +400,7 @@ func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		o.AgentSem <- struct{}{}
-		defer func() { <-o.AgentSem }()
-
-		res := runAgent(ctx, RoleDigger, ticketN, wsAbs, stdin)
+		res := o.runAgent(ctx, RoleDigger, ticketN, wsAbs, stdin)
 		dumpAgentRun(o.Root, RoleDigger, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
@@ -433,9 +418,6 @@ func (o *Orchestrator) replannerLoop() {
 }
 
 func (o *Orchestrator) runReplanner(req ReplanRequest) {
-	o.AgentSem <- struct{}{}
-	defer func() { <-o.AgentSem }()
-
 	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
 	o.TrunkMu.Unlock()
@@ -454,7 +436,7 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	defer cancel()
 
-	res := runAgent(ctx, RoleReplanner, req.Ticket, wsAbs, stdin)
+	res := o.runAgent(ctx, RoleReplanner, req.Ticket, wsAbs, stdin)
 	dumpAgentRun(o.Root, RoleReplanner, req.Ticket, wsID, stdin, res)
 
 	for _, n := range ExtractCancelTickets(res.Stdout) {
@@ -531,9 +513,6 @@ func (o *Orchestrator) mergerLoop() {
 }
 
 func (o *Orchestrator) runMerger(req MergeRequest) {
-	o.AgentSem <- struct{}{}
-	defer func() { <-o.AgentSem }()
-
 	o.TrunkMu.Lock()
 	prevGoals := o.GoalsHash
 	TrunkPull(o.Trunk)
@@ -562,7 +541,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	defer cancel()
 
-	res := runAgent(ctx, RoleMerger, req.Ticket, mergerWSAbs, stdin)
+	res := o.runAgent(ctx, RoleMerger, req.Ticket, mergerWSAbs, stdin)
 	dumpAgentRun(o.Root, RoleMerger, req.Ticket, mergerWS, stdin, res)
 
 	for _, line := range res.ReplanLines {
@@ -634,10 +613,7 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 	o.Mu.Unlock()
 
 	go func() {
-		o.AgentSem <- struct{}{}
-		defer func() { <-o.AgentSem }()
-
-		res := runAgent(ctx, RoleDigger, ticketN, wsAbs, stdin)
+		res := o.runAgent(ctx, RoleDigger, ticketN, wsAbs, stdin)
 		dumpAgentRun(o.Root, RoleDigger, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
@@ -655,9 +631,6 @@ func (o *Orchestrator) overseerLoop() {
 }
 
 func (o *Orchestrator) runOverseer(req OverseerRequest) {
-	o.AgentSem <- struct{}{}
-	defer func() { <-o.AgentSem }()
-
 	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
 	o.TrunkMu.Unlock()
@@ -674,7 +647,7 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 	ctx, cancel := context.WithCancel(o.StopCtx)
 	defer cancel()
 
-	res := runAgent(ctx, RoleOverseer, 0, wsAbs, stdin)
+	res := o.runAgent(ctx, RoleOverseer, 0, wsAbs, stdin)
 	dumpAgentRun(o.Root, RoleOverseer, 0, wsID, stdin, res)
 
 	switch res.Verdict {
