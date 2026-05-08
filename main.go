@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 )
@@ -36,7 +37,21 @@ func mainBody() {
 
 	Throw(os.MkdirAll(*root, 0755))
 
-	o := NewOrchestrator(*root, *trunk, *claudeBin, *jailBin)
+	claudeAbs, err := exec.LookPath(*claudeBin)
+
+	if err != nil {
+		ThrowFmt("--claude-bin %q: %v", *claudeBin, err)
+	}
+
+	jailAbs, err := exec.LookPath(*jailBin)
+
+	if err != nil {
+		ThrowFmt("--jail-bin %q: %v", *jailBin, err)
+	}
+
+	fmt.Fprintf(os.Stderr, "overseer: claude=%s jail=%s\n", claudeAbs, jailAbs)
+
+	o := NewOrchestrator(*root, *trunk, claudeAbs, jailAbs)
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
