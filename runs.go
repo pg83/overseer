@@ -26,6 +26,8 @@ func dumpAgentRun(orchRoot string, role AgentRole, ticket int, ws, stdin string,
 	var sb strings.Builder
 	sb.WriteString("=== INPUT ===\n")
 	sb.WriteString(stdin)
+	sb.WriteString("\n=== STREAM ===\n")
+	sb.WriteString(res.RawStream)
 	sb.WriteString("\n=== STDOUT ===\n")
 	sb.WriteString(res.Stdout)
 	sb.WriteString("\n=== STDERR ===\n")

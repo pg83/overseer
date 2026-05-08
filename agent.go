@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -64,7 +67,11 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 		args = append(args, "--rw="+p)
 	}
 
-	args = append(args, "--", o.ClaudeBin, "-p", "--dangerously-skip-permissions")
+	args = append(args, "--", o.ClaudeBin,
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--dangerously-skip-permissions")
 
 	cmd := exec.CommandContext(ctx, o.JailBin, args...)
 
@@ -75,23 +82,61 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = append(os.Environ(), "TMPDIR="+tmpdir)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdoutPipe := Throw2(cmd.StdoutPipe())
 
-	err := cmd.Run()
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	Throw(cmd.Start())
+
+	var rawLines, finalText strings.Builder
+
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 1<<20), 16<<20)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		rawLines.Write(line)
+		rawLines.WriteByte('\n')
+
+		var ev map[string]any
+
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+
+		traceAgentEvent(role, ticket, ev)
+
+		if t, _ := ev["type"].(string); t == "result" {
+			if txt, _ := ev["result"].(string); txt != "" {
+				finalText.WriteString(txt)
+			}
+		}
+	}
+
+	err := cmd.Wait()
 
 	res := AgentResult{
 		Role:      role,
 		Ticket:    ticket,
 		Workspace: ws,
-		Stdout:    stdout.String(),
-		Stderr:    stderr.String(),
+		Stdout:    finalText.String(),
+		Stderr:    stderrBuf.String(),
+		RawStream: rawLines.String(),
 	}
 
 	if err != nil {
+		var ee *exec.ExitError
+
+		if errors.As(err, &ee) {
+			res.Verdict = VerdictCrashed
+			res.Detail = fmt.Sprintf("exit=%d stderr=%s", ee.ExitCode(), stderrBuf.String())
+
+			return res
+		}
+
 		res.Verdict = VerdictCrashed
-		res.Detail = fmt.Sprintf("exit_err=%v stderr=%s", err, stderr.String())
+		res.Detail = fmt.Sprintf("wait: %v", err)
 
 		return res
 	}
@@ -99,6 +144,63 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 	parseAgentOutput(&res)
 
 	return res
+}
+
+func traceAgentEvent(role AgentRole, ticket int, ev map[string]any) {
+	typ, _ := ev["type"].(string)
+
+	if typ != "assistant" {
+		return
+	}
+
+	msg, _ := ev["message"].(map[string]any)
+
+	if msg == nil {
+		return
+	}
+
+	content, _ := msg["content"].([]any)
+
+	for _, c := range content {
+		block, _ := c.(map[string]any)
+
+		if block == nil {
+			continue
+		}
+
+		btyp, _ := block["type"].(string)
+
+		if btyp != "tool_use" {
+			continue
+		}
+
+		name, _ := block["name"].(string)
+		input, _ := block["input"].(map[string]any)
+		ui("·", role, ticket, name, summarizeToolInput(name, input))
+	}
+}
+
+func summarizeToolInput(toolName string, input map[string]any) string {
+	if input == nil {
+		return ""
+	}
+
+	switch toolName {
+	case "Read", "Edit", "Write", "NotebookEdit":
+		if p, ok := input["file_path"].(string); ok {
+			return p
+		}
+	case "Bash":
+		if c, ok := input["command"].(string); ok {
+			return strings.ReplaceAll(c, "\n", " ⏎ ")
+		}
+	case "Grep", "Glob":
+		if p, ok := input["pattern"].(string); ok {
+			return p
+		}
+	}
+
+	return ""
 }
 
 func parseAgentOutput(res *AgentResult) {

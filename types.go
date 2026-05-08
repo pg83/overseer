@@ -76,6 +76,7 @@ type AgentResult struct {
 	ReplanLines []string
 	Stdout      string
 	Stderr      string
+	RawStream   string
 }
 
 type ReplanRequest struct {
