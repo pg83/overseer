@@ -32,13 +32,30 @@ func NewWorkspace(orchRoot, trunk string) string {
 
 	Throw(os.MkdirAll(wsRoot(orchRoot), 0755))
 
-	cmd := exec.Command("git", "-C", trunk, "worktree", "add", "-b", "ovs/"+id, dst)
+	cmd := exec.Command("git", "clone", "--local", trunk, dst)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	Throw(cmd.Run())
+
+	branch := "ovs/" + id
+
+	cmd = exec.Command("git", "-C", dst, "checkout", "-b", branch)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
 	Throw(cmd.Run())
 
 	return id
+}
+
+func FetchBranch(trunk, srcPath, branch string) {
+	refspec := branch + ":" + branch
+	cmd := exec.Command("git", "-C", trunk, "fetch", srcPath, refspec)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	Throw(cmd.Run())
 }
 
 func TrunkPull(trunk string) {

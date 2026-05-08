@@ -57,6 +57,8 @@ func priorRunsForTicket(orchRoot string, ticketN int) string {
 
 	sort.Strings(matched)
 
+	want := map[string]bool{"STDOUT": true, "STDERR": true, "META": true}
+
 	var sb strings.Builder
 
 	for _, n := range matched {
@@ -68,8 +70,27 @@ func priorRunsForTicket(orchRoot string, ticketN int) string {
 			continue
 		}
 
-		fmt.Fprintf(&sb, "\n--- %s ---\n", n)
-		sb.Write(data)
+		fmt.Fprintf(&sb, "\n--- %s ---\nLOG_FILE: %s\n%s", n, path, extractRunSections(data, want))
+	}
+
+	return sb.String()
+}
+
+func extractRunSections(data []byte, want map[string]bool) string {
+	var sb strings.Builder
+
+	emit := false
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "=== ") && strings.HasSuffix(line, " ===") {
+			name := strings.TrimSuffix(strings.TrimPrefix(line, "=== "), " ===")
+			emit = want[name]
+		}
+
+		if emit {
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+		}
 	}
 
 	return sb.String()

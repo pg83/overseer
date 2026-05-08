@@ -76,6 +76,10 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 		"--verbose",
 		"--dangerously-skip-permissions")
 
+	if role == RoleDigger {
+		args = append(args, "--model", "sonnet")
+	}
+
 	cmd := exec.CommandContext(ctx, o.JailBin, args...)
 
 	if wsAbs != "" {

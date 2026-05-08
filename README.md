@@ -17,7 +17,7 @@ overseer --root /path/to/state --trunk /path/to/git/repo
 `--root` holds:
 - `TASKS.md` — ticket DB
 - `tickets/T-<N>/{plan.md,log.md}` — per-ticket artifacts
-- `workspaces/<ws-id>/` — git worktrees (RO after use)
+- `workspaces/<ws-id>/` — local clones of trunk (RO after use)
 - `prompts/<role>.txt` — agent prompts (defaults baked in)
 - `REPORT.md` — written on `GOALS_ACHIEVED`
 

@@ -212,7 +212,7 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string
 	}
 
 	if prior := priorRunsForTicket(o.Root, ticketN); prior != "" {
-		fmt.Fprintf(&sb, "\nPRIOR_RUNS:\n%s\n", prior)
+		fmt.Fprintf(&sb, "\nPRIOR_RUNS (compact summaries — Read each LOG_FILE for the full reasoning stream if you need tool-by-tool detail):\n%s\n", prior)
 	}
 
 	return sb.String()
@@ -447,8 +447,8 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	currentTasks := SerializeTasks(o.Tickets)
 	o.Mu.Unlock()
 
-	input := fmt.Sprintf("REASON_FOR_REPLAN: %s\nSOURCE_AGENT: %s\nSOURCE_TICKET: %d\n\nCURRENT_TASKS:\n%s\n",
-		req.Reason, req.Source, req.Ticket, currentTasks)
+	input := fmt.Sprintf("REASON_FOR_REPLAN: %s\nSOURCE_AGENT: %s\nSOURCE_TICKET: %d\nRUNS_DIR: %s\n\nCURRENT_TASKS:\n%s\n",
+		req.Reason, req.Source, req.Ticket, runsDir(o.Root), currentTasks)
 
 	prompt := loadPrompt(o.Root, RoleReplanner)
 	stdin := concatPromptInput(prompt, input)
@@ -564,10 +564,11 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	}
 
 	diggerBranch := "ovs/" + req.Workspace
+	diggerWSAbs := wsPath(o.Root, req.Workspace)
 	mergerWSAbs := wsPath(o.Root, mergerWS)
 
-	input := fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
-		req.Ticket, diggerBranch, mergerWSAbs, postPullHash)
+	input := fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
+		req.Ticket, diggerBranch, diggerWSAbs, mergerWSAbs, postPullHash)
 	prompt := loadPrompt(o.Root, RoleMerger)
 	stdin := concatPromptInput(prompt, input)
 
@@ -587,6 +588,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	switch res.Verdict {
 	case VerdictMerged:
 		o.TrunkMu.Lock()
+		FetchBranch(o.Trunk, mergerWSAbs, "ovs/"+mergerWS)
 		ok, out := FfMergeBranch(o.Trunk, "ovs/"+mergerWS)
 		newHead := CurrentTrunkHash(o.Trunk)
 		o.TrunkMu.Unlock()
