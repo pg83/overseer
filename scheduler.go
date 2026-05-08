@@ -34,24 +34,10 @@ func NewOrchestrator(root, trunk, claudeBin, jailBin string) *Orchestrator {
 	o.Tickets = LoadTasks(root)
 	o.GoalsHash = readGoalsHash(trunk)
 
-	if len(o.Tickets) == 0 {
-		o.bootstrapT0()
-	}
+	o.QOverseer <- OverseerRequest{Reason: "boot: re-evaluate goals and seed plan if needed"}
+	uiSys("📥", "→Q_overseer", "boot")
 
 	return o
-}
-
-func (o *Orchestrator) bootstrapT0() {
-	t0 := Ticket{
-		N:     0,
-		State: StateOpen,
-		Descr: "BOOTSTRAP: read GOALS.md, draft acceptance criteria, define test strategy, write CLAUDE.md, propose initial task breakdown",
-		Prio:  10,
-	}
-	o.Tickets = []Ticket{t0}
-	SaveTasks(o.Root, o.Tickets)
-	appendTicketLog(o.Root, 0, "CREATED", "by=orchestrator role=bootstrap")
-	uiTicket("🎫", "", 0, "CREATED", "BOOTSTRAP T-0")
 }
 
 func (o *Orchestrator) Run() {
