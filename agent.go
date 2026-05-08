@@ -12,7 +12,18 @@ import (
 	"strings"
 )
 
-const claudeBin = "claude"
+const (
+	claudeBin = "claude"
+	jailBin   = "/home/pg/monorepo/jail/jail"
+)
+
+var jailFixedRW = []string{
+	"/tmp",
+	"/home/pg/.claude",
+	"/home/pg/.claude.json",
+	"/home/pg/.cache",
+	"/home/pg/go",
+}
 
 var (
 	reReplan       = regexp.MustCompile(`(?m)^REPLAN:\s*(.+)$`)
@@ -22,13 +33,38 @@ var (
 )
 
 func runAgent(ctx context.Context, role AgentRole, ticket int, ws, stdin string) AgentResult {
-	cmd := exec.CommandContext(ctx, claudeBin, "-p", "--dangerously-skip-permissions")
+	tmpdir := ""
+
+	if ws != "" {
+		tmpdir = filepath.Join(ws, ".tmp")
+		Throw(os.MkdirAll(tmpdir, 0755))
+	}
+
+	args := []string{}
+
+	if ws != "" {
+		args = append(args, "--rw="+ws)
+	}
+
+	if tmpdir != "" {
+		args = append(args, "--rw="+tmpdir)
+	}
+
+	for _, p := range jailFixedRW {
+		args = append(args, "--rw="+p)
+	}
+
+	args = append(args, "--", claudeBin, "-p", "--dangerously-skip-permissions")
+
+	cmd := exec.CommandContext(ctx, jailBin, args...)
 
 	if ws != "" {
 		cmd.Dir = ws
 	}
 
 	cmd.Stdin = strings.NewReader(stdin)
+
+	cmd.Env = append(os.Environ(), "TMPDIR="+tmpdir)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
