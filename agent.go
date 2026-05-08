@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"embed"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 )
+
+//go:embed prompts/*.txt
+var embeddedPrompts embed.FS
 
 var (
 	reReplan       = regexp.MustCompile(`(?m)^REPLAN:\s*(.+)$`)
@@ -139,13 +143,16 @@ func ExtractRebaseTarget(text string) string {
 
 func loadPrompt(orchRoot string, role AgentRole) string {
 	path := filepath.Join(orchRoot, "prompts", string(role)+".txt")
-	data, err := os.ReadFile(path)
 
-	if err != nil {
-		return defaultPrompt(role)
+	if data, err := os.ReadFile(path); err == nil {
+		return string(data)
 	}
 
-	return string(data)
+	if data, err := embeddedPrompts.ReadFile("prompts/" + string(role) + ".txt"); err == nil {
+		return string(data)
+	}
+
+	return defaultPrompt(role)
 }
 
 func defaultPrompt(role AgentRole) string {

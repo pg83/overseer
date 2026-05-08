@@ -38,6 +38,11 @@ func NewOrchestrator(root, trunk, claudeBin, jailBin string) *Orchestrator {
 		o.bootstrapT0()
 	}
 
+	if o.openCountLocked() <= 2 {
+		o.QOverseer <- OverseerRequest{Reason: "boot: low-open"}
+		uiSys("📥", "→Q_overseer", "boot")
+	}
+
 	return o
 }
 
@@ -75,14 +80,6 @@ func (o *Orchestrator) Run() {
 		}
 
 		o.scheduleReady()
-
-		if o.shouldFireOverseer() {
-			select {
-			case o.QOverseer <- OverseerRequest{Reason: "idle/low-open"}:
-				uiSys("📥", "→Q_overseer", "idle/low-open")
-			default:
-			}
-		}
 	}
 }
 
@@ -91,19 +88,6 @@ func (o *Orchestrator) signalWake() {
 	case o.Wakeup <- struct{}{}:
 	default:
 	}
-}
-
-func (o *Orchestrator) shouldFireOverseer() bool {
-	o.Mu.Lock()
-	defer o.Mu.Unlock()
-
-	open := o.openCountLocked()
-
-	if open <= 2 && len(o.Inflight) == 0 {
-		return true
-	}
-
-	return false
 }
 
 func (o *Orchestrator) openCountLocked() int {
@@ -406,6 +390,14 @@ func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 	}
 
 	SaveTasks(o.Root, o.Tickets)
+
+	if o.openCountLocked() <= 2 {
+		select {
+		case o.QOverseer <- OverseerRequest{Reason: fmt.Sprintf("low-open after T-%d closed (%s)", n, reason)}:
+			uiSys("📥", "→Q_overseer", fmt.Sprintf("after T-%d %s", n, reason))
+		default:
+		}
+	}
 }
 
 func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
@@ -487,12 +479,20 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	res := o.runAgent(ctx, RoleReplanner, req.Ticket, wsAbs, stdin)
 	dumpAgentRun(o.Root, RoleReplanner, req.Ticket, wsID, stdin, res)
 
-	for _, n := range ExtractCancelTickets(res.Stdout) {
+	cancels := ExtractCancelTickets(res.Stdout)
+
+	for _, n := range cancels {
 		o.cancelTicket(n)
 	}
 
-	if strings.Contains(res.Stdout, "TASKS_NEW:") {
+	hasTasksNew := strings.Contains(res.Stdout, "TASKS_NEW:")
+
+	if hasTasksNew {
 		o.tryApplyReplanOutput(res, req)
+	}
+
+	if !hasTasksNew && len(cancels) == 0 {
+		uiTicket("💤", RoleReplanner, req.Ticket, "NO_ACTION", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
 	}
 }
 
@@ -718,6 +718,8 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 		o.writeReport()
 		o.StopCancel()
 	default:
+		uiSys("🦉", "OVERSEER_DONE", fmt.Sprintf("verdict=%s replans=%d", res.Verdict, len(res.ReplanLines)))
+
 		for _, line := range res.ReplanLines {
 			select {
 			case o.QReplanner <- ReplanRequest{Source: RoleOverseer, Ticket: 0, Reason: line}:
