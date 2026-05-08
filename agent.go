@@ -36,14 +36,16 @@ func jailRWPaths(home string) []string {
 	}
 }
 
-func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int, ws, stdin string) AgentResult {
+func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
+	wsAbs := ""
 	tmpdir := ""
 
-	if ws != "" {
-		tmpdir = filepath.Join(ws, ".tmp")
+	if wsID != "" {
+		wsAbs = wsPath(o.Root, wsID)
+		tmpdir = filepath.Join(wsAbs, ".tmp")
 		Throw(os.MkdirAll(tmpdir, 0755))
 	}
 
@@ -55,8 +57,8 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 
 	args := []string{}
 
-	if ws != "" {
-		args = append(args, "--rw="+ws)
+	if wsAbs != "" {
+		args = append(args, "--rw="+wsAbs)
 	}
 
 	if tmpdir != "" {
@@ -75,8 +77,8 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 
 	cmd := exec.CommandContext(ctx, o.JailBin, args...)
 
-	if ws != "" {
-		cmd.Dir = ws
+	if wsAbs != "" {
+		cmd.Dir = wsAbs
 	}
 
 	cmd.Stdin = strings.NewReader(stdin)
@@ -119,7 +121,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 	res := AgentResult{
 		Role:      role,
 		Ticket:    ticket,
-		Workspace: ws,
+		Workspace: wsID,
 		Stdout:    finalText.String(),
 		Stderr:    stderrBuf.String(),
 		RawStream: rawLines.String(),
