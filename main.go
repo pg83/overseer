@@ -49,7 +49,7 @@ func mainBody() {
 		ThrowFmt("--jail-bin %q: %v", *jailBin, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "overseer: claude=%s jail=%s\n", claudeAbs, jailAbs)
+	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s claude=%s jail=%s", *root, *trunk, claudeAbs, jailAbs))
 
 	o := NewOrchestrator(*root, *trunk, claudeAbs, jailAbs)
 
@@ -58,7 +58,7 @@ func mainBody() {
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
 		s := <-sigs
-		fmt.Fprintln(os.Stderr, "received signal:", s, "— stopping")
+		uiSys("🛑", "SIGNAL", "received "+s.String()+" — stopping")
 		o.StopCancel()
 	}()
 
@@ -66,5 +66,5 @@ func mainBody() {
 
 	<-o.Stopped
 
-	fmt.Fprintln(os.Stderr, "overseer: stopped")
+	uiSys("🔚", "STOP", "overseer halted")
 }

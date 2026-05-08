@@ -51,6 +51,7 @@ func (o *Orchestrator) bootstrapT0() {
 	o.Tickets = []Ticket{t0}
 	SaveTasks(o.Root, o.Tickets)
 	appendTicketLog(o.Root, 0, "CREATED", "by=orchestrator role=bootstrap")
+	uiTicket("🎫", "", 0, "CREATED", "BOOTSTRAP T-0")
 }
 
 func (o *Orchestrator) Run() {
@@ -78,6 +79,7 @@ func (o *Orchestrator) Run() {
 		if o.shouldFireOverseer() {
 			select {
 			case o.QOverseer <- OverseerRequest{Reason: "idle/low-open"}:
+				uiSys("📥", "→Q_overseer", "idle/low-open")
 			default:
 			}
 		}
@@ -211,6 +213,7 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 	o.Inflight[t.N] = run
 
 	appendTicketLog(o.Root, t.N, "AGENT_START", fmt.Sprintf("role=%s ws=%s", role, wsID))
+	uiTicket("🚀", role, t.N, "START", "ws="+wsID)
 
 	input := o.buildAgentInput(role, t.N, wsAbs)
 	prompt := loadPrompt(o.Root, role)
@@ -302,10 +305,13 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 	if plan == "" {
 		reason := fmt.Sprintf("tasker produced no plan: verdict=%s detail=%s", res.Verdict, res.Detail)
 		appendTicketLog(o.Root, res.Ticket, "TASKER_NO_PLAN", reason)
+		uiTicket("💀", RoleTasker, res.Ticket, "NO_PLAN", reason)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+		uiTicket("🪦", "", res.Ticket, "DISCARDED", "no plan from tasker")
 
 		select {
 		case o.QReplanner <- ReplanRequest{Source: RoleTasker, Ticket: res.Ticket, Reason: reason}:
+			uiTicket("📥", RoleTasker, res.Ticket, "→Q_replanner", reason)
 		default:
 		}
 
@@ -314,38 +320,49 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 
 	writePlan(o.Root, res.Ticket, plan)
 	appendTicketLog(o.Root, res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace+" summary="+res.Detail)
+	uiTicket("📝", RoleTasker, res.Ticket, "PLAN_WRITTEN", res.Detail)
 }
 
 func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 	switch res.Verdict {
 	case VerdictReady:
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_READY", "ws="+res.Workspace+" summary="+res.Detail)
+		uiTicket("✅", RoleDigger, res.Ticket, "READY", res.Detail)
 		o.spawnReviewerLocked(res.Ticket, res.Workspace)
 	case VerdictCantDo:
 		reason := "digger can't do: " + res.Detail
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_CANT_DO", res.Detail)
+		uiTicket("🛑", RoleDigger, res.Ticket, "CANT_DO", res.Detail)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+		uiTicket("🪦", "", res.Ticket, "DISCARDED", "digger gave up")
 
 		select {
 		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
+			uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
 		default:
 		}
 	case VerdictCrashed:
 		reason := "digger crashed: " + res.Detail
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_CRASHED", res.Detail)
+		uiTicket("💥", RoleDigger, res.Ticket, "CRASHED", res.Detail)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+		uiTicket("🪦", "", res.Ticket, "DISCARDED", "digger crashed")
 
 		select {
 		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
+			uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
 		default:
 		}
 	default:
 		reason := fmt.Sprintf("digger returned unclear verdict=%s detail=%s", res.Verdict, res.Detail)
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+		uiTicket("❓", RoleDigger, res.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", res.Verdict))
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+		uiTicket("🪦", "", res.Ticket, "DISCARDED", "digger unclear")
 
 		select {
 		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
+			uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
 		default:
 		}
 	}
@@ -355,20 +372,26 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 	switch res.Verdict {
 	case VerdictApprove:
 		appendTicketLog(o.Root, res.Ticket, "REVIEWER_APPROVE", res.Detail)
+		uiTicket("👍", RoleReviewer, res.Ticket, "APPROVE", res.Detail)
 
 		select {
 		case o.QMerger <- MergeRequest{Ticket: res.Ticket, Workspace: res.Workspace}:
+			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_merger", "ws="+res.Workspace)
 		default:
 		}
 	case VerdictRework:
 		appendTicketLog(o.Root, res.Ticket, "REVIEWER_REWORK", res.Detail)
+		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", res.Detail)
 		o.spawnDiggerSameWorkspaceLocked(res.Ticket, res.Workspace)
 	case VerdictDiscard:
 		appendTicketLog(o.Root, res.Ticket, "REVIEWER_DISCARD", res.Detail)
+		uiTicket("👎", RoleReviewer, res.Ticket, "DISCARD", res.Detail)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+		uiTicket("🪦", "", res.Ticket, "DISCARDED", "reviewer rejected")
 
 		select {
 		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "reviewer discarded: " + res.Detail}:
+			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", res.Detail)
 		default:
 		}
 	}
@@ -441,6 +464,8 @@ func (o *Orchestrator) replannerLoop() {
 }
 
 func (o *Orchestrator) runReplanner(req ReplanRequest) {
+	uiTicket("🚀", RoleReplanner, req.Ticket, "START", "reason="+req.Reason)
+
 	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
 	o.TrunkMu.Unlock()
@@ -482,6 +507,7 @@ func (o *Orchestrator) cancelTicket(n int) {
 
 	o.closeTicketLocked(n, CloseCancelled)
 	appendTicketLog(o.Root, n, "CANCELLED", "by=replanner")
+	uiTicket("🛑", RoleReplanner, n, "CANCELLED", "by replanner")
 	o.signalWake()
 }
 
@@ -506,14 +532,15 @@ func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest) 
 	})
 
 	if exc != nil {
-		fmt.Fprintln(os.Stderr, "replanner output rejected:", exc.Error())
 		appendTicketLog(o.Root, req.Ticket, "REPLAN_REJECTED", exc.Error())
+		uiTicket("❌", RoleReplanner, req.Ticket, "REJECTED", exc.Error())
 
 		feedback := fmt.Sprintf("previous replanner output invalid: %s\n\nREJECTED_OUTPUT:\n%s",
 			exc.Error(), res.Stdout)
 
 		select {
 		case o.QReplanner <- ReplanRequest{Source: RoleReplanner, Ticket: req.Ticket, Reason: feedback}:
+			uiTicket("📥", RoleReplanner, req.Ticket, "→Q_replanner", "retry after reject")
 		default:
 		}
 
@@ -521,6 +548,7 @@ func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest) 
 	}
 
 	appendTicketLog(o.Root, req.Ticket, "REPLAN_APPLIED", "by=replanner")
+	uiTicket("✨", RoleReplanner, req.Ticket, "APPLIED", "TASKS.md updated")
 	o.signalWake()
 }
 
@@ -536,6 +564,8 @@ func (o *Orchestrator) mergerLoop() {
 }
 
 func (o *Orchestrator) runMerger(req MergeRequest) {
+	uiTicket("🚀", RoleMerger, req.Ticket, "START", "ws="+req.Workspace)
+
 	o.TrunkMu.Lock()
 	prevGoals := o.GoalsHash
 	TrunkPull(o.Trunk)
@@ -583,19 +613,24 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 		if !ok {
 			appendTicketLog(o.Root, req.Ticket, "MERGE_FF_FAIL", out)
+			uiTicket("⚠️", RoleMerger, req.Ticket, "FF_FAIL", out)
 			o.spawnDiggerWithRebase(req.Ticket, req.Workspace, newHead, out)
 
 			return
 		}
 
 		appendTicketLog(o.Root, req.Ticket, "MERGED", "ws="+req.Workspace+" merger_ws="+mergerWS+" head="+newHead)
+		uiTicket("✅", RoleMerger, req.Ticket, "MERGED", "head="+newHead[:8])
 
 		o.Mu.Lock()
 		o.closeTicketLocked(req.Ticket, CloseMerged)
 		o.Mu.Unlock()
 
+		uiTicket("🏁", "", req.Ticket, "CLOSED", "MERGED")
+
 		select {
 		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: "merged"}:
+			uiTicket("📥", RoleMerger, req.Ticket, "→Q_replanner", "post-merge")
 		default:
 		}
 
@@ -603,6 +638,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 	case VerdictMergeFail, VerdictCrashed:
 		appendTicketLog(o.Root, req.Ticket, "MERGE_FAIL", res.Detail)
+		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", res.Detail)
 
 		o.TrunkMu.Lock()
 		head := CurrentTrunkHash(o.Trunk)
@@ -612,6 +648,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 	default:
 		appendTicketLog(o.Root, req.Ticket, "MERGE_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+		uiTicket("❓", RoleMerger, req.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", res.Verdict))
 	}
 }
 
@@ -654,6 +691,8 @@ func (o *Orchestrator) overseerLoop() {
 }
 
 func (o *Orchestrator) runOverseer(req OverseerRequest) {
+	uiSys("🚀", "OVERSEER_START", "reason="+req.Reason)
+
 	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
 	o.TrunkMu.Unlock()
@@ -675,13 +714,14 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 
 	switch res.Verdict {
 	case VerdictGoalsAchieved:
-		fmt.Fprintln(os.Stderr, "OVERSEER: GOALS_ACHIEVED — stopping")
+		uiSys("🎯", "GOALS_ACHIEVED", "stopping orchestrator")
 		o.writeReport()
 		o.StopCancel()
 	default:
 		for _, line := range res.ReplanLines {
 			select {
 			case o.QReplanner <- ReplanRequest{Source: RoleOverseer, Ticket: 0, Reason: line}:
+				uiSys("📥", "→Q_replanner", "from overseer: "+line)
 			default:
 			}
 		}
