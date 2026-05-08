@@ -38,11 +38,6 @@ func NewOrchestrator(root, trunk, claudeBin, jailBin string) *Orchestrator {
 		o.bootstrapT0()
 	}
 
-	if o.openCountLocked() <= 2 {
-		o.QOverseer <- OverseerRequest{Reason: "boot: low-open"}
-		uiSys("📥", "→Q_overseer", "boot")
-	}
-
 	return o
 }
 
