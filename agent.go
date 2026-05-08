@@ -19,25 +19,66 @@ import (
 //go:embed prompts/*.txt
 var embeddedPrompts embed.FS
 
-var (
-	reReplan       = regexp.MustCompile(`(?m)^REPLAN:\s*(.+)$`)
-	reVerdict      = regexp.MustCompile(`(?m)^VERDICT:\s*([A-Z_]+)(?::\s*(.+))?$`)
-	reTargetHash   = regexp.MustCompile(`(?m)^REBASE_TARGET:\s*([0-9a-f]+)$`)
-	reCancelTicket = regexp.MustCompile(`(?m)^CANCEL:\s*(\d+)$`)
-	reMessage      = regexp.MustCompile(`(?m)^MESSAGE:\s*(.+)$`)
+// Markdown-tolerant patterns: allow leading whitespace, headers, bold/italic/code, blockquote, list markers
+// before the keyword; allow markdown markers around the colon and around the captured value.
+const (
+	mdLineStart = `(?m)^[\s#*_` + "`" + `>\-]*`
+	mdSep       = `[*_` + "`" + `]*\s*[:：]\s*[*_` + "`" + `]*\s*`
+	mdLineEnd   = `[*_` + "`" + `\s]*$`
 )
 
-func jailRWPaths(home string) []string {
-	return []string{
+var (
+	reReplan       = regexp.MustCompile(mdLineStart + `REPLAN` + mdSep + `(.+?)` + mdLineEnd)
+	reVerdict      = regexp.MustCompile(mdLineStart + `VERDICT` + mdSep + `([A-Z_]+)(?:` + mdSep + `(.+?))?` + mdLineEnd)
+	reTargetHash   = regexp.MustCompile(mdLineStart + `REBASE_TARGET` + mdSep + `([0-9a-f]+)`)
+	reCancelTicket = regexp.MustCompile(mdLineStart + `CANCEL` + mdSep + `(\d+)`)
+	reMessage      = regexp.MustCompile(mdLineStart + `MESSAGE` + mdSep + `(.+?)` + mdLineEnd)
+)
+
+func jailRWPaths(home string, backend Backend) []string {
+	common := []string{
 		"/tmp",
-		filepath.Join(home, ".claude"),
-		filepath.Join(home, ".claude.json"),
 		filepath.Join(home, ".cache"),
 		filepath.Join(home, "go"),
 	}
+
+	switch backend {
+	case BackendClaude:
+		return append(common,
+			filepath.Join(home, ".claude"),
+			filepath.Join(home, ".claude.json"),
+		)
+	case BackendOpencode:
+		return append(common,
+			filepath.Join(home, ".config", "opencode"),
+			filepath.Join(home, ".local", "share", "opencode"),
+		)
+	}
+
+	return common
 }
 
 func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
+	var res AgentResult
+
+	exc := Try(func() {
+		res = o.runAgentInner(ctx, role, ticket, wsID, stdin)
+	})
+
+	if exc != nil {
+		return AgentResult{
+			Role:      role,
+			Ticket:    ticket,
+			Workspace: wsID,
+			Verdict:   VerdictCrashed,
+			Detail:    "runAgent: " + exc.Error(),
+		}
+	}
+
+	return res
+}
+
+func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
@@ -56,38 +97,47 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 		ThrowFmt("HOME env var is empty")
 	}
 
-	args := []string{}
+	rwArgs := []string{}
 
 	if wsAbs != "" {
-		args = append(args, "--rw="+wsAbs)
+		rwArgs = append(rwArgs, "--rw="+wsAbs)
 	}
 
 	if tmpdir != "" {
-		args = append(args, "--rw="+tmpdir)
+		rwArgs = append(rwArgs, "--rw="+tmpdir)
 	}
 
-	for _, p := range jailRWPaths(home) {
-		args = append(args, "--rw="+p)
+	for _, p := range jailRWPaths(home, o.Backend) {
+		rwArgs = append(rwArgs, "--rw="+p)
 	}
 
-	args = append(args, "--", o.ClaudeBin,
-		"-p",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--dangerously-skip-permissions")
+	model := o.Model
 
-	if role == RoleDigger {
-		args = append(args, "--model", "sonnet")
+	if model == "" && o.Backend == BackendClaude && role == RoleDigger {
+		model = "sonnet"
 	}
 
-	cmd := exec.CommandContext(ctx, o.JailBin, args...)
+	var cmd *exec.Cmd
+	var parseLine func(map[string]any, *strings.Builder, *streamErr, AgentRole, int)
+
+	switch o.Backend {
+	case BackendClaude:
+		cmd = buildClaudeCmd(ctx, o.JailBin, o.Harness, model, rwArgs, stdin)
+		parseLine = parseClaudeStreamLine
+	case BackendOpencode:
+		cmd = buildOpencodeCmd(ctx, o.JailBin, o.Harness, model, wsAbs, rwArgs, stdin)
+		parseLine = parseOpencodeStreamLine
+	default:
+		ThrowFmt("unknown backend %q", o.Backend)
+	}
 
 	if wsAbs != "" {
 		cmd.Dir = wsAbs
 	}
 
-	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = append(os.Environ(), "TMPDIR="+tmpdir)
+
+	argsCopy := append([]string{}, cmd.Args...)
 
 	stdoutPipe := Throw2(cmd.StdoutPipe())
 
@@ -97,6 +147,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 	Throw(cmd.Start())
 
 	var rawLines, finalText strings.Builder
+	var streamFault streamErr
 
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
@@ -112,13 +163,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 			continue
 		}
 
-		traceAgentEvent(role, ticket, ev)
-
-		if t, _ := ev["type"].(string); t == "result" {
-			if txt, _ := ev["result"].(string); txt != "" {
-				finalText.WriteString(txt)
-			}
-		}
+		parseLine(ev, &finalText, &streamFault, role, ticket)
 	}
 
 	err := cmd.Wait()
@@ -127,6 +172,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 		Role:      role,
 		Ticket:    ticket,
 		Workspace: wsID,
+		Args:      argsCopy,
 		Stdout:    finalText.String(),
 		Stderr:    stderrBuf.String(),
 		RawStream: rawLines.String(),
@@ -148,6 +194,13 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 		return res
 	}
 
+	if streamFault.set {
+		res.Verdict = VerdictCrashed
+		res.Detail = "stream error: " + streamFault.msg
+
+		return res
+	}
+
 	parseAgentOutput(&res)
 
 	for _, m := range res.Messages {
@@ -157,7 +210,131 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 	return res
 }
 
-func traceAgentEvent(role AgentRole, ticket int, ev map[string]any) {
+type streamErr struct {
+	set bool
+	msg string
+}
+
+func (s *streamErr) record(msg string) {
+	if !s.set {
+		s.set = true
+		s.msg = msg
+	}
+}
+
+func wrapJail(jail string, rwArgs []string, harness string, harnessArgs ...string) (string, []string) {
+	if jail == "" {
+		return harness, harnessArgs
+	}
+
+	args := append([]string{}, rwArgs...)
+	args = append(args, "--", harness)
+	args = append(args, harnessArgs...)
+
+	return jail, args
+}
+
+func buildClaudeCmd(ctx context.Context, jail, harness, model string, rwArgs []string, stdin string) *exec.Cmd {
+	harnessArgs := []string{
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--dangerously-skip-permissions",
+	}
+
+	if model != "" {
+		harnessArgs = append(harnessArgs, "--model", model)
+	}
+
+	bin, args := wrapJail(jail, rwArgs, harness, harnessArgs...)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+
+	return cmd
+}
+
+func buildOpencodeCmd(ctx context.Context, jail, harness, model, wsAbs string, rwArgs []string, prompt string) *exec.Cmd {
+	harnessArgs := []string{"run",
+		"--format", "json",
+		"--dangerously-skip-permissions"}
+
+	if model != "" {
+		harnessArgs = append(harnessArgs, "-m", model)
+	}
+
+	if wsAbs != "" {
+		harnessArgs = append(harnessArgs, "--dir", wsAbs)
+	}
+
+	bin, args := wrapJail(jail, rwArgs, harness, harnessArgs...)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Stdin = strings.NewReader(prompt)
+
+	return cmd
+}
+
+func parseClaudeStreamLine(ev map[string]any, finalText *strings.Builder, fault *streamErr, role AgentRole, ticket int) {
+	traceClaudeAssistant(role, ticket, ev)
+
+	if t, _ := ev["type"].(string); t == "result" {
+		if txt, _ := ev["result"].(string); txt != "" {
+			finalText.WriteString(txt)
+		}
+	}
+}
+
+func parseOpencodeStreamLine(ev map[string]any, finalText *strings.Builder, fault *streamErr, role AgentRole, ticket int) {
+	typ, _ := ev["type"].(string)
+
+	switch typ {
+	case "text":
+		part, _ := ev["part"].(map[string]any)
+
+		if part == nil {
+			return
+		}
+
+		txt, _ := part["text"].(string)
+
+		if txt == "" {
+			return
+		}
+
+		finalText.WriteString(txt)
+
+		if !strings.HasSuffix(txt, "\n") {
+			finalText.WriteByte('\n')
+		}
+	case "tool_use":
+		traceOpencodeToolUse(role, ticket, ev)
+	case "error":
+		fault.record(extractOpencodeErrorMsg(ev))
+	}
+}
+
+func extractOpencodeErrorMsg(ev map[string]any) string {
+	e, _ := ev["error"].(map[string]any)
+
+	if e == nil {
+		return "unknown"
+	}
+
+	if data, ok := e["data"].(map[string]any); ok {
+		if msg, _ := data["message"].(string); msg != "" {
+			return msg
+		}
+	}
+
+	if name, _ := e["name"].(string); name != "" {
+		return name
+	}
+
+	return "unknown"
+}
+
+func traceClaudeAssistant(role AgentRole, ticket int, ev map[string]any) {
 	typ, _ := ev["type"].(string)
 
 	if typ != "assistant" {
@@ -191,21 +368,39 @@ func traceAgentEvent(role AgentRole, ticket int, ev map[string]any) {
 	}
 }
 
+func traceOpencodeToolUse(role AgentRole, ticket int, ev map[string]any) {
+	tool, _ := ev["tool"].(string)
+
+	if tool == "" {
+		return
+	}
+
+	part, _ := ev["part"].(map[string]any)
+	state, _ := part["state"].(map[string]any)
+	input, _ := state["input"].(map[string]any)
+
+	ui("·", role, ticket, tool, summarizeToolInput(tool, input))
+}
+
 func summarizeToolInput(toolName string, input map[string]any) string {
 	if input == nil {
 		return ""
 	}
 
 	switch toolName {
-	case "Read", "Edit", "Write", "NotebookEdit":
+	case "Read", "Edit", "Write", "NotebookEdit", "read", "edit", "write":
 		if p, ok := input["file_path"].(string); ok {
 			return p
 		}
-	case "Bash":
+
+		if p, ok := input["path"].(string); ok {
+			return p
+		}
+	case "Bash", "bash":
 		if c, ok := input["command"].(string); ok {
 			return strings.ReplaceAll(c, "\n", " ⏎ ")
 		}
-	case "Grep", "Glob":
+	case "Grep", "Glob", "grep", "glob":
 		if p, ok := input["pattern"].(string); ok {
 			return p
 		}

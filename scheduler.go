@@ -11,13 +11,15 @@ import (
 
 const mergerQueueThrottle = 4
 
-func NewOrchestrator(root, trunk, claudeBin, jailBin string) *Orchestrator {
+func NewOrchestrator(root, trunk, harness string, backend Backend, model, jailBin string) *Orchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	o := &Orchestrator{
 		Root:       root,
 		Trunk:      trunk,
-		ClaudeBin:  claudeBin,
+		Harness:    harness,
+		Backend:    backend,
+		Model:      model,
 		JailBin:    jailBin,
 		Inflight:   map[int]*AgentRun{},
 		AgentSem:   make(chan struct{}, 6),

@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -23,8 +25,9 @@ func main() {
 func mainBody() {
 	root := flag.String("root", "", "orchestrator root (where TASKS.md, tickets/, workspaces/ live)")
 	trunk := flag.String("trunk", "", "path to git working tree being modified")
-	claudeBin := flag.String("claude-bin", "claude", "claude code binary (PATH-resolved or absolute)")
-	jailBin := flag.String("jail-bin", "jail", "jail binary (PATH-resolved or absolute)")
+	harness := flag.String("harness", "claude", "agent harness binary (basename must contain 'claude' or 'opencode')")
+	model := flag.String("model", "", "model name to pass to harness (opencode: -m <model>); empty = harness default")
+	jailBin := flag.String("jail-bin", "", "jail binary (PATH-resolved or absolute); empty = run harness directly")
 	Throw(flag.CommandLine.Parse(os.Args[1:]))
 
 	if *root == "" {
@@ -37,21 +40,39 @@ func mainBody() {
 
 	Throw(os.MkdirAll(*root, 0755))
 
-	claudeAbs, err := exec.LookPath(*claudeBin)
+	harnessAbs, err := exec.LookPath(*harness)
 
 	if err != nil {
-		ThrowFmt("--claude-bin %q: %v", *claudeBin, err)
+		ThrowFmt("--harness %q: %v", *harness, err)
 	}
 
-	jailAbs, err := exec.LookPath(*jailBin)
+	backend := detectBackend(harnessAbs)
 
-	if err != nil {
-		ThrowFmt("--jail-bin %q: %v", *jailBin, err)
+	jailAbs := ""
+
+	if *jailBin != "" {
+		jailAbs, err = exec.LookPath(*jailBin)
+
+		if err != nil {
+			ThrowFmt("--jail-bin %q: %v", *jailBin, err)
+		}
 	}
 
-	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s claude=%s jail=%s", *root, *trunk, claudeAbs, jailAbs))
+	jailDescr := jailAbs
 
-	o := NewOrchestrator(*root, *trunk, claudeAbs, jailAbs)
+	if jailDescr == "" {
+		jailDescr = "(none)"
+	}
+
+	modelDescr := *model
+
+	if modelDescr == "" {
+		modelDescr = "(default)"
+	}
+
+	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s harness=%s backend=%s model=%s jail=%s", *root, *trunk, harnessAbs, backend, modelDescr, jailDescr))
+
+	o := NewOrchestrator(*root, *trunk, harnessAbs, backend, *model, jailAbs)
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
@@ -67,4 +88,20 @@ func mainBody() {
 	<-o.Stopped
 
 	uiSys("🔚", "STOP", "overseer halted")
+}
+
+func detectBackend(harnessAbs string) Backend {
+	base := strings.ToLower(filepath.Base(harnessAbs))
+
+	if strings.Contains(base, "opencode") {
+		return BackendOpencode
+	}
+
+	if strings.Contains(base, "claude") {
+		return BackendClaude
+	}
+
+	ThrowFmt("--harness %q: basename must contain 'claude' or 'opencode'", harnessAbs)
+
+	return ""
 }

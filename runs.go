@@ -104,6 +104,22 @@ func concatPromptInput(prompt, input string) string {
 	return prompt + "\n\n" + input
 }
 
+func stripMDMarkers(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimLeft(s, "#*_` >\t-")
+	s = strings.TrimRight(s, " *_`\t:")
+
+	return strings.TrimSpace(s)
+}
+
+func isPlanHeader(line string) bool {
+	return strings.EqualFold(stripMDMarkers(line), "PLAN")
+}
+
+func isVerdictLine(line string) bool {
+	return reVerdict.MatchString(line)
+}
+
 func extractPlan(stdout string) string {
 	lines := strings.Split(stdout, "\n")
 
@@ -111,15 +127,13 @@ func extractPlan(stdout string) string {
 	end := len(lines)
 
 	for i, l := range lines {
-		t := strings.TrimSpace(l)
-
-		if start < 0 && t == "PLAN:" {
+		if start < 0 && isPlanHeader(l) {
 			start = i + 1
 
 			continue
 		}
 
-		if start >= 0 && strings.HasPrefix(t, "VERDICT:") {
+		if start >= 0 && isVerdictLine(l) {
 			end = i
 
 			break
@@ -137,7 +151,7 @@ func trimAtVerdict(body string) string {
 	lines := strings.Split(body, "\n")
 
 	for i, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "VERDICT:") {
+		if isVerdictLine(l) {
 			return strings.TrimSpace(strings.Join(lines[:i], "\n"))
 		}
 	}

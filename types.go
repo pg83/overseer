@@ -30,6 +30,13 @@ type Ticket struct {
 	CloseReason CloseReason
 }
 
+type Backend string
+
+const (
+	BackendClaude   Backend = "claude"
+	BackendOpencode Backend = "opencode"
+)
+
 type AgentRole string
 
 const (
@@ -75,6 +82,7 @@ type AgentResult struct {
 	Detail      string
 	ReplanLines []string
 	Messages    []string
+	Args        []string
 	Stdout      string
 	Stderr      string
 	RawStream   string
@@ -97,11 +105,13 @@ type OverseerRequest struct {
 }
 
 type Orchestrator struct {
-	Root        string
-	Trunk       string
-	GoalsHash   string
-	ClaudeBin   string
-	JailBin     string
+	Root      string
+	Trunk     string
+	GoalsHash string
+	Harness   string
+	Backend   Backend
+	Model     string
+	JailBin   string
 
 	Mu       sync.Mutex
 	TrunkMu  sync.Mutex
