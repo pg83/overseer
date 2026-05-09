@@ -441,9 +441,14 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 		o.recordEventLocked(res.Ticket, "REVIEWER_REWORK", detail)
 		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", detail)
 
-		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleReviewer, Ticket: res.Ticket, Reason: fmt.Sprintf("REWORK on T-%d: %s", res.Ticket, detail)}:
-		default:
+		bounce := o.bumpBounceLocked(res.Ticket)
+
+		if bounce > 0 && bounce%bounceReplanInterval == 0 {
+			select {
+			case o.QReplanner <- ReplanRequest{Source: RoleReviewer, Ticket: res.Ticket, Reason: fmt.Sprintf("REWORK on T-%d (bounce=%d): %s", res.Ticket, bounce, detail)}:
+				uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", fmt.Sprintf("bounce=%d", bounce))
+			default:
+			}
 		}
 
 		o.spawnDiggerSameWorkspaceLocked(res.Ticket, res.Workspace)
@@ -890,6 +895,11 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		if !ok {
 			o.recordEvent(req.Ticket, "MERGE_FF_FAIL", out)
 			uiTicket("⚠️", RoleMerger, req.Ticket, "FF_FAIL", out)
+
+			o.Mu.Lock()
+			o.bumpBounceLocked(req.Ticket)
+			o.Mu.Unlock()
+
 			o.spawnDiggerWithRebase(req.Ticket, req.Workspace, newHead, out)
 
 			return
@@ -916,9 +926,16 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		o.recordEvent(req.Ticket, "MERGE_FAIL", detail)
 		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", detail)
 
-		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: fmt.Sprintf("MERGE_FAIL on T-%d: %s", req.Ticket, detail)}:
-		default:
+		o.Mu.Lock()
+		bounce := o.bumpBounceLocked(req.Ticket)
+		o.Mu.Unlock()
+
+		if bounce > 0 && bounce%bounceReplanInterval == 0 {
+			select {
+			case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: fmt.Sprintf("MERGE_FAIL on T-%d (bounce=%d): %s", req.Ticket, bounce, detail)}:
+				uiTicket("📥", RoleMerger, req.Ticket, "→Q_replanner", fmt.Sprintf("bounce=%d", bounce))
+			default:
+			}
 		}
 
 		head := CurrentTrunkHash(o.Trunk)

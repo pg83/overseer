@@ -211,3 +211,27 @@ func (o *Orchestrator) recordEvent(n int, kind, detail string) {
 
 	o.recordEventLocked(n, kind, detail)
 }
+
+// bumpBounceLocked increments ticket n's BounceCount and persists. Returns the new
+// value (0 if the ticket isn't in the table). Caller must hold o.Mu.
+func (o *Orchestrator) bumpBounceLocked(n int) int {
+	for i := range o.Tickets {
+		if o.Tickets[i].N != n {
+			continue
+		}
+
+		o.Tickets[i].BounceCount++
+		cnt := o.Tickets[i].BounceCount
+		SaveTasks(o.Root, o.Tickets)
+
+		return cnt
+	}
+
+	return 0
+}
+
+// bounceReplanInterval is how often (in cycle-back iterations) the orchestrator
+// pings the replanner for a ticket bouncing through digger → reviewer → merger →
+// digger. The replanner is heavy and rarely productive every iteration; spawn it
+// at multiples of this interval so the loop has a chance to settle on its own.
+const bounceReplanInterval = 10

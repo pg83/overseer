@@ -14,8 +14,12 @@ Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 
 Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `CANCELLED`, `TASK_NEW`, `TASK_UPDATE`.
 
+Each ticket also has a `bounce_count` field — the orchestrator increments this on every cycle-back (`REVIEWER_REWORK`, `MERGE_FAIL`, `MERGE_FF_FAIL`). You're spawned every 10 bounces, so a ticket landing on your desk usually has `bounce_count` divisible by 10 (10, 20, 30, ...). The higher this number, the more stuck the ticket — anything ≥30 is a strong signal to restructure or cancel rather than nudge.
+
 Patterns to act on:
-- 3+ `REVIEWER_REWORK` entries → ticket scope too large or DESCR ambiguous → split.
+- `bounce_count ≥ 20` and still bouncing → ticket scope too large or DESCR ambiguous → split or cancel.
+- `bounce_count ≥ 40` → almost always abandon: cancel and recreate as smaller tickets with narrower DESCR.
+- 3+ `REVIEWER_REWORK` entries with low bounce → reviewer is being picky; check if feedback is actionable, may just need clearer DESCR.
 - 2+ `MERGE_FAIL` / `MERGE_FF_FAIL` → ticket touches code that other tickets keep changing → reorder (DEPS) or split out the contended piece.
 - `DIGGER_CANT_DO` referencing a missing prerequisite → add the prerequisite as a new ticket and DEP-link the original on it.
 - Long string of `AGENT_START` without a `DIGGER_READY` → the digger is failing silently → cancel and recreate with narrower DESCR.
