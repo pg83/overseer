@@ -279,11 +279,12 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 
 	delete(o.Inflight, res.Ticket)
 
-	// If the ticket was closed while the agent was running (typically via cancelTicket),
-	// drop the result entirely — don't spawn a follow-up reviewer/merger/digger and don't
-	// rewrite ticket state. The agent's work is logged in its jsonl; closeTicketLocked is
-	// idempotent, but calling spawn* here would launch goroutines on a dead ticket.
+	// If the ticket was closed while the agent was running (cancelTicket or replanner
+	// DISCARD via TASKS_NEW), drop the result and stop the pipeline at this transition.
+	// No follow-up spawn (reviewer/merger/digger), no state rewrite — also clear the
+	// InProgress flag (still set if replanner closed via TASKS_NEW which preserves it).
 	if t, ok := o.findTicketLocked(res.Ticket); ok && t.State == StateClosed {
+		o.setInProgressLocked(res.Ticket, false)
 		o.Mu.Unlock()
 		uiTicket("👻", res.Role, res.Ticket, "STALE", fmt.Sprintf("ticket already %s, dropping %s result", t.CloseReason, res.Verdict))
 
@@ -415,6 +416,12 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 	case VerdictRework:
 		o.recordEventLocked(res.Ticket, "REVIEWER_REWORK", res.Detail)
 		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", res.Detail)
+
+		select {
+		case o.QReplanner <- ReplanRequest{Source: RoleReviewer, Ticket: res.Ticket, Reason: fmt.Sprintf("REWORK on T-%d: %s", res.Ticket, res.Detail)}:
+		default:
+		}
+
 		o.spawnDiggerSameWorkspaceLocked(res.Ticket, res.Workspace)
 	case VerdictDiscard:
 		o.recordEventLocked(res.Ticket, "REVIEWER_DISCARD", res.Detail)
@@ -714,13 +721,16 @@ func (o *Orchestrator) mergerLoop() {
 func (o *Orchestrator) runMerger(req MergeRequest) {
 	o.Mu.Lock()
 	t, ok := o.findTicketLocked(req.Ticket)
-	o.Mu.Unlock()
 
 	if !ok || t.State == StateClosed {
+		o.setInProgressLocked(req.Ticket, false)
+		o.Mu.Unlock()
 		uiTicket("👻", RoleMerger, req.Ticket, "STALE", fmt.Sprintf("ticket %s before merger picked it up; skipping", t.CloseReason))
 
 		return
 	}
+
+	o.Mu.Unlock()
 
 	uiTicket("🚀", RoleMerger, req.Ticket, "START", "ws="+req.Workspace)
 
@@ -796,6 +806,11 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	case VerdictMergeFail, VerdictCrashed:
 		o.recordEvent(req.Ticket, "MERGE_FAIL", res.Detail)
 		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", res.Detail)
+
+		select {
+		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: fmt.Sprintf("MERGE_FAIL on T-%d: %s", req.Ticket, res.Detail)}:
+		default:
+		}
 
 		head := CurrentTrunkHash(o.Trunk)
 
