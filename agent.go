@@ -75,12 +75,24 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 			Role:      role,
 			Ticket:    ticket,
 			Workspace: wsID,
-			Verdict:   VerdictCrashed,
-			Detail:    "runAgent: " + exc.Error(),
+			Events: []map[string]any{
+				crashEvent("runAgent: " + exc.Error()),
+			},
 		}
 	}
 
 	return res
+}
+
+// crashEvent synthesizes a verdict event of kind CRASHED. Appended to res.Events when
+// the harness exits non-zero, the harness emits a stream-level error, or runAgentInner
+// itself panics — same shape as agent-emitted events so consumers walk one uniform list.
+func crashEvent(detail string) map[string]any {
+	return map[string]any{
+		"type":    "verdict",
+		"verdict": string(VerdictCrashed),
+		"detail":  detail,
+	}
 }
 
 func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
@@ -171,11 +183,13 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 		Ticket:    ticket,
 		Workspace: wsID,
 		Args:      argsCopy,
+		Stdin:     stdin,
 	}
 
 	defer func() {
+		v, d := lastVerdict(res.Events)
 		writeEvent(map[string]any{
-			"t": "finish", "verdict": string(res.Verdict), "detail": res.Detail,
+			"t": "finish", "verdict": string(v), "detail": d,
 		})
 	}()
 
@@ -187,6 +201,7 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 	Throw(cmd.Start())
 
 	var finalText strings.Builder
+	var rawStream bytes.Buffer
 	var streamFault streamErr
 
 	scanner := bufio.NewScanner(stdoutPipe)
@@ -194,6 +209,9 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
+
+		rawStream.Write(line)
+		rawStream.WriteByte('\n')
 
 		var ev map[string]any
 
@@ -213,36 +231,41 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 	}
 
 	res.Stdout = finalText.String()
-	res.Stderr = stderrBuf.String()
+	res.RawStream = rawStream.String()
+	res.Events = parseEvents(res.Stdout)
 
 	if err != nil {
 		var ee *exec.ExitError
+		detail := fmt.Sprintf("wait: %v", err)
 
 		if errors.As(err, &ee) {
-			res.Verdict = VerdictCrashed
-			res.Detail = fmt.Sprintf("exit=%d stderr=%s", ee.ExitCode(), stderrBuf.String())
-
-			return res
+			detail = fmt.Sprintf("exit=%d stderr=%s", ee.ExitCode(), stderrBuf.String())
 		}
 
-		res.Verdict = VerdictCrashed
-		res.Detail = fmt.Sprintf("wait: %v", err)
+		res.Events = append(res.Events, crashEvent(detail))
 
 		return res
 	}
 
 	if streamFault.set {
-		res.Verdict = VerdictCrashed
-		res.Detail = "stream error: " + streamFault.msg
+		res.Events = append(res.Events, crashEvent("stream error: "+streamFault.msg))
 
 		return res
 	}
 
-	parseAgentOutput(&res)
+	for _, ev := range res.Events {
+		if t, _ := ev["type"].(string); t != "message" {
+			continue
+		}
 
-	for _, m := range res.Messages {
-		uiTicket("💬", role, ticket, "MESSAGE", m)
-		appendMessage(o.Root, role, ticket, m)
+		text := messageText(ev)
+
+		if text == "" {
+			continue
+		}
+
+		uiTicket("💬", role, ticket, "MESSAGE", text)
+		appendMessage(o.Root, role, ticket, text)
 	}
 
 	return res
@@ -453,13 +476,16 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 	return ""
 }
 
-// parseAgentOutput scans res.Stdout line-by-line for embedded JSON events. Agents emit
-// structured signals as single-line JSON objects whose `{` is at column 0 — anything
-// else (prose, tool traces, agent reasoning) is ignored. Each parsed event is dispatched
-// into res via applyAgentEvent. If no terminal verdict event was emitted, falls back to
-// VerdictNoAction.
-func parseAgentOutput(res *AgentResult) {
-	for _, line := range strings.Split(res.Stdout, "\n") {
+// parseEvents scans agent stdout line-by-line for embedded JSON events: any line whose
+// first character is `{` (column 0) is fed to json.Unmarshal; valid objects accumulate
+// in order. Lines that don't parse — prose, agent reasoning, tool traces — are dropped.
+// AgentResult holds the resulting slice as-is; per-role consumers walk it and pull the
+// event types they care about (see lastVerdict / messageText below + role-specific
+// extractors in scheduler.go).
+func parseEvents(stdout string) []map[string]any {
+	var out []map[string]any
+
+	for _, line := range strings.Split(stdout, "\n") {
 		if !strings.HasPrefix(line, "{") {
 			continue
 		}
@@ -470,92 +496,44 @@ func parseAgentOutput(res *AgentResult) {
 			continue
 		}
 
-		applyAgentEvent(res, ev)
+		out = append(out, ev)
 	}
 
-	if res.Verdict == "" {
-		res.Verdict = VerdictNoAction
-	}
+	return out
 }
 
-// applyAgentEvent dispatches one parsed JSON event into the AgentResult by `type`.
-// Later events of the same kind override earlier ones for single-valued fields
-// (verdict / plan / rebase_target / set_tasks); message / replan / cancel accumulate.
-func applyAgentEvent(res *AgentResult, ev map[string]any) {
-	typ, _ := ev["type"].(string)
+// lastVerdict returns the last `verdict` event in the stream — agents sometimes quote
+// VERDICT lines mid-thought (back when they were textual) or emit multiple verdicts;
+// the protocol says the FINAL verdict is authoritative. Falls back to NO_ACTION when
+// the stream contained no verdict event at all.
+func lastVerdict(events []map[string]any) (AgentVerdict, string) {
+	v := VerdictNoAction
+	d := ""
 
-	switch typ {
-	case "verdict":
-		v, _ := ev["verdict"].(string)
-		d, _ := ev["detail"].(string)
-		res.Verdict = AgentVerdict(strings.TrimSpace(v))
-		res.Detail = strings.TrimSpace(d)
-	case "message":
-		t, _ := ev["text"].(string)
-
-		if t == "" {
-			t, _ = ev["message"].(string)
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t != "verdict" {
+			continue
 		}
 
-		t = strings.TrimSpace(t)
-
-		if t != "" {
-			res.Messages = append(res.Messages, t)
-		}
-	case "replan":
-		r, _ := ev["reason"].(string)
-		r = strings.TrimSpace(r)
-
-		if r != "" {
-			res.ReplanLines = append(res.ReplanLines, r)
-		}
-	case "cancel":
-		switch n := ev["ticket"].(type) {
-		case float64:
-			res.Cancels = append(res.Cancels, int(n))
-		case string:
-			if x, err := parseTicketRef(n); err == nil {
-				res.Cancels = append(res.Cancels, x)
-			}
-		}
-	case "plan":
-		b, _ := ev["body"].(string)
-		res.PlanBody = b
-	case "rebase_target":
-		h, _ := ev["hash"].(string)
-		res.RebaseTarget = strings.TrimSpace(h)
-	case "set_tasks":
-		raw, _ := ev["tickets"].([]any)
-		var tickets []Ticket
-
-		for _, x := range raw {
-			b, err := json.Marshal(x)
-
-			if err != nil {
-				continue
-			}
-
-			var t Ticket
-
-			if err := json.Unmarshal(b, &t); err == nil {
-				tickets = append(tickets, t)
-			}
-		}
-
-		res.NewTickets = tickets
-		res.HasNewTickets = true
+		vs, _ := ev["verdict"].(string)
+		ds, _ := ev["detail"].(string)
+		v = AgentVerdict(strings.TrimSpace(vs))
+		d = strings.TrimSpace(ds)
 	}
+
+	return v, d
 }
 
-// parseTicketRef accepts either "42" or "T-42" forms.
-func parseTicketRef(s string) (int, error) {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "T-")
+// messageText extracts the human-readable body from a `message` event. Tolerates
+// either `text` (canonical) or `message` (alias) string fields.
+func messageText(ev map[string]any) string {
+	t, _ := ev["text"].(string)
 
-	var n int
-	_, err := fmt.Sscanf(s, "%d", &n)
+	if t == "" {
+		t, _ = ev["message"].(string)
+	}
 
-	return n, err
+	return strings.TrimSpace(t)
 }
 
 func loadPrompt(orchRoot string, role AgentRole) string {

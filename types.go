@@ -86,25 +86,22 @@ const (
 	VerdictCrashed         AgentVerdict = "CRASHED"
 )
 
+// AgentResult is pure transport: routing identity (Role/Ticket/Workspace), raw I/O
+// (Args/Stdin/Stdout/RawStream), and the parsed JSON events the agent emitted on
+// stdout. No role-specific fields — consumers walk Events and pull what they care
+// about (verdict, plan body, set_tasks, cancel, ...) themselves. See scheduler.go
+// for the per-role extractors and agent.go for parseEvents / lastVerdict helpers.
 type AgentResult struct {
-	Role        AgentRole
-	Ticket      int
-	Workspace   string
-	Verdict     AgentVerdict
-	Detail      string
-	ReplanLines []string
-	Messages    []string
-	Cancels     []int
-	RebaseTarget string
-	PlanBody    string
-
-	HasNewTickets bool
-	NewTickets    []Ticket
+	Role      AgentRole
+	Ticket    int
+	Workspace string
 
 	Args      []string
+	Stdin     string
 	Stdout    string
-	Stderr    string
 	RawStream string
+
+	Events []map[string]any
 }
 
 type ReplanRequest struct {

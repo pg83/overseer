@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -10,6 +11,32 @@ import (
 )
 
 const mergerQueueThrottle = 4
+
+// Generic event extractors used by more than one role handler. Role-specific extractors
+// (plan body, set_tasks, cancel) live close to their single consumer further down so
+// each consumer's knowledge of the event vocabulary stays minimal.
+
+// eventReplans pulls every `replan` event's `reason` field (in emission order) out of
+// the agent's event stream. Used by the role handlers that fan replan nudges into the
+// replanner queue.
+func eventReplans(events []map[string]any) []string {
+	var out []string
+
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t != "replan" {
+			continue
+		}
+
+		r, _ := ev["reason"].(string)
+		r = strings.TrimSpace(r)
+
+		if r != "" {
+			out = append(out, r)
+		}
+	}
+
+	return out
+}
 
 func NewOrchestrator(root, trunk, harness string, backend Backend, models map[string]string, jailBin string) *Orchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -286,12 +313,13 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 	if t, ok := o.findTicketLocked(res.Ticket); ok && t.State == StateClosed {
 		o.setInProgressLocked(res.Ticket, false)
 		o.Mu.Unlock()
-		uiTicket("👻", res.Role, res.Ticket, "STALE", fmt.Sprintf("ticket already %s, dropping %s result", t.CloseReason, res.Verdict))
+		v, _ := lastVerdict(res.Events)
+		uiTicket("👻", res.Role, res.Ticket, "STALE", fmt.Sprintf("ticket already %s, dropping %s result", t.CloseReason, v))
 
 		return
 	}
 
-	for _, line := range res.ReplanLines {
+	for _, line := range eventReplans(res.Events) {
 		select {
 		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: line}:
 		default:
@@ -312,11 +340,29 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 	o.signalWake()
 }
 
+// taskerPlanBody scans for the tasker's `plan` event and returns its `body` field.
+// Tasker-specific — only this handler cares about plan events.
+func taskerPlanBody(events []map[string]any) string {
+	body := ""
+
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t != "plan" {
+			continue
+		}
+
+		b, _ := ev["body"].(string)
+		body = b
+	}
+
+	return body
+}
+
 func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
-	plan := strings.TrimSpace(res.PlanBody)
+	verdict, detail := lastVerdict(res.Events)
+	plan := strings.TrimSpace(taskerPlanBody(res.Events))
 
 	if plan == "" {
-		reason := fmt.Sprintf("tasker produced no plan: verdict=%s detail=%s", res.Verdict, res.Detail)
+		reason := fmt.Sprintf("tasker produced no plan: verdict=%s detail=%s", verdict, detail)
 		o.recordEventLocked(res.Ticket, "TASKER_NO_PLAN", reason)
 		uiTicket("💀", RoleTasker, res.Ticket, "NO_PLAN", reason)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
@@ -332,8 +378,8 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 	}
 
 	writePlan(o.Root, res.Ticket, plan)
-	o.recordEventLocked(res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace+" summary="+res.Detail)
-	uiTicket("📝", RoleTasker, res.Ticket, "PLAN_WRITTEN", res.Detail)
+	o.recordEventLocked(res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace+" summary="+detail)
+	uiTicket("📝", RoleTasker, res.Ticket, "PLAN_WRITTEN", detail)
 
 	// Tasker done; ticket stays InProgress=true. scheduleReady won't pick it again,
 	// so spawn digger explicitly with a fresh workspace.
@@ -343,7 +389,9 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 }
 
 func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
-	switch res.Verdict {
+	verdict, detail := lastVerdict(res.Events)
+
+	switch verdict {
 	case VerdictReady:
 		// Structural sanity check: harness defaults often skip git commit unless explicitly
 		// asked. If the digger emitted READY but the branch has zero commits ahead of base,
@@ -360,13 +408,13 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 			return
 		}
 
-		o.recordEventLocked(res.Ticket, "DIGGER_READY", "ws="+res.Workspace+" summary="+res.Detail)
-		uiTicket("✅", RoleDigger, res.Ticket, "READY", res.Detail)
+		o.recordEventLocked(res.Ticket, "DIGGER_READY", "ws="+res.Workspace+" summary="+detail)
+		uiTicket("✅", RoleDigger, res.Ticket, "READY", detail)
 		o.spawnReviewerLocked(res.Ticket, res.Workspace)
 	case VerdictCantDo:
-		reason := "digger can't do: " + res.Detail
-		o.recordEventLocked(res.Ticket, "DIGGER_CANT_DO", res.Detail)
-		uiTicket("🛑", RoleDigger, res.Ticket, "CANT_DO", res.Detail)
+		reason := "digger can't do: " + detail
+		o.recordEventLocked(res.Ticket, "DIGGER_CANT_DO", detail)
+		uiTicket("🛑", RoleDigger, res.Ticket, "CANT_DO", detail)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
 		uiTicket("🪦", "", res.Ticket, "DISCARDED", "digger gave up")
 
@@ -376,9 +424,9 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 		default:
 		}
 	case VerdictCrashed:
-		reason := "digger crashed: " + res.Detail
-		o.recordEventLocked(res.Ticket, "DIGGER_CRASHED", res.Detail)
-		uiTicket("💥", RoleDigger, res.Ticket, "CRASHED", res.Detail)
+		reason := "digger crashed: " + detail
+		o.recordEventLocked(res.Ticket, "DIGGER_CRASHED", detail)
+		uiTicket("💥", RoleDigger, res.Ticket, "CRASHED", detail)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
 		uiTicket("🪦", "", res.Ticket, "DISCARDED", "digger crashed")
 
@@ -388,9 +436,9 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 		default:
 		}
 	default:
-		reason := fmt.Sprintf("digger returned unclear verdict=%s detail=%s", res.Verdict, res.Detail)
-		o.recordEventLocked(res.Ticket, "DIGGER_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
-		uiTicket("❓", RoleDigger, res.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", res.Verdict))
+		reason := fmt.Sprintf("digger returned unclear verdict=%s detail=%s", verdict, detail)
+		o.recordEventLocked(res.Ticket, "DIGGER_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
+		uiTicket("❓", RoleDigger, res.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", verdict))
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
 		uiTicket("🪦", "", res.Ticket, "DISCARDED", "digger unclear")
 
@@ -403,10 +451,12 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 }
 
 func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
-	switch res.Verdict {
+	verdict, detail := lastVerdict(res.Events)
+
+	switch verdict {
 	case VerdictApprove:
-		o.recordEventLocked(res.Ticket, "REVIEWER_APPROVE", res.Detail)
-		uiTicket("👍", RoleReviewer, res.Ticket, "APPROVE", res.Detail)
+		o.recordEventLocked(res.Ticket, "REVIEWER_APPROVE", detail)
+		uiTicket("👍", RoleReviewer, res.Ticket, "APPROVE", detail)
 
 		select {
 		case o.QMerger <- MergeRequest{Ticket: res.Ticket, Workspace: res.Workspace}:
@@ -414,32 +464,32 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 		default:
 		}
 	case VerdictRework:
-		o.recordEventLocked(res.Ticket, "REVIEWER_REWORK", res.Detail)
-		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", res.Detail)
+		o.recordEventLocked(res.Ticket, "REVIEWER_REWORK", detail)
+		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", detail)
 
 		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleReviewer, Ticket: res.Ticket, Reason: fmt.Sprintf("REWORK on T-%d: %s", res.Ticket, res.Detail)}:
+		case o.QReplanner <- ReplanRequest{Source: RoleReviewer, Ticket: res.Ticket, Reason: fmt.Sprintf("REWORK on T-%d: %s", res.Ticket, detail)}:
 		default:
 		}
 
 		o.spawnDiggerSameWorkspaceLocked(res.Ticket, res.Workspace)
 	case VerdictDiscard:
-		o.recordEventLocked(res.Ticket, "REVIEWER_DISCARD", res.Detail)
-		uiTicket("👎", RoleReviewer, res.Ticket, "DISCARD", res.Detail)
+		o.recordEventLocked(res.Ticket, "REVIEWER_DISCARD", detail)
+		uiTicket("👎", RoleReviewer, res.Ticket, "DISCARD", detail)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
 		uiTicket("🪦", "", res.Ticket, "DISCARDED", "reviewer rejected")
 
 		select {
-		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "reviewer discarded: " + res.Detail}:
-			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", res.Detail)
+		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "reviewer discarded: " + detail}:
+			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", detail)
 		default:
 		}
 	default:
-		reason := fmt.Sprintf("reviewer unclear verdict=%s detail=%s", res.Verdict, res.Detail)
+		reason := fmt.Sprintf("reviewer unclear verdict=%s detail=%s", verdict, detail)
 		o.recordEventLocked(res.Ticket, "REVIEWER_UNCLEAR", reason)
-		uiTicket("❓", RoleReviewer, res.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+		uiTicket("❓", RoleReviewer, res.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
-		uiTicket("🪦", "", res.Ticket, "DISCARDED", "reviewer "+string(res.Verdict))
+		uiTicket("🪦", "", res.Ticket, "DISCARDED", "reviewer "+string(verdict))
 
 		select {
 		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
@@ -561,17 +611,84 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 
 	res := o.runAgent(ctx, RoleReplanner, req.Ticket, wsID, stdin)
 
-	for _, n := range res.Cancels {
+	cancels := replannerCancels(res.Events)
+
+	for _, n := range cancels {
 		o.cancelTicket(n)
 	}
 
-	if res.HasNewTickets {
-		o.tryApplyReplanOutput(res, req)
+	newTickets, hasNew := replannerSetTasks(res.Events)
+
+	if hasNew {
+		o.tryApplyReplanOutput(res, req, newTickets)
 	}
 
-	if !res.HasNewTickets && len(res.Cancels) == 0 {
-		uiTicket("💤", RoleReplanner, req.Ticket, "NO_ACTION", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+	if !hasNew && len(cancels) == 0 {
+		verdict, detail := lastVerdict(res.Events)
+		uiTicket("💤", RoleReplanner, req.Ticket, "NO_ACTION", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
 	}
+}
+
+// replannerCancels pulls every `cancel` event's ticket number out of the replanner's
+// event stream. Replanner-private — no other role emits cancel events.
+func replannerCancels(events []map[string]any) []int {
+	var out []int
+
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t != "cancel" {
+			continue
+		}
+
+		switch n := ev["ticket"].(type) {
+		case float64:
+			out = append(out, int(n))
+		case string:
+			s := strings.TrimPrefix(strings.TrimSpace(n), "T-")
+
+			var x int
+
+			if _, err := fmt.Sscanf(s, "%d", &x); err == nil {
+				out = append(out, x)
+			}
+		}
+	}
+
+	return out
+}
+
+// replannerSetTasks pulls the LAST `set_tasks` event's `tickets` array out of the
+// replanner's event stream and re-marshals each element through the Ticket schema.
+// Returns (parsed, true) if at least one set_tasks event was present (even if its
+// array was empty or invalid); (nil, false) otherwise.
+func replannerSetTasks(events []map[string]any) ([]Ticket, bool) {
+	var tickets []Ticket
+	found := false
+
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t != "set_tasks" {
+			continue
+		}
+
+		found = true
+		raw, _ := ev["tickets"].([]any)
+		tickets = tickets[:0]
+
+		for _, x := range raw {
+			b, err := json.Marshal(x)
+
+			if err != nil {
+				continue
+			}
+
+			var t Ticket
+
+			if err := json.Unmarshal(b, &t); err == nil {
+				tickets = append(tickets, t)
+			}
+		}
+	}
+
+	return tickets, found
 }
 
 func (o *Orchestrator) cancelTicket(n int) {
@@ -589,9 +706,9 @@ func (o *Orchestrator) cancelTicket(n int) {
 	o.signalWake()
 }
 
-func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest) {
+func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest, newTickets []Ticket) {
 	exc := Try(func() {
-		newTickets := append([]Ticket{}, res.NewTickets...)
+		newTickets = append([]Ticket{}, newTickets...)
 		ValidateTasks(newTickets)
 
 		o.Mu.Lock()
@@ -753,14 +870,16 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 	res := o.runAgent(ctx, RoleMerger, req.Ticket, mergerWS, stdin)
 
-	for _, line := range res.ReplanLines {
+	for _, line := range eventReplans(res.Events) {
 		select {
 		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: line}:
 		default:
 		}
 	}
 
-	switch res.Verdict {
+	verdict, detail := lastVerdict(res.Events)
+
+	switch verdict {
 	case VerdictMerged:
 		FetchBranch(o.Trunk, mergerWSAbs, "ovs/"+mergerWS)
 		ok, out := FfMergeBranch(o.Trunk, "ovs/"+mergerWS)
@@ -792,21 +911,21 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		o.signalWake()
 
 	case VerdictMergeFail, VerdictCrashed:
-		o.recordEvent(req.Ticket, "MERGE_FAIL", res.Detail)
-		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", res.Detail)
+		o.recordEvent(req.Ticket, "MERGE_FAIL", detail)
+		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", detail)
 
 		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: fmt.Sprintf("MERGE_FAIL on T-%d: %s", req.Ticket, res.Detail)}:
+		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: fmt.Sprintf("MERGE_FAIL on T-%d: %s", req.Ticket, detail)}:
 		default:
 		}
 
 		head := CurrentTrunkHash(o.Trunk)
 
-		o.spawnDiggerWithRebase(req.Ticket, req.Workspace, head, res.Detail)
+		o.spawnDiggerWithRebase(req.Ticket, req.Workspace, head, detail)
 
 	default:
-		o.recordEvent(req.Ticket, "MERGE_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
-		uiTicket("❓", RoleMerger, req.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", res.Verdict))
+		o.recordEvent(req.Ticket, "MERGE_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
+		uiTicket("❓", RoleMerger, req.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", verdict))
 
 		o.Mu.Lock()
 		o.setInProgressLocked(req.Ticket, false)
@@ -883,15 +1002,18 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 
 	res := o.runAgent(ctx, RoleOverseer, 0, wsID, stdin)
 
-	switch res.Verdict {
+	verdict, _ := lastVerdict(res.Events)
+	replans := eventReplans(res.Events)
+
+	switch verdict {
 	case VerdictGoalsAchieved:
 		uiSys("🎯", "GOALS_ACHIEVED", "stopping orchestrator")
 		o.writeReport()
 		o.StopCancel()
 	default:
-		uiSys("🦉", "OVERSEER_DONE", fmt.Sprintf("verdict=%s replans=%d", res.Verdict, len(res.ReplanLines)))
+		uiSys("🦉", "OVERSEER_DONE", fmt.Sprintf("verdict=%s replans=%d", verdict, len(replans)))
 
-		for _, line := range res.ReplanLines {
+		for _, line := range replans {
 			select {
 			case o.QReplanner <- ReplanRequest{Source: RoleOverseer, Ticket: 0, Reason: line}:
 				uiSys("📥", "→Q_replanner", "from overseer: "+line)

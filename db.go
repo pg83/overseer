@@ -78,7 +78,8 @@ func SaveTasks(root string, tickets []Ticket) {
 
 // SerializeTasks renders the in-memory tickets as JSONL — same format the replanner
 // receives in CURRENT_TASKS. The replanner returns its replacement task list inside a
-// `set_tasks` JSON event whose `tickets` field is a parsed array (see applyAgentEvent).
+// `set_tasks` JSON event whose `tickets` field is a parsed array (see replannerSetTasks
+// in scheduler.go for the consumer side).
 func SerializeTasks(tickets []Ticket) string {
 	sorted := make([]Ticket, len(tickets))
 	copy(sorted, tickets)
