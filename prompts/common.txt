@@ -17,3 +17,5 @@ Don't use MESSAGE for:
 - sensitive data (anyone watching the orchestrator can see this)
 
 One MESSAGE per line; multi-line content should be split or summarised.
+
+The path `MESSAGES_LOG` (in your input header) points to the team's shared chat — every MESSAGE from every role across every ticket, in append-only `<ts>\t<role>\tT-<n>\t<text>` form. Read it (or grep it for your ticket / a teammate's role) when you want context on what others noticed; write to it indirectly by emitting your own `MESSAGE:` lines.

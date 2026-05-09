@@ -20,19 +20,26 @@ const (
 	CloseCancelled CloseReason = "CANCELLED"
 )
 
-type Ticket struct {
-	N           int
-	State       State
-	Descr       string
-	Prio        int
-	Deps        []int
-	Workspaces  []string
-	CloseReason CloseReason
+type TicketEvent struct {
+	Ts     string `json:"ts"`
+	Kind   string `json:"kind"`
+	Detail string `json:"detail,omitempty"`
+}
 
-	// In-memory only; never persisted to TASKS.md.
+type Ticket struct {
+	N           int           `json:"n"`
+	State       State         `json:"state"`
+	Descr       string        `json:"descr"`
+	Prio        int           `json:"prio"`
+	Deps        []int         `json:"deps,omitempty"`
+	Workspaces  []string      `json:"workspaces,omitempty"`
+	CloseReason CloseReason   `json:"close_reason,omitempty"`
+	Events      []TicketEvent `json:"events,omitempty"`
+
+	// In-memory only; never persisted.
 	// Set true when the ticket enters the work pipeline (tasker / digger / reviewer / merger),
 	// cleared only on terminal close. Source of truth for scheduleReady's "is this ticket busy".
-	InProgress bool
+	InProgress bool `json:"-"`
 }
 
 type Backend string

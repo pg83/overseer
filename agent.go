@@ -258,6 +258,7 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 
 	for _, m := range res.Messages {
 		uiTicket("💬", role, ticket, "MESSAGE", m)
+		appendMessage(o.Root, role, ticket, m)
 	}
 
 	return res

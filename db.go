@@ -1,200 +1,118 @@
 package main
 
 import (
-	"fmt"
+	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
+	"time"
 )
 
-const tasksFile = "TASKS.md"
+const tasksFile = "tasks.jsonl"
 
-func ParseTasks(data string) []Ticket {
+func tasksDBPath(orchRoot string) string {
+	return filepath.Join(orchRoot, tasksFile)
+}
+
+func LoadTasks(root string) []Ticket {
+	path := tasksDBPath(root)
+
+	f, err := os.Open(path)
+
+	if os.IsNotExist(err) {
+		return nil
+	}
+
+	Throw(err)
+
+	defer f.Close()
+
 	var tickets []Ticket
 
-	for _, block := range splitBlocks(data) {
-		t := parseBlock(block)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 64<<20)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+
+		var t Ticket
+		Throw(json.Unmarshal(line, &t))
 		tickets = append(tickets, t)
 	}
+
+	Throw(scanner.Err())
+
+	ValidateTasks(tickets)
 
 	return tickets
 }
 
-func splitBlocks(data string) []string {
-	var blocks []string
-	var cur []string
+func SaveTasks(root string, tickets []Ticket) {
+	ValidateTasks(tickets)
 
-	for _, line := range strings.Split(data, "\n") {
-		if strings.TrimSpace(line) == "---" {
-			if hasContent(cur) {
-				blocks = append(blocks, strings.Join(cur, "\n"))
-			}
-
-			cur = nil
-
-			continue
-		}
-
-		cur = append(cur, line)
-	}
-
-	if hasContent(cur) {
-		blocks = append(blocks, strings.Join(cur, "\n"))
-	}
-
-	return blocks
-}
-
-func hasContent(lines []string) bool {
-	for _, l := range lines {
-		if strings.TrimSpace(l) != "" {
-			return true
-		}
-	}
-
-	return false
-}
-
-func parseBlock(block string) Ticket {
-	t := Ticket{}
-
-	for _, line := range strings.Split(block, "\n") {
-		line = strings.TrimRight(line, "\r")
-
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-
-		idx := strings.Index(line, ":")
-
-		if idx <= 0 {
-			ThrowFmt("malformed K:V line: %q", line)
-		}
-
-		key := strings.TrimSpace(line[:idx])
-		val := strings.TrimSpace(line[idx+1:])
-
-		applyField(&t, key, val)
-	}
-
-	return t
-}
-
-func applyField(t *Ticket, key, val string) {
-	switch key {
-	case "N":
-		t.N = Throw2(strconv.Atoi(val))
-	case "STATE":
-		t.State = State(val)
-	case "DESCR":
-		t.Descr = val
-	case "PRIO":
-		t.Prio = Throw2(strconv.Atoi(val))
-	case "DEPS":
-		t.Deps = parseIntList(val)
-	case "WORKSPACES":
-		t.Workspaces = parseStringList(val)
-	case "CLOSE_REASON":
-		t.CloseReason = CloseReason(val)
-	default:
-		ThrowFmt("unknown field %q", key)
-	}
-}
-
-func parseIntList(s string) []int {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-
-	var out []int
-
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-
-		if p == "" {
-			continue
-		}
-
-		out = append(out, Throw2(strconv.Atoi(p)))
-	}
-
-	return out
-}
-
-func parseStringList(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-
-	var out []string
-
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-
-		if p == "" {
-			continue
-		}
-
-		out = append(out, p)
-	}
-
-	return out
-}
-
-func SerializeTasks(tickets []Ticket) string {
 	sorted := make([]Ticket, len(tickets))
 	copy(sorted, tickets)
-
 	sort.Slice(sorted, func(a, b int) bool {
 		return sorted[a].N < sorted[b].N
 	})
 
 	var sb strings.Builder
 
-	for i, t := range sorted {
-		if i > 0 {
-			sb.WriteString("---\n")
-		}
-
-		writeTicket(&sb, t)
+	for _, t := range sorted {
+		b := Throw2(json.Marshal(t))
+		sb.Write(b)
+		sb.WriteByte('\n')
 	}
 
-	if len(sorted) > 0 {
-		sb.WriteString("---\n")
+	path := tasksDBPath(root)
+	tmp := path + ".tmp"
+	Throw(os.WriteFile(tmp, []byte(sb.String()), 0644))
+	Throw(os.Rename(tmp, path))
+}
+
+// ParseTasks parses JSONL produced by the replanner inside a TASKS_NEW: block.
+func ParseTasks(data string) []Ticket {
+	var tickets []Ticket
+
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+
+		if line == "" {
+			continue
+		}
+
+		var t Ticket
+		Throw(json.Unmarshal([]byte(line), &t))
+		tickets = append(tickets, t)
+	}
+
+	return tickets
+}
+
+// SerializeTasks renders the in-memory tickets as JSONL — same format the replanner
+// receives in CURRENT_TASKS, same format it returns in TASKS_NEW.
+func SerializeTasks(tickets []Ticket) string {
+	sorted := make([]Ticket, len(tickets))
+	copy(sorted, tickets)
+	sort.Slice(sorted, func(a, b int) bool {
+		return sorted[a].N < sorted[b].N
+	})
+
+	var sb strings.Builder
+
+	for _, t := range sorted {
+		b := Throw2(json.Marshal(t))
+		sb.Write(b)
+		sb.WriteByte('\n')
 	}
 
 	return sb.String()
-}
-
-func writeTicket(sb *strings.Builder, t Ticket) {
-	fmt.Fprintf(sb, "N: %d\n", t.N)
-	fmt.Fprintf(sb, "STATE: %s\n", t.State)
-	fmt.Fprintf(sb, "DESCR: %s\n", t.Descr)
-	fmt.Fprintf(sb, "PRIO: %d\n", t.Prio)
-
-	if len(t.Deps) > 0 {
-		fmt.Fprintf(sb, "DEPS: %s\n", joinInts(t.Deps))
-	}
-
-	if len(t.Workspaces) > 0 {
-		fmt.Fprintf(sb, "WORKSPACES: %s\n", strings.Join(t.Workspaces, ", "))
-	}
-
-	if t.CloseReason != "" {
-		fmt.Fprintf(sb, "CLOSE_REASON: %s\n", t.CloseReason)
-	}
-}
-
-func joinInts(xs []int) string {
-	parts := make([]string, len(xs))
-
-	for i, x := range xs {
-		parts[i] = strconv.Itoa(x)
-	}
-
-	return strings.Join(parts, ", ")
 }
 
 func ValidateTasks(tickets []Ticket) {
@@ -286,29 +204,27 @@ func checkNoCycles(tickets []Ticket) {
 	}
 }
 
-func LoadTasks(root string) []Ticket {
-	path := filepath.Join(root, tasksFile)
+// recordEventLocked appends a TicketEvent to ticket n in-memory, persists tasks.jsonl,
+// and mirrors the same event into the per-ticket log.md (human-readable). Caller must
+// hold o.Mu. Use o.recordEvent for code paths that don't already hold the lock.
+func (o *Orchestrator) recordEventLocked(n int, kind, detail string) {
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
-	data, err := os.ReadFile(path)
-
-	if os.IsNotExist(err) {
-		return nil
+	for i := range o.Tickets {
+		if o.Tickets[i].N == n {
+			o.Tickets[i].Events = append(o.Tickets[i].Events, TicketEvent{
+				Ts: ts, Kind: kind, Detail: detail,
+			})
+		}
 	}
 
-	Throw(err)
-
-	tickets := ParseTasks(string(data))
-	ValidateTasks(tickets)
-
-	return tickets
+	SaveTasks(o.Root, o.Tickets)
+	appendTicketLogTs(o.Root, n, ts, kind, detail)
 }
 
-func SaveTasks(root string, tickets []Ticket) {
-	ValidateTasks(tickets)
+func (o *Orchestrator) recordEvent(n int, kind, detail string) {
+	o.Mu.Lock()
+	defer o.Mu.Unlock()
 
-	path := filepath.Join(root, tasksFile)
-	tmp := path + ".tmp"
-
-	Throw(os.WriteFile(tmp, []byte(SerializeTasks(tickets)), 0644))
-	Throw(os.Rename(tmp, path))
+	o.recordEventLocked(n, kind, detail)
 }
