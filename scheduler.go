@@ -422,18 +422,6 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 			uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
 		default:
 		}
-	case VerdictCrashed:
-		reason := "digger crashed: " + detail
-		o.recordEventLocked(res.Ticket, "DIGGER_CRASHED", detail)
-		uiTicket("💥", RoleDigger, res.Ticket, "CRASHED", detail)
-		o.closeTicketLocked(res.Ticket, CloseDiscarded)
-		uiTicket("🪦", "", res.Ticket, "DISCARDED", "digger crashed")
-
-		select {
-		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
-			uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
-		default:
-		}
 	default:
 		reason := fmt.Sprintf("digger returned unclear verdict=%s detail=%s", verdict, detail)
 		o.recordEventLocked(res.Ticket, "DIGGER_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
@@ -964,7 +952,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 		o.signalWake()
 
-	case VerdictMergeFail, VerdictCrashed:
+	case VerdictMergeFail:
 		o.recordEvent(req.Ticket, "MERGE_FAIL", detail)
 		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", detail)
 

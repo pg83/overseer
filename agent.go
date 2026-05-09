@@ -63,39 +63,163 @@ func jailRWPaths(home string, backend Backend) []string {
 	return common
 }
 
+// runAgent is the only entry-point consumers use. It guarantees:
+//
+//   - On success — returns an AgentResult whose Events came from the agent's own output
+//     (or empty Events if the run was cancelled mid-flight via ctx; consumers' STALE
+//     checks drop those).
+//   - On retryable transport failures (network glitch, rate limit, API quota) — retries
+//     internally with exponential backoff; consumer never sees the failure.
+//   - On any other failure — hard-stops the orchestrator process via fatal(). The user's
+//     invariant: agent-side failures never leak back as some "crashed" verdict; either
+//     they're transient and we paper over them, or they're real bugs and we surface them
+//     by killing the process.
+//
+// runAgentOnce communicates failures by Throw'ing an *agentFault. Cancellation by the
+// orchestrator (ctx.Done) is NOT a fault — runAgentOnce returns the partial result and
+// we propagate it up so the consumer's STALE check can drop it.
 func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
-	var res AgentResult
+	backoff := 5 * time.Second
+	maxBackoff := 60 * time.Second
 
-	exc := Try(func() {
-		res = o.runAgentInner(ctx, role, ticket, wsID, stdin)
-	})
+	for attempt := 1; ; attempt++ {
+		var res AgentResult
 
-	if exc != nil {
-		return AgentResult{
-			Role:      role,
-			Ticket:    ticket,
-			Workspace: wsID,
-			Events: []map[string]any{
-				crashEvent("runAgent: " + exc.Error()),
-			},
+		exc := Try(func() {
+			res = o.runAgentOnce(ctx, role, ticket, wsID, stdin)
+		})
+
+		if exc == nil {
+			return res
+		}
+
+		fault, ok := exc.AsError().(*agentFault)
+
+		if !ok {
+			o.fatal(fmt.Sprintf("runAgent panic [%s T-%d ws=%s attempt=%d]: %s",
+				role, ticket, wsID, attempt, exc.Error()))
+		}
+
+		retryable, why := classifyAgentFault(fault)
+
+		if !retryable {
+			o.fatal(fmt.Sprintf("agent failed non-retryably [%s T-%d ws=%s attempt=%d]: %s",
+				role, ticket, wsID, attempt, why))
+		}
+
+		uiTicket("⏳", role, ticket, "RETRY",
+			fmt.Sprintf("attempt=%d backoff=%s reason=%s", attempt, backoff, why))
+
+		select {
+		case <-ctx.Done():
+			return AgentResult{Role: role, Ticket: ticket, Workspace: wsID}
+		case <-time.After(backoff):
+		}
+
+		if backoff < maxBackoff {
+			backoff *= 2
+
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// agentFault is what runAgentOnce Throws when the harness invocation fails for a real
+// reason (non-zero exit, harness stream-level error, etc.). Carries enough signal for
+// classifyAgentFault to decide retryable vs. fatal.
+type agentFault struct {
+	exitCode int
+	stderr   string
+	stdout   string
+}
+
+func (f *agentFault) Error() string {
+	return fmt.Sprintf("agent fault: exit=%d stderr=%s", f.exitCode, truncate(f.stderr, 200))
+}
+
+// classifyAgentFault decides whether a one-attempt harness failure is worth retrying.
+// Whitelist of well-known transient signatures (rate limits, quota, common network
+// glitches) — everything else is treated as a hard stop on the principle that mystery
+// failures are likely real bugs in our config or code, not transient flakes.
+//
+// Grow these lists as production reveals new transient modes; keep the default strict
+// so we surface bugs rather than mask them.
+func classifyAgentFault(f *agentFault) (retryable bool, reason string) {
+	haystack := strings.ToLower(f.stderr + "\n" + f.stdout)
+
+	rateLimit := []string{
+		"rate limit",
+		"rate_limit",
+		"429 too many requests",
+		"too many requests",
+		"quota exceeded",
+		"credit balance",
+		"insufficient credit",
+		"out of credits",
+		"monthly limit",
+		"usage limit",
+	}
+
+	network := []string{
+		"connection refused",
+		"connection reset",
+		"i/o timeout",
+		"deadline exceeded",
+		"no route to host",
+		"temporary failure in name resolution",
+		"name resolution failed",
+		"tls handshake timeout",
+		"503 service unavailable",
+		"502 bad gateway",
+		"504 gateway timeout",
+	}
+
+	for _, p := range rateLimit {
+		if strings.Contains(haystack, p) {
+			return true, "rate-limit/quota: " + p
 		}
 	}
 
-	return res
-}
-
-// crashEvent synthesizes a verdict event of kind CRASHED. Appended to res.Events when
-// the harness exits non-zero, the harness emits a stream-level error, or runAgentInner
-// itself panics — same shape as agent-emitted events so consumers walk one uniform list.
-func crashEvent(detail string) map[string]any {
-	return map[string]any{
-		"type":    "verdict",
-		"verdict": string(VerdictCrashed),
-		"detail":  detail,
+	for _, p := range network {
+		if strings.Contains(haystack, p) {
+			return true, "transient network: " + p
+		}
 	}
+
+	return false, fmt.Sprintf("exit=%d stderr=%q", f.exitCode, truncate(f.stderr, 200))
 }
 
-func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+
+	return s[:n] + "..."
+}
+
+// fatal hard-stops the orchestrator. The user's invariant: any agent-harness failure
+// the classifier doesn't recognize as retryable is almost certainly a config or
+// programming bug we want to surface immediately, not loop on. Logs the reason,
+// signals shutdown to other goroutines, and exits the process (defers don't run).
+func (o *Orchestrator) fatal(reason string) {
+	uiSys("💀", "FATAL", reason)
+	fmt.Fprintf(os.Stderr, "FATAL: %s\n", reason)
+
+	if o.StopCancel != nil {
+		o.StopCancel()
+	}
+
+	os.Exit(1)
+}
+
+// runAgentOnce executes one harness invocation. On success returns the AgentResult
+// (Events come from the agent's own output). On orchestrator-driven cancellation
+// (ctx.Done) returns the partial result for the caller to propagate. On a real harness
+// failure Throws an *agentFault — the caller (runAgent) classifies and either retries
+// or hard-stops the process. Never returns a synthesized "crashed" verdict event.
+func (o *Orchestrator) runAgentOnce(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
@@ -235,22 +359,35 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 	res.Events = parseEvents(res.Stdout)
 
 	if err != nil {
-		var ee *exec.ExitError
-		detail := fmt.Sprintf("wait: %v", err)
-
-		if errors.As(err, &ee) {
-			detail = fmt.Sprintf("exit=%d stderr=%s", ee.ExitCode(), stderrBuf.String())
+		// ctx.Err() != nil means we (the orchestrator) killed the harness — replanner
+		// cancel op or shutdown. Not a fault; return the partial result and let the
+		// consumer's STALE check drop it.
+		if ctx.Err() != nil {
+			return res
 		}
 
-		res.Events = append(res.Events, crashEvent(detail))
+		fault := &agentFault{
+			stderr:   stderrBuf.String(),
+			stdout:   res.Stdout,
+			exitCode: -1,
+		}
 
-		return res
+		var ee *exec.ExitError
+
+		if errors.As(err, &ee) {
+			fault.exitCode = ee.ExitCode()
+		} else {
+			fault.stderr = fmt.Sprintf("%s\nwait error: %v", fault.stderr, err)
+		}
+
+		Throw(fault)
 	}
 
 	if streamFault.set {
-		res.Events = append(res.Events, crashEvent("stream error: "+streamFault.msg))
-
-		return res
+		Throw(&agentFault{
+			stderr: "stream error: " + streamFault.msg,
+			stdout: res.Stdout,
+		})
 	}
 
 	for _, ev := range res.Events {

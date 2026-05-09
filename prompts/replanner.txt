@@ -12,12 +12,12 @@ Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 
 ## How to spot a stuck ticket
 
-Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `DIGGER_CRASHED`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `CANCELLED`, `TASK_NEW`, `TASK_UPDATE`.
+Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `CANCELLED`, `TASK_NEW`, `TASK_UPDATE`.
 
 Patterns to act on:
 - 3+ `REVIEWER_REWORK` entries → ticket scope too large or DESCR ambiguous → split.
 - 2+ `MERGE_FAIL` / `MERGE_FF_FAIL` → ticket touches code that other tickets keep changing → reorder (DEPS) or split out the contended piece.
-- `DIGGER_CANT_DO` / `DIGGER_CRASHED` referencing a missing prerequisite → add the prerequisite as a new ticket and DEP-link the original on it.
+- `DIGGER_CANT_DO` referencing a missing prerequisite → add the prerequisite as a new ticket and DEP-link the original on it.
 - Long string of `AGENT_START` without a `DIGGER_READY` → the digger is failing silently → cancel and recreate with narrower DESCR.
 
 ## RUNS_DIR mining (deeper signals)

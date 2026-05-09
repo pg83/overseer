@@ -76,14 +76,13 @@ const (
 	VerdictApprove         AgentVerdict = "APPROVE"
 	VerdictRework          AgentVerdict = "REWORK"
 	VerdictDiscard         AgentVerdict = "DISCARD"
-	VerdictMerged          AgentVerdict = "MERGED"
-	VerdictMergeFail       AgentVerdict = "MERGE_FAIL"
-	VerdictPlanWritten     AgentVerdict = "PLAN_WRITTEN"
-	VerdictGoalsAchieved   AgentVerdict = "GOALS_ACHIEVED"
-	VerdictNoAction        AgentVerdict = "NO_ACTION"
-	VerdictReplanApplied   AgentVerdict = "REPLAN_APPLIED"
-	VerdictReplanInvalid   AgentVerdict = "REPLAN_INVALID"
-	VerdictCrashed         AgentVerdict = "CRASHED"
+	VerdictMerged        AgentVerdict = "MERGED"
+	VerdictMergeFail     AgentVerdict = "MERGE_FAIL"
+	VerdictPlanWritten   AgentVerdict = "PLAN_WRITTEN"
+	VerdictGoalsAchieved AgentVerdict = "GOALS_ACHIEVED"
+	VerdictNoAction      AgentVerdict = "NO_ACTION"
+	VerdictReplanApplied AgentVerdict = "REPLAN_APPLIED"
+	VerdictReplanInvalid AgentVerdict = "REPLAN_INVALID"
 )
 
 // AgentResult is pure transport: routing identity (Role/Ticket/Workspace), raw I/O
