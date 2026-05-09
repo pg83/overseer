@@ -10,6 +10,8 @@ Inputs:
 
 Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 
+Your cwd is a session-storage directory used by the harness to remember context across runs — do NOT read source there. `cd` to the WORKSPACE path passed in the input (or use absolute paths).
+
 ## How to spot a stuck ticket
 
 Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `CANCELLED`, `TASK_NEW`, `TASK_UPDATE`.

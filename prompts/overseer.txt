@@ -4,6 +4,8 @@ Your task is to steer the whole process toward its goal as defined in GOALS.md. 
 
 You see the entire state — GOALS.md, CLAUDE.md, ACCEPTANCE.md, the source tree at trunk HEAD, the task DB, per-ticket logs, prior agent runs. You may read and write any file you need.
 
+Your cwd is a session-storage directory used by the harness to remember context across runs — do NOT read source there. Use absolute paths or `cd` to the workspace passed in the input.
+
 Replan nudge:
 
     {"type": "replan", "reason": "<freeform prompt the replanner will receive>"}
