@@ -32,11 +32,22 @@ Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs c
 
 ## Output (typed JSON events)
 
-Emit one `task` event per change you want to make to the task DB. Three ops:
+To modify the task DB you write JSON event lines directly in your text response — see common.txt. There is no tool, no function call, no orchestrator API; the orchestrator parses your stdout for `{...}` lines. **You ARE the only mechanism that mutates the task DB. If you finish without emitting `task` events, the situation that triggered you stays unfixed.**
+
+Three ops, one event per change:
 
     {"type": "task", "op": "new",    "n": <int>, "descr": "<≤200ch single line>", "prio": 1..10, "deps": [<n>,...]}
     {"type": "task", "op": "update", "n": <int>, "descr": "...", "prio": ..., "deps": [...]}
     {"type": "task", "op": "cancel", "n": <int>, "reason": "<short why>"}
+
+Concrete example — say T-12 is stuck at "validate node count" because the underlying graph generator only produces 50 nodes when 3730 are expected. You diagnose: the real fix is splitting compilation into per-source nodes. You'd literally type these lines as part of your reply:
+
+    {"type": "task", "op": "cancel", "n": 12, "reason": "validation can't pass until generator emits per-source nodes"}
+    {"type": "task", "op": "new", "n": 25, "descr": "graph generator: emit one node per .cpp/.cc/.h source file", "prio": 8, "deps": []}
+    {"type": "task", "op": "new", "n": 26, "descr": "validate node count after per-source split (was T-12)", "prio": 6, "deps": [25]}
+    {"type": "verdict", "verdict": "REPLAN_APPLIED", "detail": "split T-12: per-source compile nodes blocked node-count validation"}
+
+Don't end with `NO_ACTION` because "no tool exists" — the tool IS writing the JSON. If you have a real plan, type it out.
 
 Semantics:
 
