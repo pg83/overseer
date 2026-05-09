@@ -661,33 +661,9 @@ func messageText(ev map[string]any) string {
 }
 
 func loadPrompt(role AgentRole) string {
-	common := loadCommonPrompt()
-
-	if common == "" {
-		return loadRolePrompt(role)
-	}
-
-	return loadRolePrompt(role) + "\n\n" + common
+	return loadEmbedded("prompts/"+string(role)+".txt") + "\n\n" + loadEmbedded("prompts/common.txt")
 }
 
-func loadRolePrompt(role AgentRole) string {
-	if data, err := embeddedPrompts.ReadFile("prompts/" + string(role) + ".txt"); err == nil {
-		return string(data)
-	}
-
-	return defaultPrompt(role)
-}
-
-func loadCommonPrompt() string {
-	if data, err := embeddedPrompts.ReadFile("prompts/common.txt"); err == nil {
-		return string(data)
-	}
-
-	return ""
-}
-
-func defaultPrompt(role AgentRole) string {
-	data := Throw2(embeddedPrompts.ReadFile("prompts/default.txt"))
-
-	return strings.ReplaceAll(string(data), "{{role}}", string(role))
+func loadEmbedded(path string) string {
+	return string(Throw2(embeddedPrompts.ReadFile(path)))
 }
