@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -65,20 +64,19 @@ func jailRWPaths(home string, backend Backend) []string {
 
 // runAgent is the only entry-point consumers use. It guarantees:
 //
-//   - On success — returns an AgentResult whose Events came from the agent's own output
-//     (or empty Events if the run was cancelled mid-flight via ctx; consumers' STALE
-//     checks drop those).
-//   - On retryable transport failures (network glitch, rate limit, API quota) — retries
-//     internally with exponential backoff; consumer never sees the failure.
-//   - On any other failure — hard-stops the orchestrator process via fatal(). The user's
-//     invariant: agent-side failures never leak back as some "crashed" verdict; either
-//     they're transient and we paper over them, or they're real bugs and we surface them
-//     by killing the process.
+//   - The harness always runs to completion. We never kill it from outside (no ctx
+//     cancellation, no signals). If the orchestrator wants to drop a ticket mid-flight,
+//     it closes the ticket; the agent finishes anyway, the result lands in AgentDone,
+//     and the consumer's STALE check drops it.
+//   - On retryable transport failures (rate limit, quota, network glitch) — retries
+//     internally with exponential backoff; the consumer never sees the failure.
+//   - On any other failure — hard-stops the orchestrator process via fatal(). The
+//     user's invariant: agent-side failures never leak back as some "crashed" verdict;
+//     either they're transient and we paper over them, or they're real bugs and we
+//     surface them by killing the process.
 //
-// runAgentOnce communicates failures by Throw'ing an *agentFault. Cancellation by the
-// orchestrator (ctx.Done) is NOT a fault — runAgentOnce returns the partial result and
-// we propagate it up so the consumer's STALE check can drop it.
-func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
+// runAgentOnce communicates failures by Throw'ing an *agentFault.
+func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
 
@@ -86,7 +84,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 		var res AgentResult
 
 		exc := Try(func() {
-			res = o.runAgentOnce(ctx, role, ticket, wsID, stdin)
+			res = o.runAgentOnce(role, ticket, wsID, stdin)
 		})
 
 		if exc == nil {
@@ -110,11 +108,7 @@ func (o *Orchestrator) runAgent(ctx context.Context, role AgentRole, ticket int,
 		uiTicket("⏳", role, ticket, "RETRY",
 			fmt.Sprintf("attempt=%d backoff=%s reason=%s", attempt, backoff, why))
 
-		select {
-		case <-ctx.Done():
-			return AgentResult{Role: role, Ticket: ticket, Workspace: wsID}
-		case <-time.After(backoff):
-		}
+		time.Sleep(backoff)
 
 		if backoff < maxBackoff {
 			backoff *= 2
@@ -215,11 +209,11 @@ func (o *Orchestrator) fatal(reason string) {
 }
 
 // runAgentOnce executes one harness invocation. On success returns the AgentResult
-// (Events come from the agent's own output). On orchestrator-driven cancellation
-// (ctx.Done) returns the partial result for the caller to propagate. On a real harness
-// failure Throws an *agentFault — the caller (runAgent) classifies and either retries
-// or hard-stops the process. Never returns a synthesized "crashed" verdict event.
-func (o *Orchestrator) runAgentOnce(ctx context.Context, role AgentRole, ticket int, wsID, stdin string) AgentResult {
+// (Events come from the agent's own output). On a real harness failure Throws an
+// *agentFault — the caller (runAgent) classifies and either retries or hard-stops the
+// process. Never returns a synthesized "crashed" verdict event. The harness is never
+// killed from outside — it always runs to completion, on the user's invariant.
+func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
@@ -263,10 +257,10 @@ func (o *Orchestrator) runAgentOnce(ctx context.Context, role AgentRole, ticket 
 
 	switch o.Backend {
 	case BackendClaude:
-		cmd = buildClaudeCmd(ctx, o.JailBin, o.Harness, model, rwArgs, stdin)
+		cmd = buildClaudeCmd(o.JailBin, o.Harness, model, rwArgs, stdin)
 		parseLine = parseClaudeStreamLine
 	case BackendOpencode:
-		cmd = buildOpencodeCmd(ctx, o.JailBin, o.Harness, model, wsAbs, rwArgs, stdin)
+		cmd = buildOpencodeCmd(o.JailBin, o.Harness, model, wsAbs, rwArgs, stdin)
 		parseLine = parseOpencodeStreamLine
 	default:
 		ThrowFmt("unknown backend %q", o.Backend)
@@ -359,13 +353,6 @@ func (o *Orchestrator) runAgentOnce(ctx context.Context, role AgentRole, ticket 
 	res.Events = parseEvents(res.Stdout)
 
 	if err != nil {
-		// ctx.Err() != nil means we (the orchestrator) killed the harness — replanner
-		// cancel op or shutdown. Not a fault; return the partial result and let the
-		// consumer's STALE check drop it.
-		if ctx.Err() != nil {
-			return res
-		}
-
 		fault := &agentFault{
 			stderr:   stderrBuf.String(),
 			stdout:   res.Stdout,
@@ -432,7 +419,7 @@ func wrapJail(jail string, rwArgs []string, harness string, harnessArgs ...strin
 	return jail, args
 }
 
-func buildClaudeCmd(ctx context.Context, jail, harness, model string, rwArgs []string, stdin string) *exec.Cmd {
+func buildClaudeCmd(jail, harness, model string, rwArgs []string, stdin string) *exec.Cmd {
 	harnessArgs := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -446,13 +433,13 @@ func buildClaudeCmd(ctx context.Context, jail, harness, model string, rwArgs []s
 
 	bin, args := wrapJail(jail, rwArgs, harness, harnessArgs...)
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 
 	return cmd
 }
 
-func buildOpencodeCmd(ctx context.Context, jail, harness, model, wsAbs string, rwArgs []string, prompt string) *exec.Cmd {
+func buildOpencodeCmd(jail, harness, model, wsAbs string, rwArgs []string, prompt string) *exec.Cmd {
 	harnessArgs := []string{"run",
 		"--format", "json",
 		"--dangerously-skip-permissions"}
@@ -467,7 +454,7 @@ func buildOpencodeCmd(ctx context.Context, jail, harness, model, wsAbs string, r
 
 	bin, args := wrapJail(jail, rwArgs, harness, harnessArgs...)
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	return cmd

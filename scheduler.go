@@ -47,7 +47,6 @@ func NewOrchestrator(root, trunk, harness string, backend Backend, models map[st
 		Backend:    backend,
 		Models:     models,
 		JailBin:    jailBin,
-		Inflight:   map[int]*AgentRun{},
 		AgentSem:   make(chan struct{}, 6),
 		QReplanner: make(chan ReplanRequest, 256),
 		QMerger:    make(chan MergeRequest, 256),
@@ -205,15 +204,6 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 
 	wsAbs := wsPath(o.Root, wsID)
 
-	ctx, cancel := context.WithCancel(o.StopCtx)
-	run := &AgentRun{
-		Role:      role,
-		Ticket:    t.N,
-		Workspace: wsID,
-		Cancel:    cancel,
-	}
-	o.Inflight[t.N] = run
-
 	o.recordEventLocked(t.N, "AGENT_START", fmt.Sprintf("role=%s ws=%s", role, wsID))
 	uiTicket("🚀", role, t.N, "START", "ws="+wsID)
 
@@ -222,8 +212,7 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		defer cancel()
-		res := o.runAgent(ctx, role, t.N, wsID, stdin)
+		res := o.runAgent(role, t.N, wsID, stdin)
 		o.AgentDone <- res
 	}()
 }
@@ -303,12 +292,10 @@ func (o *Orchestrator) setInProgressLocked(n int, v bool) {
 func (o *Orchestrator) handleAgentResult(res AgentResult) {
 	o.Mu.Lock()
 
-	delete(o.Inflight, res.Ticket)
-
-	// If the ticket was closed while the agent was running (replanner cancel op killed
-	// the goroutine but its in-flight result still landed here), drop the result and
-	// stop the pipeline at this transition. No follow-up spawn, no state rewrite —
-	// also clear the InProgress flag in case it survived the close path.
+	// If the ticket was closed while the agent was still running (replanner cancel op
+	// closed it; the agent finished anyway and its result landed here), drop the result
+	// and stop the pipeline at this transition. No follow-up spawn, no state rewrite —
+	// also clear InProgress in case it survived the close path.
 	if t, ok := o.findTicketLocked(res.Ticket); ok && t.State == StateClosed {
 		o.setInProgressLocked(res.Ticket, false)
 		o.Mu.Unlock()
@@ -519,15 +506,6 @@ func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 }
 
 func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
-	ctx, cancel := context.WithCancel(o.StopCtx)
-	run := &AgentRun{
-		Role:      RoleReviewer,
-		Ticket:    ticketN,
-		Workspace: ws,
-		Cancel:    cancel,
-	}
-	o.Inflight[ticketN] = run
-
 	uiTicket("🚀", RoleReviewer, ticketN, "START", "ws="+ws)
 
 	wsAbs := wsPath(o.Root, ws)
@@ -536,22 +514,12 @@ func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		defer cancel()
-		res := o.runAgent(ctx, RoleReviewer, ticketN, ws, stdin)
+		res := o.runAgent(RoleReviewer, ticketN, ws, stdin)
 		o.AgentDone <- res
 	}()
 }
 
 func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
-	ctx, cancel := context.WithCancel(o.StopCtx)
-	run := &AgentRun{
-		Role:      RoleDigger,
-		Ticket:    ticketN,
-		Workspace: ws,
-		Cancel:    cancel,
-	}
-	o.Inflight[ticketN] = run
-
 	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws)
 
 	wsAbs := wsPath(o.Root, ws)
@@ -561,8 +529,7 @@ func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		defer cancel()
-		res := o.runAgent(ctx, RoleDigger, ticketN, ws, stdin)
+		res := o.runAgent(RoleDigger, ticketN, ws, stdin)
 		o.AgentDone <- res
 	}()
 }
@@ -594,10 +561,7 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	prompt := loadPrompt(RoleReplanner)
 	stdin := concatPromptInput(prompt, input)
 
-	ctx, cancel := context.WithCancel(o.StopCtx)
-	defer cancel()
-
-	res := o.runAgent(ctx, RoleReplanner, req.Ticket, wsID, stdin)
+	res := o.runAgent(RoleReplanner, req.Ticket, wsID, stdin)
 
 	ops := replannerTaskOps(res.Events)
 
@@ -821,10 +785,9 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops
 		case "cancel":
 			canceledAny = true
 
-			if run, ok := o.Inflight[n]; ok {
-				run.Cancel()
-				delete(o.Inflight, n)
-			}
+			// We never kill the agent goroutine — it runs to completion and its result
+			// is dropped by handleAgentResult's STALE check. Closing the ticket here
+			// (already done by applyTaskOp) is the only state change we need.
 
 			detail := "by=replanner"
 
@@ -907,10 +870,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	prompt := loadPrompt(RoleMerger)
 	stdin := concatPromptInput(prompt, input)
 
-	ctx, cancel := context.WithCancel(o.StopCtx)
-	defer cancel()
-
-	res := o.runAgent(ctx, RoleMerger, req.Ticket, mergerWS, stdin)
+	res := o.runAgent(RoleMerger, req.Ticket, mergerWS, stdin)
 
 	for _, line := range eventReplans(res.Events) {
 		select {
@@ -980,15 +940,6 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut string) {
 	o.Mu.Lock()
 
-	ctx, cancel := context.WithCancel(o.StopCtx)
-	run := &AgentRun{
-		Role:      RoleDigger,
-		Ticket:    ticketN,
-		Workspace: ws,
-		Cancel:    cancel,
-	}
-	o.Inflight[ticketN] = run
-
 	short := target
 
 	if len(short) > 8 {
@@ -1007,8 +958,7 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 	o.Mu.Unlock()
 
 	go func() {
-		defer cancel()
-		res := o.runAgent(ctx, RoleDigger, ticketN, ws, stdin)
+		res := o.runAgent(RoleDigger, ticketN, ws, stdin)
 		o.AgentDone <- res
 	}()
 }
@@ -1039,10 +989,7 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 	prompt := loadPrompt(RoleOverseer)
 	stdin := concatPromptInput(prompt, input)
 
-	ctx, cancel := context.WithCancel(o.StopCtx)
-	defer cancel()
-
-	res := o.runAgent(ctx, RoleOverseer, 0, wsID, stdin)
+	res := o.runAgent(RoleOverseer, 0, wsID, stdin)
 
 	verdict, _ := lastVerdict(res.Events)
 	replans := eventReplans(res.Events)

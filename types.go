@@ -60,13 +60,6 @@ const (
 	RoleOverseer  AgentRole = "overseer"
 )
 
-type AgentRun struct {
-	Role      AgentRole
-	Ticket    int
-	Workspace string
-	Cancel    context.CancelFunc
-	Done      chan AgentResult
-}
 
 type AgentVerdict string
 
@@ -135,9 +128,8 @@ type Orchestrator struct {
 	// Empty string at every level falls through to backend's own default.
 	Models map[string]string
 
-	Mu       sync.Mutex
-	Tickets  []Ticket
-	Inflight map[int]*AgentRun
+	Mu      sync.Mutex
+	Tickets []Ticket
 
 	AgentSem chan struct{}
 
