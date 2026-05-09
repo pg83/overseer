@@ -36,10 +36,6 @@ type Harness interface {
 	// traces along the way.
 	ParseStreamLine(ev map[string]any, finalText *strings.Builder, fault *streamErr, role AgentRole, ticket int)
 
-	// AssistantText pulls the assistant's text out of one harness event for the
-	// runs.go prior-runs summarizer (which scans run jsonls offline).
-	AssistantText(ev map[string]any) string
-
 	// ClassifyFault decides whether a one-attempt failure of THIS harness is worth
 	// retrying. Different CLIs surface transient errors with different vocabulary
 	// (HTTP codes vs cloud-provider words vs Russian quasi-opencode messages); the

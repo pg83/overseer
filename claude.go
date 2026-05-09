@@ -65,16 +65,6 @@ func (c *Claude) ParseStreamLine(ev map[string]any, finalText *strings.Builder, 
 	}
 }
 
-func (c *Claude) AssistantText(ev map[string]any) string {
-	if t, _ := ev["type"].(string); t != "result" {
-		return ""
-	}
-
-	txt, _ := ev["result"].(string)
-
-	return txt
-}
-
 // ClassifyFault: Anthropic-side transient signatures plus the shared network set.
 // Grow the rate-limit / quota list as we observe new claude-code error signatures.
 func (c *Claude) ClassifyFault(f *agentFault) (bool, string) {

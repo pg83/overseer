@@ -19,10 +19,10 @@ func runsDir(orchRoot string) string {
 // only this stream; nothing else writes to or reads from per-run state.
 //
 // priorRunsForTicket aggregates assistant text + final verdict from prior runs of a ticket
-// for inclusion in the next prompt's PRIOR_RUNS section. Harness is consulted for the
-// per-backend AssistantText extractor — the run jsonls don't tag their backend (the
-// orchestrator never switches mid-run), so the active Harness is authoritative.
-func priorRunsForTicket(orchRoot string, ticketN int, harness Harness) string {
+// for inclusion in the next prompt's PRIOR_RUNS section. Past runs may have been driven
+// by different harnesses (per-role config), so the offline assistantText extractor is
+// generic over the formats both backends emit.
+func priorRunsForTicket(orchRoot string, ticketN int) string {
 	entries, err := os.ReadDir(runsDir(orchRoot))
 
 	if err != nil {
@@ -46,7 +46,7 @@ func priorRunsForTicket(orchRoot string, ticketN int, harness Harness) string {
 
 	for _, n := range matched {
 		path := filepath.Join(runsDir(orchRoot), n)
-		summary := summarizeRunJsonl(path, harness)
+		summary := summarizeRunJsonl(path)
 
 		if summary == "" {
 			continue
@@ -60,7 +60,7 @@ func priorRunsForTicket(orchRoot string, ticketN int, harness Harness) string {
 
 // summarizeRunJsonl scans a run's jsonl and returns the assistant's accumulated text plus
 // the final verdict line. Replanner/operator can grep the file directly for richer detail.
-func summarizeRunJsonl(path string, harness Harness) string {
+func summarizeRunJsonl(path string) string {
 	f, err := os.Open(path)
 
 	if err != nil {
@@ -91,7 +91,7 @@ func summarizeRunJsonl(path string, harness Harness) string {
 				continue
 			}
 
-			if txt := harness.AssistantText(ev); txt != "" {
+			if txt := assistantTextFromHarnessEv(ev); txt != "" {
 				sb.WriteString(txt)
 
 				if !strings.HasSuffix(txt, "\n") {
@@ -106,6 +106,31 @@ func summarizeRunJsonl(path string, harness Harness) string {
 	}
 
 	return sb.String()
+}
+
+// assistantTextFromHarnessEv pulls assistant text out of a harness event regardless of
+// which backend produced it. Claude (stream-json) emits `type:"result"` with a `result`
+// string at run end; opencode emits `type:"text"` with `part.text` per chunk. Generic
+// here on purpose — past runs of one ticket may span multiple harnesses.
+func assistantTextFromHarnessEv(ev map[string]any) string {
+	switch t, _ := ev["type"].(string); t {
+	case "result":
+		txt, _ := ev["result"].(string)
+
+		return txt
+	case "text":
+		part, _ := ev["part"].(map[string]any)
+
+		if part == nil {
+			return ""
+		}
+
+		txt, _ := part["text"].(string)
+
+		return txt
+	}
+
+	return ""
 }
 
 func concatPromptInput(prompt, input string) string {

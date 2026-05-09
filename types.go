@@ -105,20 +105,27 @@ type OverseerRequest struct {
 	Reason string
 }
 
+// HarnessModel pairs a Harness implementation with the model name to drive it. Empty
+// Model means "let Harness.DefaultModel pick for this role".
+type HarnessModel struct {
+	Harness Harness
+	Model   string
+}
+
 type Orchestrator struct {
 	Root      string
 	Trunk     string
 	GoalsHash string
-	Harness   Harness
 	JailBin   string
 
-	// Models is the model-resolution table. Lookup precedence (in modelForRole):
-	//   1. Models[<role-name>]      e.g. "tasker", "digger", "reviewer", ...
-	//   2. Models["think"]          for overseer / replanner / tasker
-	//   3. Models["work"]           for digger / reviewer
-	//   4. Models["default"]        from --model
-	// Empty string at every level falls through to Harness.DefaultModel(role).
-	Models map[string]string
+	// Bindings is the role → (harness, model) resolution table. Lookup precedence
+	// (in harnessModelForRole):
+	//   1. Bindings[<role-name>]   e.g. "tasker", "digger", "reviewer", ...
+	//   2. Bindings["think"]       for tasker / replanner / overseer
+	//   3. Bindings["work"]        for digger / reviewer
+	//   4. Bindings["default"]     from --harness
+	// "default" is required; the rest are optional overrides.
+	Bindings map[string]HarnessModel
 
 	Mu      sync.Mutex
 	Tickets []Ticket

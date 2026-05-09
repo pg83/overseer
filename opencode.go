@@ -74,22 +74,6 @@ func (o *Opencode) ParseStreamLine(ev map[string]any, finalText *strings.Builder
 	}
 }
 
-func (o *Opencode) AssistantText(ev map[string]any) string {
-	if t, _ := ev["type"].(string); t != "text" {
-		return ""
-	}
-
-	part, _ := ev["part"].(map[string]any)
-
-	if part == nil {
-		return ""
-	}
-
-	txt, _ := part["text"].(string)
-
-	return txt
-}
-
 // ClassifyFault: opencode/quasi_opencode-side transient signatures plus the shared
 // network set. Grow the rate-limit list as we observe new patterns from this CLI.
 func (o *Opencode) ClassifyFault(f *agentFault) (bool, string) {

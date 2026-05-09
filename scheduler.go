@@ -37,14 +37,13 @@ func eventReplans(events []map[string]any) []string {
 	return out
 }
 
-func NewOrchestrator(root, trunk string, harness Harness, models map[string]string, jailBin string) *Orchestrator {
+func NewOrchestrator(root, trunk string, bindings map[string]HarnessModel, jailBin string) *Orchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	o := &Orchestrator{
 		Root:       root,
 		Trunk:      trunk,
-		Harness:    harness,
-		Models:     models,
+		Bindings:   bindings,
 		JailBin:    jailBin,
 		AgentSem:   make(chan struct{}, 6),
 		QReplanner: make(chan ReplanRequest, 256),
@@ -216,18 +215,20 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 	}()
 }
 
-// agentSelfBlock identifies the agent to itself: which role it is, which model is driving
-// it, which harness backend. Goes at the top of every agent's input so the agent can use
-// it for self-aware decisions (e.g. "I'm running on a small model, keep edits cheap").
+// agentSelfBlock identifies the agent to itself: which role it is, which harness+model
+// is driving it. Goes at the top of every agent's input so the agent can make self-aware
+// decisions (e.g. "I'm a small model, keep edits cheap"). Roles can be bound to different
+// harness:model combinations via --<role>-harness, so this lookup is per-role.
 func (o *Orchestrator) agentSelfBlock(role AgentRole) string {
-	model := o.modelForRole(role)
+	hm := o.harnessModelForRole(role)
+	model := hm.resolveModel(role)
 
 	if model == "" {
 		model = "(harness default)"
 	}
 
 	return fmt.Sprintf("ROLE: %s\nMODEL: %s\nHARNESS: %s\nMESSAGES_LOG: %s\n",
-		role, model, o.Harness.Name(), messagesLogPath(o.Root))
+		role, model, hm.Harness.Name(), messagesLogPath(o.Root))
 }
 
 func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string) string {
@@ -253,7 +254,7 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string
 		fmt.Fprintf(&sb, "\nLOG:\n%s\n", string(data))
 	}
 
-	if prior := priorRunsForTicket(o.Root, ticketN, o.Harness); prior != "" {
+	if prior := priorRunsForTicket(o.Root, ticketN); prior != "" {
 		fmt.Fprintf(&sb, "\nPRIOR_RUNS (compact summaries — Read each LOG_FILE for the full reasoning stream if you need tool-by-tool detail):\n%s\n", prior)
 	}
 

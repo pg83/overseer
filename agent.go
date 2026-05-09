@@ -17,25 +17,46 @@ import (
 //go:embed prompts/*.txt
 var embeddedPrompts embed.FS
 
-// modelForRole resolves the model to use for a given role. Precedence:
-// per-role override → group (think/work) → global default → empty (harness picks).
-func (o *Orchestrator) modelForRole(role AgentRole) string {
-	if m := o.Models[string(role)]; m != "" {
-		return m
+// harnessModelForRole resolves the (harness, model) binding for a role. Precedence:
+//   1. per-role override   (--<role>-harness)
+//   2. group default       (--think-harness | --work-harness)
+//   3. global default      (--harness, always set)
+//
+// Empty Model in the result means "let the harness pick its own default for this role"
+// — caller falls back to harness.DefaultModel(role).
+func (o *Orchestrator) harnessModelForRole(role AgentRole) HarnessModel {
+	if hm, ok := o.Bindings[string(role)]; ok {
+		return hm
 	}
 
 	switch role {
 	case RoleTasker, RoleReplanner, RoleOverseer:
-		if m := o.Models["think"]; m != "" {
-			return m
+		if hm, ok := o.Bindings["think"]; ok {
+			return hm
 		}
 	case RoleDigger, RoleReviewer:
-		if m := o.Models["work"]; m != "" {
-			return m
+		if hm, ok := o.Bindings["work"]; ok {
+			return hm
 		}
 	}
 
-	return o.Models["default"]
+	if hm, ok := o.Bindings["default"]; ok {
+		return hm
+	}
+
+	ThrowFmt("no harness binding for role %q (and no default)", role)
+
+	return HarnessModel{}
+}
+
+// resolveModel picks the explicit model from the binding, or falls back to the
+// harness's per-role default ("" if the harness itself has no preference).
+func (hm HarnessModel) resolveModel(role AgentRole) string {
+	if hm.Model != "" {
+		return hm.Model
+	}
+
+	return hm.Harness.DefaultModel(role)
 }
 
 // runAgent is the only entry-point consumers use. It guarantees:
@@ -53,6 +74,8 @@ func (o *Orchestrator) modelForRole(role AgentRole) string {
 //
 // runAgentOnce communicates failures by Throw'ing an *agentFault.
 func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) AgentResult {
+	harness := o.harnessModelForRole(role).Harness
+
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
 
@@ -74,7 +97,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) 
 				role, ticket, wsID, attempt, exc.Error()))
 		}
 
-		retryable, why := o.Harness.ClassifyFault(fault)
+		retryable, why := harness.ClassifyFault(fault)
 
 		if !retryable {
 			o.fatal(fmt.Sprintf("agent failed non-retryably [%s T-%d ws=%s attempt=%d]: %s",
@@ -166,17 +189,16 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 		rwArgs = append(rwArgs, "--rw="+tmpdir)
 	}
 
-	for _, p := range o.Harness.JailRWPaths(home) {
+	hm := o.harnessModelForRole(role)
+	harness := hm.Harness
+
+	for _, p := range harness.JailRWPaths(home) {
 		rwArgs = append(rwArgs, "--rw="+p)
 	}
 
-	model := o.modelForRole(role)
+	model := hm.resolveModel(role)
 
-	if model == "" {
-		model = o.Harness.DefaultModel(role)
-	}
-
-	bin, args := wrapJail(o.JailBin, rwArgs, o.Harness.Bin(), o.Harness.Args(model, wsAbs))
+	bin, args := wrapJail(o.JailBin, rwArgs, harness.Bin(), harness.Args(model, wsAbs))
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(stdin)
@@ -254,7 +276,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 
 		writeEvent(map[string]any{"t": "harness", "ev": ev})
 
-		o.Harness.ParseStreamLine(ev, &finalText, &streamFault, role, ticket)
+		harness.ParseStreamLine(ev, &finalText, &streamFault, role, ticket)
 	}
 
 	err := cmd.Wait()
