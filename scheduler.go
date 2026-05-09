@@ -218,11 +218,8 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 // agentSelfBlock identifies the agent to itself: which role it is, which harness+model
 // is driving it. Goes at the top of every agent's input so the agent can make self-aware
 // decisions (e.g. "I'm a small model, keep edits cheap"). Roles can be bound to different
-// harness:model combinations via --<role>-harness, so this lookup is per-role.
-//
-// Includes a CWD note: the harness pins cwd to a stable per-session dir (so transcripts
-// resume across runs) — the agent must `cd "$WORKSPACE"` (or use absolute paths) before
-// any git / file operations on the actual project tree.
+// harness:model combinations via --<role>-harness, so this lookup is per-role. The
+// "cwd vs workspace" rule is explained once in common.txt — no need to repeat per-input.
 func (o *Orchestrator) agentSelfBlock(role AgentRole, ticket int) string {
 	hm := o.harnessModelForRole(role)
 	model := hm.resolveModel(role)
@@ -231,8 +228,8 @@ func (o *Orchestrator) agentSelfBlock(role AgentRole, ticket int) string {
 		model = "(harness default)"
 	}
 
-	return fmt.Sprintf("ROLE: %s\nMODEL: %s\nHARNESS: %s\nCWD: %s (session storage; cd to $WORKSPACE before git/file ops)\nMESSAGES_LOG: %s\n",
-		role, model, hm.Harness.Name(), o.sessionDirFor(role, ticket), messagesLogPath(o.Root))
+	return fmt.Sprintf("ROLE: %s\nMODEL: %s\nHARNESS: %s\nMESSAGES_LOG: %s\n",
+		role, model, hm.Harness.Name(), messagesLogPath(o.Root))
 }
 
 func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string) string {

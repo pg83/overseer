@@ -1,3 +1,9 @@
+## CWD vs WORKSPACE
+
+Your current working directory is a session-storage directory the harness uses to remember context across runs — it is NOT the project tree. Do NOT run git, read source, or write files there.
+
+Instead use the absolute path passed in your input (typically `WORKSPACE`, sometimes a role-specific name like `MERGER_WORKTREE`). Either `cd "$WORKSPACE"` first or pass paths explicitly to every command (`git -C "$WORKSPACE" ...`, absolute file paths to file tools).
+
 ## Output protocol — typed JSON events
 
 The orchestrator parses your reply line-by-line. Any line whose first character is `{` is fed to a JSON parser; valid JSON objects are dispatched as typed events. Everything else is treated as your private reasoning prose and ignored.
