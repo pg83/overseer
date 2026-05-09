@@ -1,21 +1,21 @@
-## Common: live chat with the operator
+## Output protocol — typed JSON events
 
-In addition to your role-specific output, you may include zero or more lines anywhere in your reply:
+The orchestrator parses your reply line-by-line. Any line whose first character is `{` is fed to a JSON parser; valid JSON objects are dispatched as typed events. Everything else is treated as your private reasoning prose and ignored.
 
-    MESSAGE: <free-form one-line text the operator should see on screen>
+Rules:
 
-These are surfaced live in the orchestrator's UI as chat messages from your agent. Use them for:
+- One event per line. The `{` MUST be at column 0 (no leading spaces, no markdown wrappers).
+- The whole event MUST fit on a single line — newlines inside string fields must be escaped as `\n`.
+- Unknown event types are silently dropped. Stick to the events documented for your role.
+- You can emit prose and events in any order; only events have semantic effect.
 
-- short status updates the operator might appreciate ("about to run integration tests, takes ~3 min")
-- surprises worth flagging ("this codebase has zero tests; adding some as part of this change")
-- questions you'd ask if you could ("the spec is ambiguous on X — picking interpretation Y, flagging for review")
-- noteworthy decisions ("renaming `cleanup` → `teardown` for consistency with the rest of the file")
+Common events available to every role:
 
-Don't use MESSAGE for:
-- routine per-tool progress (the operator already sees those traces)
-- the final verdict (use `VERDICT:` for that)
-- sensitive data (anyone watching the orchestrator can see this)
+    {"type": "message", "text": "<one-line note for the operator>"}
+    {"type": "replan", "reason": "<why the task DB needs adjustment>"}
 
-One MESSAGE per line; multi-line content should be split or summarised.
+`message` events are surfaced live in the orchestrator's UI as chat from your agent and appended to the team-wide `MESSAGES_LOG` (path in your input header). Use them for status, surprises, ambiguities, and decisions worth flagging — not routine tool progress, not the final verdict, not sensitive data. Multi-line content must be split into multiple `message` events or summarized; literal newlines must be escaped as `\n`.
 
-The path `MESSAGES_LOG` (in your input header) points to the team's shared chat — every MESSAGE from every role across every ticket, in append-only `<ts>\t<role>\tT-<n>\t<text>` form. Read it (or grep it for your ticket / a teammate's role) when you want context on what others noticed; write to it indirectly by emitting your own `MESSAGE:` lines.
+`replan` events queue a replanner spawn — emit when you notice the task DB itself needs adjustment (missing prerequisite, wrong split, etc.). You can still finish your own work afterwards.
+
+The path `MESSAGES_LOG` (in your input header) points to the team's shared chat — every `message` from every role across every ticket, in append-only `<ts>\t<role>\tT-<n>\t<text>` form. Read it (or grep it for your ticket / a teammate's role) when you want context on what others noticed; write to it indirectly by emitting `message` events.

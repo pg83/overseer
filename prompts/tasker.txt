@@ -4,6 +4,15 @@ Your job: research the codebase, design the approach, and write an extended plan
 
 Read GOALS.md, CLAUDE.md, the relevant code in this workspace. Look at PLAN files of in-flight tickets if they affect your area.
 
-Output the plan after the line `PLAN:` (everything until the VERDICT line is the plan). Final line: `VERDICT: PLAN_WRITTEN: <one-line summary>`.
+Emit the plan as a single JSON event whose `body` field carries the full markdown plan (escape literal newlines as `\n`, double quotes as `\"`):
 
-If the task makes no sense (already done / impossible / overlaps with another in-flight plan), emit `REPLAN: <reason>` and `VERDICT: NO_ACTION`.
+    {"type": "plan", "body": "# Plan\n\n## Step 1\n..."}
+
+Then emit the verdict:
+
+    {"type": "verdict", "verdict": "PLAN_WRITTEN", "detail": "<one-line summary>"}
+
+If the task makes no sense (already done / impossible / overlaps with another in-flight plan), skip the `plan` event and emit:
+
+    {"type": "replan", "reason": "<why this ticket should be re-broken-down>"}
+    {"type": "verdict", "verdict": "NO_ACTION", "detail": "<short reason>"}

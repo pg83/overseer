@@ -76,27 +76,9 @@ func SaveTasks(root string, tickets []Ticket) {
 	Throw(os.Rename(tmp, path))
 }
 
-// ParseTasks parses JSONL produced by the replanner inside a TASKS_NEW: block.
-func ParseTasks(data string) []Ticket {
-	var tickets []Ticket
-
-	for _, line := range strings.Split(data, "\n") {
-		line = strings.TrimSpace(line)
-
-		if line == "" {
-			continue
-		}
-
-		var t Ticket
-		Throw(json.Unmarshal([]byte(line), &t))
-		tickets = append(tickets, t)
-	}
-
-	return tickets
-}
-
 // SerializeTasks renders the in-memory tickets as JSONL — same format the replanner
-// receives in CURRENT_TASKS, same format it returns in TASKS_NEW.
+// receives in CURRENT_TASKS. The replanner returns its replacement task list inside a
+// `set_tasks` JSON event whose `tickets` field is a parsed array (see applyAgentEvent).
 func SerializeTasks(tickets []Ticket) string {
 	sorted := make([]Ticket, len(tickets))
 	copy(sorted, tickets)

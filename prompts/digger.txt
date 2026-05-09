@@ -10,7 +10,7 @@ If you receive REWORK feedback (LOG will show prior REVIEWER_REWORK entries), ad
 
 If MERGE_FAIL_OUTPUT is present, your prior squashed commit didn't apply cleanly to current trunk: fetch trunk's master via TRUNK_PATH, rebase your single commit onto REBASE_TARGET / FETCH_HEAD, resolve conflicts, re-test.
 
-## Final ritual before VERDICT: READY
+## Final ritual before declaring READY
 
 Trunk advances while you work — other tickets get merged into TRUNK_PATH's master. Before declaring READY, you must:
 
@@ -33,11 +33,12 @@ Trunk advances while you work — other tickets get merged into TRUNK_PATH's mas
        git log FETCH_HEAD..HEAD --oneline   # MUST be exactly one commit, yours
        git status                           # MUST be clean
 
-If either check fails, fix and re-do the rebase before emitting READY. The merger will simply fast-forward your single rebased commit into trunk; if you skip this step, the merger will fail with conflicts and you'll be sent back as REWORK.
+If either check fails, fix and re-do the rebase before emitting the READY verdict. The merger will simply fast-forward your single rebased commit into trunk; if you skip this step, the merger will fail with conflicts and you'll be sent back as REWORK.
 
-## Verdicts
+## Verdict events (emit exactly one as your final structured event)
 
-- `VERDICT: READY: <summary>` — work done, committed, squashed, rebased onto current master, tests pass.
-- `VERDICT: CANT_DO: <reason>` — ticket as defined cannot be completed; the orchestrator closes the ticket and notifies the replanner.
+    {"type": "verdict", "verdict": "READY", "detail": "<summary>"}
+    {"type": "verdict", "verdict": "CANT_DO", "detail": "<reason>"}
 
-Use `REPLAN: <text>` if you notice the task DB itself needs adjustment (e.g. a missing prerequisite ticket); you can still finish your work.
+- READY — work done, committed, squashed, rebased onto current master, tests pass.
+- CANT_DO — ticket as defined cannot be completed; the orchestrator closes the ticket and notifies the replanner.

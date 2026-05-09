@@ -30,26 +30,34 @@ Each run log is JSONL of `start` / `stdin` / `harness` / `stderr` / `finish` eve
 
 Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs containing "minor / follow-up / out of scope" (deferred work), DESCR vs shipped-implementation drift, side-findings ("by the way Y is broken") — turn into new OPEN tickets, cite the source log file in DESCR.
 
-## Output
+## Output (typed JSON events)
 
-Two channels:
+Emit any combination of:
 
-1. `CANCEL: <N>` — cancel an in-flight ticket (one per line, repeatable).
-2. `TASKS_NEW:` followed by the full new `tasks.jsonl` content — one ticket per line, JSON, replacement (not diff). Schema:
+    {"type": "cancel", "ticket": <N>}
 
-    `{"n": <int>, "state": "OPEN"|"CLOSED", "descr": "<≤200ch single line>", "prio": 1..10, "deps": [<n>,...], "close_reason": "MERGED"|"DISCARDED"|"CANCELLED" (only when state=CLOSED)}`
+  cancels an in-flight ticket (one event per ticket, repeatable).
 
-   You may **omit** `events` and `workspaces` — the orchestrator manages those and restores them from the prior state regardless of what you write. Don't include `events` in your output.
+    {"type": "set_tasks", "tickets": [<ticket-object>, <ticket-object>, ...]}
+
+  replaces the entire task DB with the supplied list. One single-line `set_tasks` event total — its `tickets` is a JSON array, each element is a ticket object with the schema:
+
+    {"n": <int>, "state": "OPEN"|"CLOSED", "descr": "<≤200ch single line>", "prio": 1..10, "deps": [<n>,...], "close_reason": "MERGED"|"DISCARDED"|"CANCELLED" (only when state=CLOSED)}
+
+  You may **omit** `events` and `workspaces` — the orchestrator manages those and restores them from the prior state regardless of what you write.
 
 ## Schema invariants (orchestrator validates and rejects on violation)
 
 - Preserve every prior `n` — never delete a ticket.
 - CLOSED tickets are immutable: same `state`, same `close_reason`. History.
-- Never set `close_reason: "MERGED"` on a previously-OPEN ticket — only the merger mints MERGED after a real ff into trunk. Use `DISCARDED` to drop, or emit `CANCEL: <N>` for in-flight.
+- Never set `close_reason: "MERGED"` on a previously-OPEN ticket — only the merger mints MERGED after a real ff into trunk. Use `DISCARDED` to drop, or emit a `cancel` event for in-flight.
 - DEPS reference existing N, no cycles, no self.
 - New ticket numbers extend the sequence (use `max(prior_n) + 1`, +2, ...).
 
-End with `VERDICT: REPLAN_APPLIED` (when `TASKS_NEW:` provided) or `VERDICT: NO_ACTION`.
+End with one verdict event:
+
+    {"type": "verdict", "verdict": "REPLAN_APPLIED", "detail": "<short summary>"}    # when set_tasks was emitted
+    {"type": "verdict", "verdict": "NO_ACTION",      "detail": "<short reason>"}     # otherwise
 
 ## When `CURRENT_TASKS` is empty (boot)
 

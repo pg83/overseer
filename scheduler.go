@@ -280,9 +280,9 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 	delete(o.Inflight, res.Ticket)
 
 	// If the ticket was closed while the agent was running (cancelTicket or replanner
-	// DISCARD via TASKS_NEW), drop the result and stop the pipeline at this transition.
+	// DISCARD via set_tasks), drop the result and stop the pipeline at this transition.
 	// No follow-up spawn (reviewer/merger/digger), no state rewrite — also clear the
-	// InProgress flag (still set if replanner closed via TASKS_NEW which preserves it).
+	// InProgress flag (still set if replanner closed via set_tasks which preserves it).
 	if t, ok := o.findTicketLocked(res.Ticket); ok && t.State == StateClosed {
 		o.setInProgressLocked(res.Ticket, false)
 		o.Mu.Unlock()
@@ -313,7 +313,7 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 }
 
 func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
-	plan := extractPlan(res.Stdout)
+	plan := strings.TrimSpace(res.PlanBody)
 
 	if plan == "" {
 		reason := fmt.Sprintf("tasker produced no plan: verdict=%s detail=%s", res.Verdict, res.Detail)
@@ -561,19 +561,15 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 
 	res := o.runAgent(ctx, RoleReplanner, req.Ticket, wsID, stdin)
 
-	cancels := ExtractCancelTickets(res.Stdout)
-
-	for _, n := range cancels {
+	for _, n := range res.Cancels {
 		o.cancelTicket(n)
 	}
 
-	hasTasksNew := strings.Contains(res.Stdout, "TASKS_NEW:")
-
-	if hasTasksNew {
+	if res.HasNewTickets {
 		o.tryApplyReplanOutput(res, req)
 	}
 
-	if !hasTasksNew && len(cancels) == 0 {
+	if !res.HasNewTickets && len(res.Cancels) == 0 {
 		uiTicket("💤", RoleReplanner, req.Ticket, "NO_ACTION", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
 	}
 }
@@ -594,16 +590,8 @@ func (o *Orchestrator) cancelTicket(n int) {
 }
 
 func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest) {
-	idx := strings.Index(res.Stdout, "TASKS_NEW:")
-
-	if idx < 0 {
-		return
-	}
-
-	body := trimAtVerdict(res.Stdout[idx+len("TASKS_NEW:"):])
-
 	exc := Try(func() {
-		newTickets := ParseTasks(body)
+		newTickets := append([]Ticket{}, res.NewTickets...)
 		ValidateTasks(newTickets)
 
 		o.Mu.Lock()

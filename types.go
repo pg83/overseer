@@ -94,10 +94,17 @@ type AgentResult struct {
 	Detail      string
 	ReplanLines []string
 	Messages    []string
-	Args        []string
-	Stdout      string
-	Stderr      string
-	RawStream   string
+	Cancels     []int
+	RebaseTarget string
+	PlanBody    string
+
+	HasNewTickets bool
+	NewTickets    []Ticket
+
+	Args      []string
+	Stdout    string
+	Stderr    string
+	RawStream string
 }
 
 type ReplanRequest struct {

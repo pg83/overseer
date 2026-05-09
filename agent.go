@@ -11,30 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
 
 //go:embed prompts/*.txt
 var embeddedPrompts embed.FS
-
-// Markdown-tolerant patterns: allow leading whitespace, headers, bold/italic/code, blockquote, list markers
-// before the keyword; allow markdown markers around the colon and around the captured value.
-const (
-	mdLineStart = `(?m)^[\s#*_` + "`" + `>\-]*`
-	mdSep       = `[*_` + "`" + `]*\s*[:：]\s*[*_` + "`" + `]*\s*`
-	mdLineEnd   = `[*_` + "`" + `\s]*$`
-)
-
-var (
-	reReplan       = regexp.MustCompile(mdLineStart + `REPLAN` + mdSep + `(.+?)` + mdLineEnd)
-	reVerdict      = regexp.MustCompile(mdLineStart + `VERDICT` + mdSep + `([A-Z_]+)(?:` + mdSep + `(.+?))?` + mdLineEnd)
-	reTargetHash   = regexp.MustCompile(mdLineStart + `REBASE_TARGET` + mdSep + `([0-9a-f]+)`)
-	reCancelTicket = regexp.MustCompile(mdLineStart + `CANCEL` + mdSep + `(\d+)`)
-	reMessage      = regexp.MustCompile(mdLineStart + `MESSAGE` + mdSep + `(.+?)\s*$`)
-)
 
 // modelForRole resolves the model to use for a given role. Precedence:
 // per-role override → group (think/work) → global default → empty (harness picks).
@@ -358,33 +340,12 @@ func parseOpencodeStreamLine(ev map[string]any, finalText *strings.Builder, faul
 			return
 		}
 
-		emitSayAsMessage(finalText, txt)
-
 		finalText.WriteString(txt)
-
-		if !strings.HasSuffix(txt, "\n") {
-			finalText.WriteByte('\n')
-		}
 	case "tool_use":
 		traceOpencodeToolUse(role, ticket, ev)
 	case "error":
 		fault.record(extractOpencodeErrorMsg(ev))
 	}
-}
-
-// emitSayAsMessage injects a synthetic `MESSAGE:` line into the agent's accumulated
-// stdout so the existing parseAgentOutput regex captures the text chunk like an
-// explicit MESSAGE — same downstream pipeline (UI + messages.txt), no duplication.
-func emitSayAsMessage(finalText *strings.Builder, txt string) {
-	collapsed := strings.ReplaceAll(strings.TrimSpace(txt), "\n", " ⏎ ")
-
-	if collapsed == "" {
-		return
-	}
-
-	finalText.WriteString("MESSAGE: ")
-	finalText.WriteString(collapsed)
-	finalText.WriteByte('\n')
 }
 
 func extractOpencodeErrorMsg(ev map[string]any) string {
@@ -438,7 +399,11 @@ func traceClaudeAssistant(finalText *strings.Builder, role AgentRole, ticket int
 			ui("·", role, ticket, name, summarizeToolInput(name, input))
 		case "text":
 			if txt, _ := block["text"].(string); txt != "" {
-				emitSayAsMessage(finalText, txt)
+				finalText.WriteString(txt)
+
+				if !strings.HasSuffix(txt, "\n") {
+					finalText.WriteByte('\n')
+				}
 			}
 		}
 	}
@@ -488,53 +453,109 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 	return ""
 }
 
+// parseAgentOutput scans res.Stdout line-by-line for embedded JSON events. Agents emit
+// structured signals as single-line JSON objects whose `{` is at column 0 — anything
+// else (prose, tool traces, agent reasoning) is ignored. Each parsed event is dispatched
+// into res via applyAgentEvent. If no terminal verdict event was emitted, falls back to
+// VerdictNoAction.
 func parseAgentOutput(res *AgentResult) {
-	for _, m := range reReplan.FindAllStringSubmatch(res.Stdout, -1) {
-		res.ReplanLines = append(res.ReplanLines, strings.TrimSpace(m[1]))
-	}
-
-	for _, m := range reMessage.FindAllStringSubmatch(res.Stdout, -1) {
-		res.Messages = append(res.Messages, strings.TrimSpace(m[1]))
-	}
-
-	// Take the LAST VERDICT line — the prompt instructs agents to emit verdict as the
-	// final line, but they sometimes quote/example earlier `VERDICT:` mid-thought.
-	verdicts := reVerdict.FindAllStringSubmatch(res.Stdout, -1)
-
-	if len(verdicts) > 0 {
-		m := verdicts[len(verdicts)-1]
-		res.Verdict = AgentVerdict(m[1])
-
-		if len(m) > 2 {
-			res.Detail = strings.TrimSpace(m[2])
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if !strings.HasPrefix(line, "{") {
+			continue
 		}
 
-		return
-	}
+		var ev map[string]any
 
-	res.Verdict = VerdictNoAction
-}
-
-func ExtractCancelTickets(text string) []int {
-	var out []int
-
-	for _, m := range reCancelTicket.FindAllStringSubmatch(text, -1) {
-		n, err := strconv.Atoi(m[1])
-
-		if err == nil {
-			out = append(out, n)
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
 		}
+
+		applyAgentEvent(res, ev)
 	}
 
-	return out
+	if res.Verdict == "" {
+		res.Verdict = VerdictNoAction
+	}
 }
 
-func ExtractRebaseTarget(text string) string {
-	if m := reTargetHash.FindStringSubmatch(text); m != nil {
-		return m[1]
-	}
+// applyAgentEvent dispatches one parsed JSON event into the AgentResult by `type`.
+// Later events of the same kind override earlier ones for single-valued fields
+// (verdict / plan / rebase_target / set_tasks); message / replan / cancel accumulate.
+func applyAgentEvent(res *AgentResult, ev map[string]any) {
+	typ, _ := ev["type"].(string)
 
-	return ""
+	switch typ {
+	case "verdict":
+		v, _ := ev["verdict"].(string)
+		d, _ := ev["detail"].(string)
+		res.Verdict = AgentVerdict(strings.TrimSpace(v))
+		res.Detail = strings.TrimSpace(d)
+	case "message":
+		t, _ := ev["text"].(string)
+
+		if t == "" {
+			t, _ = ev["message"].(string)
+		}
+
+		t = strings.TrimSpace(t)
+
+		if t != "" {
+			res.Messages = append(res.Messages, t)
+		}
+	case "replan":
+		r, _ := ev["reason"].(string)
+		r = strings.TrimSpace(r)
+
+		if r != "" {
+			res.ReplanLines = append(res.ReplanLines, r)
+		}
+	case "cancel":
+		switch n := ev["ticket"].(type) {
+		case float64:
+			res.Cancels = append(res.Cancels, int(n))
+		case string:
+			if x, err := parseTicketRef(n); err == nil {
+				res.Cancels = append(res.Cancels, x)
+			}
+		}
+	case "plan":
+		b, _ := ev["body"].(string)
+		res.PlanBody = b
+	case "rebase_target":
+		h, _ := ev["hash"].(string)
+		res.RebaseTarget = strings.TrimSpace(h)
+	case "set_tasks":
+		raw, _ := ev["tickets"].([]any)
+		var tickets []Ticket
+
+		for _, x := range raw {
+			b, err := json.Marshal(x)
+
+			if err != nil {
+				continue
+			}
+
+			var t Ticket
+
+			if err := json.Unmarshal(b, &t); err == nil {
+				tickets = append(tickets, t)
+			}
+		}
+
+		res.NewTickets = tickets
+		res.HasNewTickets = true
+	}
+}
+
+// parseTicketRef accepts either "42" or "T-42" forms.
+func parseTicketRef(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "T-")
+
+	var n int
+	_, err := fmt.Sscanf(s, "%d", &n)
+
+	return n, err
 }
 
 func loadPrompt(orchRoot string, role AgentRole) string {
@@ -577,5 +598,8 @@ func loadCommonPrompt(orchRoot string) string {
 }
 
 func defaultPrompt(role AgentRole) string {
-	return "You are the " + string(role) + " agent in an orchestrated coding system. Output VERDICT: <code>: <detail> as the final line. Use REPLAN: <text> to enqueue replanner."
+	return "You are the " + string(role) + " agent in an orchestrated coding system. " +
+		`Emit your final structured signal as a single-line JSON event at column 0, e.g. ` +
+		`{"type":"verdict","verdict":"<code>","detail":"<detail>"}. ` +
+		`Use {"type":"replan","reason":"<text>"} to enqueue the replanner.`
 }
