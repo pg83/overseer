@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -306,10 +305,10 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 
 	delete(o.Inflight, res.Ticket)
 
-	// If the ticket was closed while the agent was running (cancelTicket or replanner
-	// DISCARD via set_tasks), drop the result and stop the pipeline at this transition.
-	// No follow-up spawn (reviewer/merger/digger), no state rewrite — also clear the
-	// InProgress flag (still set if replanner closed via set_tasks which preserves it).
+	// If the ticket was closed while the agent was running (replanner cancel op killed
+	// the goroutine but its in-flight result still landed here), drop the result and
+	// stop the pipeline at this transition. No follow-up spawn, no state rewrite —
+	// also clear the InProgress flag in case it survived the close path.
 	if t, ok := o.findTicketLocked(res.Ticket); ok && t.State == StateClosed {
 		o.setInProgressLocked(res.Ticket, false)
 		o.Mu.Unlock()
@@ -505,9 +504,10 @@ func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 			continue
 		}
 
-		// Idempotent: if the ticket was already CLOSED (e.g. via cancelTicket → CANCELLED),
-		// keep the original CLOSE_REASON. A late-arriving result from a goroutine that was
-		// already cancelled must not rewrite history (CANCELLED → DISCARDED).
+		// Idempotent: if the ticket was already CLOSED (e.g. via replanner cancel op →
+		// CANCELLED), keep the original CLOSE_REASON. A late-arriving result from a
+		// goroutine that was already cancelled must not rewrite history (CANCELLED →
+		// DISCARDED).
 		if o.Tickets[i].State == StateClosed {
 			o.Tickets[i].InProgress = false
 
@@ -611,139 +611,175 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 
 	res := o.runAgent(ctx, RoleReplanner, req.Ticket, wsID, stdin)
 
-	cancels := replannerCancels(res.Events)
+	ops := replannerTaskOps(res.Events)
 
-	for _, n := range cancels {
-		o.cancelTicket(n)
-	}
-
-	newTickets, hasNew := replannerSetTasks(res.Events)
-
-	if hasNew {
-		o.tryApplyReplanOutput(res, req, newTickets)
-	}
-
-	if !hasNew && len(cancels) == 0 {
+	if len(ops) == 0 {
 		verdict, detail := lastVerdict(res.Events)
 		uiTicket("💤", RoleReplanner, req.Ticket, "NO_ACTION", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
+
+		return
 	}
+
+	o.applyReplannerOps(res, req, ops)
 }
 
-// replannerCancels pulls every `cancel` event's ticket number out of the replanner's
-// event stream. Replanner-private — no other role emits cancel events.
-func replannerCancels(events []map[string]any) []int {
-	var out []int
+// replannerTaskOps pulls every `task` event out of the replanner's stream, in emission
+// order. Replanner-private vocabulary: each event has an `op` field of "new" / "update"
+// / "cancel" plus per-op fields (n, descr, prio, deps, reason). No other role emits
+// task events.
+func replannerTaskOps(events []map[string]any) []map[string]any {
+	var out []map[string]any
 
 	for _, ev := range events {
-		if t, _ := ev["type"].(string); t != "cancel" {
-			continue
-		}
-
-		switch n := ev["ticket"].(type) {
-		case float64:
-			out = append(out, int(n))
-		case string:
-			s := strings.TrimPrefix(strings.TrimSpace(n), "T-")
-
-			var x int
-
-			if _, err := fmt.Sscanf(s, "%d", &x); err == nil {
-				out = append(out, x)
-			}
+		if t, _ := ev["type"].(string); t == "task" {
+			out = append(out, ev)
 		}
 	}
 
 	return out
 }
 
-// replannerSetTasks pulls the LAST `set_tasks` event's `tickets` array out of the
-// replanner's event stream and re-marshals each element through the Ticket schema.
-// Returns (parsed, true) if at least one set_tasks event was present (even if its
-// array was empty or invalid); (nil, false) otherwise.
-func replannerSetTasks(events []map[string]any) ([]Ticket, bool) {
-	var tickets []Ticket
-	found := false
+// applyTaskOp applies one `task` event to a ticket-list sandbox. Mutates entries in
+// place (`update`, `cancel`) or grows the slice (`new`); throws on any schema violation.
+// Apply ops in emission order — later ops see the cumulative effect of earlier ones, so
+// `new T-7` then `update T-7` is valid; `cancel T-3` then `update T-3` fails because
+// T-3 is now CLOSED. Caller (applyReplannerOps) sandboxes a copy before invoking this
+// so a partial apply followed by a thrown error doesn't leave the live state corrupt.
+func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
+	op, _ := ev["op"].(string)
+	n := jsonInt(ev["n"])
 
-	for _, ev := range events {
-		if t, _ := ev["type"].(string); t != "set_tasks" {
-			continue
-		}
+	if n <= 0 {
+		ThrowFmt("task op %q: missing or invalid n", op)
+	}
 
-		found = true
-		raw, _ := ev["tickets"].([]any)
-		tickets = tickets[:0]
+	idx := -1
 
-		for _, x := range raw {
-			b, err := json.Marshal(x)
+	for i, t := range tickets {
+		if t.N == n {
+			idx = i
 
-			if err != nil {
-				continue
-			}
-
-			var t Ticket
-
-			if err := json.Unmarshal(b, &t); err == nil {
-				tickets = append(tickets, t)
-			}
+			break
 		}
 	}
 
-	return tickets, found
+	switch op {
+	case "new":
+		if idx >= 0 {
+			ThrowFmt("op=new ticket %d: N already exists", n)
+		}
+
+		descr, _ := ev["descr"].(string)
+		prio := jsonInt(ev["prio"])
+		deps := jsonIntArray(ev["deps"])
+
+		return append(tickets, Ticket{
+			N:     n,
+			State: StateOpen,
+			Descr: descr,
+			Prio:  prio,
+			Deps:  deps,
+		})
+
+	case "update":
+		if idx < 0 {
+			ThrowFmt("op=update ticket %d: not found", n)
+		}
+
+		if tickets[idx].State != StateOpen {
+			ThrowFmt("op=update ticket %d: not OPEN (state=%s)", n, tickets[idx].State)
+		}
+
+		if d, ok := ev["descr"].(string); ok {
+			tickets[idx].Descr = d
+		}
+
+		if _, ok := ev["prio"]; ok {
+			tickets[idx].Prio = jsonInt(ev["prio"])
+		}
+
+		if _, ok := ev["deps"]; ok {
+			tickets[idx].Deps = jsonIntArray(ev["deps"])
+		}
+
+		return tickets
+
+	case "cancel":
+		if idx < 0 {
+			ThrowFmt("op=cancel ticket %d: not found", n)
+		}
+
+		if tickets[idx].State != StateOpen {
+			ThrowFmt("op=cancel ticket %d: not OPEN (state=%s)", n, tickets[idx].State)
+		}
+
+		tickets[idx].State = StateClosed
+		tickets[idx].CloseReason = CloseCancelled
+		tickets[idx].InProgress = false
+
+		return tickets
+	}
+
+	ThrowFmt("unknown task op %q (expected new/update/cancel)", op)
+
+	return tickets
 }
 
-func (o *Orchestrator) cancelTicket(n int) {
+// jsonInt accepts JSON numbers (float64 after Unmarshal-into-any), bare ints, or string
+// forms ("42", "T-42") and returns the int. 0 on failure — callers check sign.
+func jsonInt(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case string:
+		s := strings.TrimPrefix(strings.TrimSpace(x), "T-")
+
+		var n int
+
+		if _, err := fmt.Sscanf(s, "%d", &n); err == nil {
+			return n
+		}
+	}
+
+	return 0
+}
+
+func jsonIntArray(v any) []int {
+	arr, _ := v.([]any)
+
+	var out []int
+
+	for _, x := range arr {
+		out = append(out, jsonInt(x))
+	}
+
+	return out
+}
+
+// applyReplannerOps sandboxes the ops, validates the resulting list against the global
+// schema (no cycles, valid deps, etc.), then commits in one shot — swapping o.Tickets,
+// killing in-flight goroutines for every `cancel` op, and recording per-ticket events.
+// On any apply or validation error nothing is committed; the replanner is bounced with
+// its original output as feedback so it can fix and retry.
+func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops []map[string]any) {
 	o.Mu.Lock()
-	defer o.Mu.Unlock()
 
-	if run, ok := o.Inflight[n]; ok {
-		run.Cancel()
-		delete(o.Inflight, n)
-	}
+	sandbox := make([]Ticket, len(o.Tickets))
+	copy(sandbox, o.Tickets)
 
-	o.closeTicketLocked(n, CloseCancelled)
-	o.recordEventLocked(n, "CANCELLED", "by=replanner")
-	uiTicket("🛑", RoleReplanner, n, "CANCELLED", "by replanner")
-	o.signalWake()
-}
-
-func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest, newTickets []Ticket) {
 	exc := Try(func() {
-		newTickets = append([]Ticket{}, newTickets...)
-		ValidateTasks(newTickets)
-
-		o.Mu.Lock()
-		defer o.Mu.Unlock()
-
-		validateReplanTransition(o.Tickets, newTickets)
-
-		// Preserve orchestrator-owned fields across replan: events are append-only history
-		// the orchestrator writes (replanner is told not to include them, and even if they
-		// do we always restore the authoritative copy from prior); InProgress is in-memory.
-		priorEvents := map[int][]TicketEvent{}
-		priorWS := map[int][]string{}
-		inProgress := map[int]bool{}
-
-		for _, t := range o.Tickets {
-			priorEvents[t.N] = t.Events
-			priorWS[t.N] = t.Workspaces
-
-			if t.InProgress {
-				inProgress[t.N] = true
-			}
+		for _, ev := range ops {
+			sandbox = applyTaskOp(sandbox, ev)
 		}
 
-		for i := range newTickets {
-			n := newTickets[i].N
-			newTickets[i].Events = priorEvents[n]
-			newTickets[i].Workspaces = priorWS[n]
-			newTickets[i].InProgress = inProgress[n]
-		}
-
-		o.Tickets = newTickets
-		SaveTasks(o.Root, o.Tickets)
+		ValidateTasks(sandbox)
 	})
 
 	if exc != nil {
+		o.Mu.Unlock()
+
 		o.recordEvent(req.Ticket, "REPLAN_REJECTED", exc.Error())
 		uiTicket("❌", RoleReplanner, req.Ticket, "REJECTED", exc.Error())
 
@@ -759,57 +795,75 @@ func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest, 
 		return
 	}
 
-	o.recordEvent(req.Ticket, "REPLAN_APPLIED", "by=replanner")
-	uiTicket("✨", RoleReplanner, req.Ticket, "APPLIED", "TASKS.md updated")
+	// Validation passed — swap state, then apply the ops' side-effects (kill in-flight
+	// goroutines on cancel, record per-ticket events). recordEventLocked saves
+	// tasks.jsonl on each call which covers the final write too.
+	o.Tickets = sandbox
+
+	canceledAny := false
+
+	for _, ev := range ops {
+		op, _ := ev["op"].(string)
+		n := jsonInt(ev["n"])
+		reason, _ := ev["reason"].(string)
+
+		switch op {
+		case "new":
+			descr, _ := ev["descr"].(string)
+			o.recordEventLocked(n, "TASK_NEW", "by=replanner descr="+descr)
+			uiTicket("🆕", RoleReplanner, n, "NEW", descr)
+		case "update":
+			var changes []string
+
+			if d, ok := ev["descr"].(string); ok {
+				changes = append(changes, "descr="+d)
+			}
+
+			if _, ok := ev["prio"]; ok {
+				changes = append(changes, fmt.Sprintf("prio=%d", jsonInt(ev["prio"])))
+			}
+
+			if _, ok := ev["deps"]; ok {
+				changes = append(changes, fmt.Sprintf("deps=%v", jsonIntArray(ev["deps"])))
+			}
+
+			summary := strings.Join(changes, " ")
+			o.recordEventLocked(n, "TASK_UPDATE", "by=replanner "+summary)
+			uiTicket("✏️", RoleReplanner, n, "UPDATE", summary)
+		case "cancel":
+			canceledAny = true
+
+			if run, ok := o.Inflight[n]; ok {
+				run.Cancel()
+				delete(o.Inflight, n)
+			}
+
+			detail := "by=replanner"
+
+			if reason != "" {
+				detail += " reason=" + reason
+			}
+
+			o.recordEventLocked(n, "CANCELLED", detail)
+			uiTicket("🛑", RoleReplanner, n, "CANCELLED", reason)
+		}
+	}
+
+	// Only fire an overseer nudge when cancel ops actually dropped open tickets — new /
+	// update ops can't reduce open count.
+	if canceledAny && o.openCountLocked() <= 2 {
+		select {
+		case o.QOverseer <- OverseerRequest{Reason: fmt.Sprintf("low-open after replanner batch (req T-%d)", req.Ticket)}:
+			uiSys("📥", "→Q_overseer", "after replanner cancels")
+		default:
+		}
+	}
+
+	o.Mu.Unlock()
+
+	o.recordEvent(req.Ticket, "REPLAN_APPLIED", fmt.Sprintf("ops=%d", len(ops)))
+	uiTicket("✨", RoleReplanner, req.Ticket, "APPLIED", fmt.Sprintf("%d ops", len(ops)))
 	o.signalWake()
-}
-
-// validateReplanTransition enforces that replanner can only change ticket DESCR/DEPS/PRIO
-// or close OPEN tickets as DISCARDED/CANCELLED — never MERGED (only the merger can mint a
-// MERGED state after actually fast-forwarding into trunk), and never resurrect or delete
-// already-CLOSED tickets (history is immutable). Without this check the replanner has been
-// observed to mass-mark live OPEN tickets as CLOSED+MERGED, faking work that never landed.
-func validateReplanTransition(prior, next []Ticket) {
-	priorByN := map[int]Ticket{}
-
-	for _, t := range prior {
-		priorByN[t.N] = t
-	}
-
-	seen := map[int]bool{}
-
-	for _, t := range next {
-		seen[t.N] = true
-
-		p, was := priorByN[t.N]
-
-		if !was {
-			if t.State != StateOpen {
-				ThrowFmt("ticket %d: new tickets must be STATE=OPEN, got %s", t.N, t.State)
-			}
-
-			continue
-		}
-
-		if p.State == StateClosed {
-			if t.State != StateClosed || t.CloseReason != p.CloseReason {
-				ThrowFmt("ticket %d: cannot modify CLOSED history (was STATE=%s/CLOSE_REASON=%s, attempted STATE=%s/CLOSE_REASON=%s)",
-					t.N, p.State, p.CloseReason, t.State, t.CloseReason)
-			}
-
-			continue
-		}
-
-		if t.State == StateClosed && t.CloseReason == CloseMerged {
-			ThrowFmt("ticket %d: replanner cannot set CLOSE_REASON=MERGED — only the merger may mint MERGED after a real fast-forward into trunk", t.N)
-		}
-	}
-
-	for _, p := range prior {
-		if !seen[p.N] {
-			ThrowFmt("ticket %d: missing from new TASKS — replanner must preserve every prior ticket (CLOSED verbatim, OPEN modifiable)", p.N)
-		}
-	}
 }
 
 func (o *Orchestrator) mergerLoop() {

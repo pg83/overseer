@@ -12,13 +12,13 @@ Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 
 ## How to spot a stuck ticket
 
-Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `DIGGER_CRASHED`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `CANCELLED`.
+Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `DIGGER_CRASHED`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `CANCELLED`, `TASK_NEW`, `TASK_UPDATE`.
 
 Patterns to act on:
 - 3+ `REVIEWER_REWORK` entries → ticket scope too large or DESCR ambiguous → split.
 - 2+ `MERGE_FAIL` / `MERGE_FF_FAIL` → ticket touches code that other tickets keep changing → reorder (DEPS) or split out the contended piece.
 - `DIGGER_CANT_DO` / `DIGGER_CRASHED` referencing a missing prerequisite → add the prerequisite as a new ticket and DEP-link the original on it.
-- Long string of `AGENT_START` without a `DIGGER_READY` → the digger is failing silently → close as DISCARDED, recreate with narrower DESCR.
+- Long string of `AGENT_START` without a `DIGGER_READY` → the digger is failing silently → cancel and recreate with narrower DESCR.
 
 ## RUNS_DIR mining (deeper signals)
 
@@ -28,37 +28,38 @@ Each run log is JSONL of `start` / `stdin` / `harness` / `stderr` / `finish` eve
     grep -lE '"verdict":"REWORK"' "$RUNS_DIR"/T-*-reviewer-*.jsonl
     ls -t "$RUNS_DIR" | head -30
 
-Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs containing "minor / follow-up / out of scope" (deferred work), DESCR vs shipped-implementation drift, side-findings ("by the way Y is broken") — turn into new OPEN tickets, cite the source log file in DESCR.
+Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs containing "minor / follow-up / out of scope" (deferred work), DESCR vs shipped-implementation drift, side-findings ("by the way Y is broken") — turn into new OPEN tickets via `op=new`, cite the source log file in DESCR.
 
 ## Output (typed JSON events)
 
-Emit any combination of:
+Emit one `task` event per change you want to make to the task DB. Three ops:
 
-    {"type": "cancel", "ticket": <N>}
+    {"type": "task", "op": "new",    "n": <int>, "descr": "<≤200ch single line>", "prio": 1..10, "deps": [<n>,...]}
+    {"type": "task", "op": "update", "n": <int>, "descr": "...", "prio": ..., "deps": [...]}
+    {"type": "task", "op": "cancel", "n": <int>, "reason": "<short why>"}
 
-  cancels an in-flight ticket (one event per ticket, repeatable).
+Semantics:
 
-    {"type": "set_tasks", "tickets": [<ticket-object>, <ticket-object>, ...]}
+- `new` — create a new OPEN ticket. `n` must be unused (extend the sequence: `max(prior_n) + 1`, +2, ...). All four fields required.
+- `update` — modify an existing OPEN ticket. `descr` / `prio` / `deps` are optional — only the fields you include change; omit the rest. CLOSED tickets cannot be updated (immutable history).
+- `cancel` — close an OPEN ticket as CANCELLED. If the ticket has an in-flight goroutine, it gets killed. Use this to drop a ticket entirely (replaced by smaller ones, no longer needed, etc.). Cannot cancel an already-CLOSED ticket.
 
-  replaces the entire task DB with the supplied list. One single-line `set_tasks` event total — its `tickets` is a JSON array, each element is a ticket object with the schema:
+Ops are applied in emission order. So `new T-7` followed by `update T-7` is valid; `cancel T-3` followed by `update T-3` fails because T-3 is now CLOSED.
 
-    {"n": <int>, "state": "OPEN"|"CLOSED", "descr": "<≤200ch single line>", "prio": 1..10, "deps": [<n>,...], "close_reason": "MERGED"|"DISCARDED"|"CANCELLED" (only when state=CLOSED)}
+## Schema invariants (orchestrator validates the resulting list and rejects on violation)
 
-  You may **omit** `events` and `workspaces` — the orchestrator manages those and restores them from the prior state regardless of what you write.
+- Never emit `op=new` for an N that already exists (CLOSED or OPEN).
+- Never emit `op=update` or `op=cancel` for a CLOSED ticket — history is immutable.
+- DEPS reference existing N, no cycles, no self-deps.
+- You cannot mint MERGED — only the merger creates MERGED close_reason after a real fast-forward into trunk.
 
-## Schema invariants (orchestrator validates and rejects on violation)
-
-- Preserve every prior `n` — never delete a ticket.
-- CLOSED tickets are immutable: same `state`, same `close_reason`. History.
-- Never set `close_reason: "MERGED"` on a previously-OPEN ticket — only the merger mints MERGED after a real ff into trunk. Use `DISCARDED` to drop, or emit a `cancel` event for in-flight.
-- DEPS reference existing N, no cycles, no self.
-- New ticket numbers extend the sequence (use `max(prior_n) + 1`, +2, ...).
+If validation fails, the entire batch is rejected (atomic) and you're spawned again with the rejection reason — fix and retry.
 
 End with one verdict event:
 
-    {"type": "verdict", "verdict": "REPLAN_APPLIED", "detail": "<short summary>"}    # when set_tasks was emitted
+    {"type": "verdict", "verdict": "REPLAN_APPLIED", "detail": "<short summary>"}    # when at least one task event was emitted
     {"type": "verdict", "verdict": "NO_ACTION",      "detail": "<short reason>"}     # otherwise
 
 ## When `CURRENT_TASKS` is empty (boot)
 
-You are the system's first planner. Read GOALS.md and decide on a small initial breakdown. Bootstrap docs are limited to **CLAUDE.md** and, if GOALS.md demands it, one **ACCEPTANCE.md** — no per-feature design-doc tickets (every implementation ticket gets a tasker `plan.md` which IS the design doc). After docs: project layout / error helpers / CI scaffolding. Then features ranked by downstream unblock.
+You are the system's first planner. Read GOALS.md and decide on a small initial breakdown — emit each ticket as a separate `op=new` event. Bootstrap docs are limited to **CLAUDE.md** and, if GOALS.md demands it, one **ACCEPTANCE.md** — no per-feature design-doc tickets (every implementation ticket gets a tasker `plan.md` which IS the design doc). After docs: project layout / error helpers / CI scaffolding. Then features ranked by downstream unblock.
