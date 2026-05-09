@@ -223,6 +223,7 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string
 	t, _ := o.findTicketLocked(ticketN)
 	fmt.Fprintf(&sb, "TICKET: %d\nDESCR: %s\nPRIO: %d\nDEPS: %v\n", t.N, t.Descr, t.Prio, t.Deps)
 	fmt.Fprintf(&sb, "WORKSPACE: %s\n", wsAbs)
+	fmt.Fprintf(&sb, "TRUNK_PATH: %s\n", o.Trunk)
 	fmt.Fprintf(&sb, "TRUNK_HASH: %s\n", CurrentTrunkHash(o.Trunk))
 
 	if planExists(o.Root, ticketN) {

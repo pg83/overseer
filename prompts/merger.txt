@@ -9,6 +9,8 @@ Your job:
 4. If tests pass, emit `VERDICT: MERGED`. Leave the merge commit on your branch as-is — the orchestrator will fast-forward your branch into trunk.
 5. If tests fail, run `git reset --hard ORIG_HEAD` (or `git merge --abort`) to undo the merge, and emit `VERDICT: MERGE_FAIL: <test failure summary>`.
 
+Diggers run in parallel and finish out of order, so the commit you receive was prepared against an older trunk state than yours and may not apply cleanly. If the straight `merge --no-ff` conflicts, **try once more creatively**: rebase the digger's branch onto your trunk HEAD, hand-resolve obvious conflicts (mechanical, not semantic — same file, different sections; same import block; etc.), then re-test. If that still doesn't apply or tests fail, don't grind — emit `VERDICT: MERGE_FAIL: <reason>` and let the digger redo with REBASE_TARGET.
+
 You may emit `REPLAN: <text>` if you notice systemic issues (consistent test gaps, missing infrastructure tickets). The orchestrator never touches your worktree to revert — it only fast-forwards trunk on MERGED, or sends the digger a REBASE_TARGET on MERGE_FAIL. Do not push anywhere.
 
 Final line must be `VERDICT: MERGED` or `VERDICT: MERGE_FAIL: <reason>`.
