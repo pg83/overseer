@@ -695,7 +695,7 @@ func loadRolePrompt(orchRoot string, role AgentRole) string {
 		return string(data)
 	}
 
-	return defaultPrompt(role)
+	return defaultPrompt(orchRoot, role)
 }
 
 func loadCommonPrompt(orchRoot string) string {
@@ -712,9 +712,14 @@ func loadCommonPrompt(orchRoot string) string {
 	return ""
 }
 
-func defaultPrompt(role AgentRole) string {
-	return "You are the " + string(role) + " agent in an orchestrated coding system. " +
-		`Emit your final structured signal as a single-line JSON event at column 0, e.g. ` +
-		`{"type":"verdict","verdict":"<code>","detail":"<detail>"}. ` +
-		`Use {"type":"replan","reason":"<text>"} to enqueue the replanner.`
+func defaultPrompt(orchRoot string, role AgentRole) string {
+	path := filepath.Join(orchRoot, "prompts", "default.txt")
+
+	if data, err := os.ReadFile(path); err == nil {
+		return strings.ReplaceAll(string(data), "{{role}}", string(role))
+	}
+
+	data := Throw2(embeddedPrompts.ReadFile("prompts/default.txt"))
+
+	return strings.ReplaceAll(string(data), "{{role}}", string(role))
 }
