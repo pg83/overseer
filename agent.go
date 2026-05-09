@@ -673,38 +673,25 @@ func messageText(ev map[string]any) string {
 	return strings.TrimSpace(t)
 }
 
-func loadPrompt(orchRoot string, role AgentRole) string {
-	base := loadRolePrompt(orchRoot, role)
-	common := loadCommonPrompt(orchRoot)
+func loadPrompt(role AgentRole) string {
+	common := loadCommonPrompt()
 
 	if common == "" {
-		return base
+		return loadRolePrompt(role)
 	}
 
-	return base + "\n\n" + common
+	return loadRolePrompt(role) + "\n\n" + common
 }
 
-func loadRolePrompt(orchRoot string, role AgentRole) string {
-	path := filepath.Join(orchRoot, "prompts", string(role)+".txt")
-
-	if data, err := os.ReadFile(path); err == nil {
-		return string(data)
-	}
-
+func loadRolePrompt(role AgentRole) string {
 	if data, err := embeddedPrompts.ReadFile("prompts/" + string(role) + ".txt"); err == nil {
 		return string(data)
 	}
 
-	return defaultPrompt(orchRoot, role)
+	return defaultPrompt(role)
 }
 
-func loadCommonPrompt(orchRoot string) string {
-	path := filepath.Join(orchRoot, "prompts", "common.txt")
-
-	if data, err := os.ReadFile(path); err == nil {
-		return string(data)
-	}
-
+func loadCommonPrompt() string {
 	if data, err := embeddedPrompts.ReadFile("prompts/common.txt"); err == nil {
 		return string(data)
 	}
@@ -712,13 +699,7 @@ func loadCommonPrompt(orchRoot string) string {
 	return ""
 }
 
-func defaultPrompt(orchRoot string, role AgentRole) string {
-	path := filepath.Join(orchRoot, "prompts", "default.txt")
-
-	if data, err := os.ReadFile(path); err == nil {
-		return strings.ReplaceAll(string(data), "{{role}}", string(role))
-	}
-
+func defaultPrompt(role AgentRole) string {
 	data := Throw2(embeddedPrompts.ReadFile("prompts/default.txt"))
 
 	return strings.ReplaceAll(string(data), "{{role}}", string(role))

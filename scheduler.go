@@ -218,7 +218,7 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 	uiTicket("🚀", role, t.N, "START", "ws="+wsID)
 
 	input := o.buildAgentInput(role, t.N, wsAbs)
-	prompt := loadPrompt(o.Root, role)
+	prompt := loadPrompt(role)
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
@@ -532,7 +532,7 @@ func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
 
 	wsAbs := wsPath(o.Root, ws)
 	input := o.buildAgentInput(RoleReviewer, ticketN, wsAbs)
-	prompt := loadPrompt(o.Root, RoleReviewer)
+	prompt := loadPrompt(RoleReviewer)
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
@@ -557,7 +557,7 @@ func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
 	wsAbs := wsPath(o.Root, ws)
 	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs) +
 		fmt.Sprintf("PREV_WORKSPACE: %s\n", wsAbs)
-	prompt := loadPrompt(o.Root, RoleDigger)
+	prompt := loadPrompt(RoleDigger)
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
@@ -591,7 +591,7 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 		fmt.Sprintf("REASON_FOR_REPLAN: %s\nSOURCE_AGENT: %s\nSOURCE_TICKET: %d\nRUNS_DIR: %s\nTASKS_DB: %s\n\nCURRENT_TASKS:\n%s\n",
 			req.Reason, req.Source, req.Ticket, runsDir(o.Root), tasksDBPath(o.Root), currentTasks)
 
-	prompt := loadPrompt(o.Root, RoleReplanner)
+	prompt := loadPrompt(RoleReplanner)
 	stdin := concatPromptInput(prompt, input)
 
 	ctx, cancel := context.WithCancel(o.StopCtx)
@@ -904,7 +904,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	input := o.agentSelfBlock(RoleMerger) +
 		fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
 			req.Ticket, diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
-	prompt := loadPrompt(o.Root, RoleMerger)
+	prompt := loadPrompt(RoleMerger)
 	stdin := concatPromptInput(prompt, input)
 
 	ctx, cancel := context.WithCancel(o.StopCtx)
@@ -1001,7 +1001,7 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs) +
 		fmt.Sprintf("PREV_WORKSPACE: %s\n", wsAbs) +
 		"\nMERGE_FAIL_OUTPUT:\n" + mergeOut + "\nREBASE_TARGET: " + target + "\n"
-	prompt := loadPrompt(o.Root, RoleDigger)
+	prompt := loadPrompt(RoleDigger)
 	stdin := concatPromptInput(prompt, input)
 
 	o.Mu.Unlock()
@@ -1036,7 +1036,7 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 
 	input := o.agentSelfBlock(RoleOverseer) +
 		fmt.Sprintf("REASON: %s\n\nCURRENT_TASKS:\n%s\n", req.Reason, currentTasks)
-	prompt := loadPrompt(o.Root, RoleOverseer)
+	prompt := loadPrompt(RoleOverseer)
 	stdin := concatPromptInput(prompt, input)
 
 	ctx, cancel := context.WithCancel(o.StopCtx)
