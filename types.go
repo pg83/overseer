@@ -28,6 +28,11 @@ type Ticket struct {
 	Deps        []int
 	Workspaces  []string
 	CloseReason CloseReason
+
+	// In-memory only; never persisted to TASKS.md.
+	// Set true when the ticket enters the work pipeline (tasker / digger / reviewer / merger),
+	// cleared only on terminal close. Source of truth for scheduleReady's "is this ticket busy".
+	InProgress bool
 }
 
 type Backend string
@@ -114,7 +119,6 @@ type Orchestrator struct {
 	JailBin   string
 
 	Mu       sync.Mutex
-	TrunkMu  sync.Mutex
 	Tickets  []Ticket
 	Inflight map[int]*AgentRun
 

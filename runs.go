@@ -1,43 +1,25 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 func runsDir(orchRoot string) string {
 	return filepath.Join(orchRoot, "runs")
 }
 
-func dumpAgentRun(orchRoot string, role AgentRole, ticket int, ws, stdin string, res AgentResult) {
-	Throw(os.MkdirAll(runsDir(orchRoot), 0755))
-
-	name := fmt.Sprintf("T-%d-%s-%s-%s.log",
-		ticket,
-		time.Now().UTC().Format("20060102-150405.000000000"),
-		role,
-		ws)
-	path := filepath.Join(runsDir(orchRoot), name)
-
-	var sb strings.Builder
-	sb.WriteString("=== INPUT ===\n")
-	sb.WriteString(stdin)
-	sb.WriteString("\n=== STREAM ===\n")
-	sb.WriteString(res.RawStream)
-	sb.WriteString("\n=== STDOUT ===\n")
-	sb.WriteString(res.Stdout)
-	sb.WriteString("\n=== STDERR ===\n")
-	sb.WriteString(res.Stderr)
-	fmt.Fprintf(&sb, "\n=== META ===\nrole=%s ticket=%d ws=%s verdict=%s\ndetail=%s\n",
-		res.Role, res.Ticket, res.Workspace, res.Verdict, res.Detail)
-
-	Throw(os.WriteFile(path, []byte(sb.String()), 0644))
-}
-
+// Per-run state lives in a single jsonl file written by runAgentInner — one event per line,
+// fields tagged by `t`. Schema in agent.go (search "writeEvent"). All readers below consume
+// only this stream; nothing else writes to or reads from per-run state.
+//
+// priorRunsForTicket aggregates assistant text + final verdict from prior runs of a ticket
+// for inclusion in the next prompt's PRIOR_RUNS section.
 func priorRunsForTicket(orchRoot string, ticketN int) string {
 	entries, err := os.ReadDir(runsDir(orchRoot))
 
@@ -46,54 +28,104 @@ func priorRunsForTicket(orchRoot string, ticketN int) string {
 	}
 
 	prefix := fmt.Sprintf("T-%d-", ticketN)
+	suffix := ".jsonl"
 
 	var matched []string
 
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), prefix) {
+		if strings.HasPrefix(e.Name(), prefix) && strings.HasSuffix(e.Name(), suffix) {
 			matched = append(matched, e.Name())
 		}
 	}
 
 	sort.Strings(matched)
 
-	want := map[string]bool{"STDOUT": true, "STDERR": true, "META": true}
-
 	var sb strings.Builder
 
 	for _, n := range matched {
 		path := filepath.Join(runsDir(orchRoot), n)
+		summary := summarizeRunJsonl(path)
 
-		data, err := os.ReadFile(path)
-
-		if err != nil {
+		if summary == "" {
 			continue
 		}
 
-		fmt.Fprintf(&sb, "\n--- %s ---\nLOG_FILE: %s\n%s", n, path, extractRunSections(data, want))
+		fmt.Fprintf(&sb, "\n--- %s ---\nLOG_FILE: %s\n%s", n, path, summary)
 	}
 
 	return sb.String()
 }
 
-func extractRunSections(data []byte, want map[string]bool) string {
+// summarizeRunJsonl scans a run's jsonl and returns the assistant's accumulated text plus
+// the final verdict line. Replanner/operator can grep the file directly for richer detail.
+func summarizeRunJsonl(path string) string {
+	f, err := os.Open(path)
+
+	if err != nil {
+		return ""
+	}
+
+	defer f.Close()
+
 	var sb strings.Builder
 
-	emit := false
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 16<<20)
 
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "=== ") && strings.HasSuffix(line, " ===") {
-			name := strings.TrimSuffix(strings.TrimPrefix(line, "=== "), " ===")
-			emit = want[name]
+	for scanner.Scan() {
+		var line map[string]any
+
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			continue
 		}
 
-		if emit {
-			sb.WriteString(line)
-			sb.WriteByte('\n')
+		t, _ := line["t"].(string)
+
+		switch t {
+		case "harness":
+			ev, _ := line["ev"].(map[string]any)
+
+			if ev == nil {
+				continue
+			}
+
+			if txt := harnessAssistantText(ev); txt != "" {
+				sb.WriteString(txt)
+
+				if !strings.HasSuffix(txt, "\n") {
+					sb.WriteByte('\n')
+				}
+			}
+		case "finish":
+			verdict, _ := line["verdict"].(string)
+			detail, _ := line["detail"].(string)
+			fmt.Fprintf(&sb, "VERDICT: %s: %s\n", verdict, detail)
 		}
 	}
 
 	return sb.String()
+}
+
+// harnessAssistantText extracts the assistant's text from one harness event, regardless of
+// backend. Claude (stream-json) emits `type:"result"` with a `result` string at the end;
+// opencode emits `type:"text"` with `part.text` per chunk.
+func harnessAssistantText(ev map[string]any) string {
+	typ, _ := ev["type"].(string)
+
+	switch typ {
+	case "result":
+		if txt, _ := ev["result"].(string); txt != "" {
+			return txt
+		}
+	case "text":
+		if part, ok := ev["part"].(map[string]any); ok {
+			if txt, _ := part["text"].(string); txt != "" {
+				return txt
+			}
+		}
+	}
+
+	return ""
 }
 
 func concatPromptInput(prompt, input string) string {

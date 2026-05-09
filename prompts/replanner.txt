@@ -78,7 +78,9 @@ Two channels:
    - Required: `N` (int, unique), `STATE` (`OPEN`|`CLOSED`), `DESCR` (single line, ≤200 chars), `PRIO` (1-10).
    - Optional: `DEPS` (comma-separated N, must reference existing tickets, no cycles), `WORKSPACES`, `CLOSE_REASON` (`MERGED`|`DISCARDED`|`CANCELLED`, valid iff STATE=CLOSED).
    - Tickets separated by `---` on its own line.
-   - Preserve CLOSED tickets verbatim — they are history, not removable.
+   - **Preserve CLOSED tickets verbatim** — both STATE and CLOSE_REASON. History is immutable.
+   - **Never delete a ticket** — every prior N must appear in your output (modified DESCR/DEPS/PRIO is fine for OPEN tickets).
+   - **Never set CLOSE_REASON=MERGED on an OPEN ticket.** Only the orchestrator's merger can mint MERGED, and only after an actual fast-forward into trunk. You may close OPEN tickets as DISCARDED (drop the work) or CANCELLED (use `CANCEL: <N>` directives), but MERGED you must not invent — the orchestrator validates and rejects the whole TASKS_NEW if you try.
 
 End with `VERDICT: REPLAN_APPLIED` if you provided TASKS_NEW; otherwise `VERDICT: NO_ACTION`.
 

@@ -59,11 +59,19 @@ func (o *Orchestrator) Run() {
 		case <-tick.C:
 		case <-o.Wakeup:
 		case res := <-o.AgentDone:
-			o.handleAgentResult(res)
+			o.safe("HANDLE", func() { o.handleAgentResult(res) })
 		}
 
-		o.scheduleReady()
+		o.safe("SCHEDULE", o.scheduleReady)
 	}
+}
+
+// safe wraps a panic-prone operation so an `*Exception` Throw inside doesn't kill the
+// orchestrator goroutine. Surfaced to UI for visibility — never silently swallowed.
+func (o *Orchestrator) safe(name string, f func()) {
+	Try(f).Catch(func(e *Exception) {
+		uiSys("💥", name+"_PANIC", e.Error())
+	})
 }
 
 func (o *Orchestrator) signalWake() {
@@ -97,13 +105,15 @@ func (o *Orchestrator) scheduleReady() {
 
 		o.Mu.Lock()
 
-		if _, busy := o.Inflight[t.N]; busy {
+		cur, ok := o.findTicketLocked(t.N)
+
+		if !ok || cur.InProgress || cur.State != StateOpen {
 			o.Mu.Unlock()
 
 			continue
 		}
 
-		o.startAgentForTicketLocked(t)
+		o.startAgentForTicketLocked(cur)
 
 		o.Mu.Unlock()
 	}
@@ -125,7 +135,7 @@ func (o *Orchestrator) readyCandidatesLocked() []Ticket {
 			continue
 		}
 
-		if _, busy := o.Inflight[t.N]; busy {
+		if t.InProgress {
 			continue
 		}
 
@@ -162,10 +172,9 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 		role = RoleTasker
 	}
 
-	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
-	o.TrunkMu.Unlock()
 
+	o.setInProgressLocked(t.N, true)
 	o.appendWorkspaceLocked(t.N, wsID)
 
 	wsAbs := wsPath(o.Root, wsID)
@@ -187,8 +196,8 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
+		defer cancel()
 		res := o.runAgent(ctx, role, t.N, wsID, stdin)
-		dumpAgentRun(o.Root, role, t.N, wsID, stdin, res)
 		o.AgentDone <- res
 	}()
 }
@@ -240,10 +249,29 @@ func (o *Orchestrator) appendWorkspaceLocked(n int, ws string) {
 	SaveTasks(o.Root, o.Tickets)
 }
 
+func (o *Orchestrator) setInProgressLocked(n int, v bool) {
+	for i := range o.Tickets {
+		if o.Tickets[i].N == n {
+			o.Tickets[i].InProgress = v
+		}
+	}
+}
+
 func (o *Orchestrator) handleAgentResult(res AgentResult) {
 	o.Mu.Lock()
 
 	delete(o.Inflight, res.Ticket)
+
+	// If the ticket was closed while the agent was running (typically via cancelTicket),
+	// drop the result entirely — don't spawn a follow-up reviewer/merger/digger and don't
+	// rewrite ticket state. The agent's work is logged in its jsonl; closeTicketLocked is
+	// idempotent, but calling spawn* here would launch goroutines on a dead ticket.
+	if t, ok := o.findTicketLocked(res.Ticket); ok && t.State == StateClosed {
+		o.Mu.Unlock()
+		uiTicket("👻", res.Role, res.Ticket, "STALE", fmt.Sprintf("ticket already %s, dropping %s result", t.CloseReason, res.Verdict))
+
+		return
+	}
 
 	for _, line := range res.ReplanLines {
 		select {
@@ -288,11 +316,32 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 	writePlan(o.Root, res.Ticket, plan)
 	appendTicketLog(o.Root, res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace+" summary="+res.Detail)
 	uiTicket("📝", RoleTasker, res.Ticket, "PLAN_WRITTEN", res.Detail)
+
+	// Tasker done; ticket stays InProgress=true. scheduleReady won't pick it again,
+	// so spawn digger explicitly with a fresh workspace.
+	if t, ok := o.findTicketLocked(res.Ticket); ok {
+		o.startAgentForTicketLocked(t)
+	}
 }
 
 func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 	switch res.Verdict {
 	case VerdictReady:
+		// Structural sanity check: harness defaults often skip git commit unless explicitly
+		// asked. If the digger emitted READY but the branch has zero commits ahead of base,
+		// the work isn't actually visible to anyone — bounce back as REWORK with a concrete
+		// reason so the next digger iteration commits.
+		ahead := WorkspaceCommitsAhead(wsPath(o.Root, res.Workspace))
+
+		if ahead == 0 {
+			reason := fmt.Sprintf("READY claimed but %s has zero commits ahead of base — work was never committed; rerunning", res.Workspace)
+			appendTicketLog(o.Root, res.Ticket, "DIGGER_NO_COMMIT", reason)
+			uiTicket("⚠️", RoleDigger, res.Ticket, "NO_COMMIT", reason)
+			o.spawnDiggerSameWorkspaceLocked(res.Ticket, res.Workspace)
+
+			return
+		}
+
 		appendTicketLog(o.Root, res.Ticket, "DIGGER_READY", "ws="+res.Workspace+" summary="+res.Detail)
 		uiTicket("✅", RoleDigger, res.Ticket, "READY", res.Detail)
 		o.spawnReviewerLocked(res.Ticket, res.Workspace)
@@ -361,15 +410,39 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", res.Detail)
 		default:
 		}
+	default:
+		reason := fmt.Sprintf("reviewer unclear verdict=%s detail=%s", res.Verdict, res.Detail)
+		appendTicketLog(o.Root, res.Ticket, "REVIEWER_UNCLEAR", reason)
+		uiTicket("❓", RoleReviewer, res.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
+		o.closeTicketLocked(res.Ticket, CloseDiscarded)
+		uiTicket("🪦", "", res.Ticket, "DISCARDED", "reviewer "+string(res.Verdict))
+
+		select {
+		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
+			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", reason)
+		default:
+		}
 	}
 }
 
 func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 	for i := range o.Tickets {
-		if o.Tickets[i].N == n {
-			o.Tickets[i].State = StateClosed
-			o.Tickets[i].CloseReason = reason
+		if o.Tickets[i].N != n {
+			continue
 		}
+
+		// Idempotent: if the ticket was already CLOSED (e.g. via cancelTicket → CANCELLED),
+		// keep the original CLOSE_REASON. A late-arriving result from a goroutine that was
+		// already cancelled must not rewrite history (CANCELLED → DISCARDED).
+		if o.Tickets[i].State == StateClosed {
+			o.Tickets[i].InProgress = false
+
+			continue
+		}
+
+		o.Tickets[i].State = StateClosed
+		o.Tickets[i].CloseReason = reason
+		o.Tickets[i].InProgress = false
 	}
 
 	SaveTasks(o.Root, o.Tickets)
@@ -393,14 +466,16 @@ func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
 	}
 	o.Inflight[ticketN] = run
 
+	uiTicket("🚀", RoleReviewer, ticketN, "START", "ws="+ws)
+
 	wsAbs := wsPath(o.Root, ws)
 	input := o.buildAgentInput(RoleReviewer, ticketN, wsAbs)
 	prompt := loadPrompt(o.Root, RoleReviewer)
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
+		defer cancel()
 		res := o.runAgent(ctx, RoleReviewer, ticketN, ws, stdin)
-		dumpAgentRun(o.Root, RoleReviewer, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
 }
@@ -415,14 +490,16 @@ func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
 	}
 	o.Inflight[ticketN] = run
 
+	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws)
+
 	wsAbs := wsPath(o.Root, ws)
 	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs)
 	prompt := loadPrompt(o.Root, RoleDigger)
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
+		defer cancel()
 		res := o.runAgent(ctx, RoleDigger, ticketN, ws, stdin)
-		dumpAgentRun(o.Root, RoleDigger, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
 }
@@ -433,7 +510,7 @@ func (o *Orchestrator) replannerLoop() {
 		case <-o.StopCtx.Done():
 			return
 		case req := <-o.QReplanner:
-			o.runReplanner(req)
+			o.safe("REPLANNER", func() { o.runReplanner(req) })
 		}
 	}
 }
@@ -441,9 +518,7 @@ func (o *Orchestrator) replannerLoop() {
 func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	uiTicket("🚀", RoleReplanner, req.Ticket, "START", "reason="+req.Reason)
 
-	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
-	o.TrunkMu.Unlock()
 
 	o.Mu.Lock()
 	currentTasks := SerializeTasks(o.Tickets)
@@ -459,7 +534,6 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	defer cancel()
 
 	res := o.runAgent(ctx, RoleReplanner, req.Ticket, wsID, stdin)
-	dumpAgentRun(o.Root, RoleReplanner, req.Ticket, wsID, stdin, res)
 
 	cancels := ExtractCancelTickets(res.Stdout)
 
@@ -509,6 +583,24 @@ func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest) 
 		o.Mu.Lock()
 		defer o.Mu.Unlock()
 
+		validateReplanTransition(o.Tickets, newTickets)
+
+		// Preserve in-memory InProgress flags across replan: replanner serialises only
+		// persisted fields, so the new slice arrives with everything reset.
+		inProgress := map[int]bool{}
+
+		for _, t := range o.Tickets {
+			if t.InProgress {
+				inProgress[t.N] = true
+			}
+		}
+
+		for i := range newTickets {
+			if inProgress[newTickets[i].N] {
+				newTickets[i].InProgress = true
+			}
+		}
+
 		o.Tickets = newTickets
 		SaveTasks(o.Root, o.Tickets)
 	})
@@ -534,33 +626,90 @@ func (o *Orchestrator) tryApplyReplanOutput(res AgentResult, req ReplanRequest) 
 	o.signalWake()
 }
 
+// validateReplanTransition enforces that replanner can only change ticket DESCR/DEPS/PRIO
+// or close OPEN tickets as DISCARDED/CANCELLED — never MERGED (only the merger can mint a
+// MERGED state after actually fast-forwarding into trunk), and never resurrect or delete
+// already-CLOSED tickets (history is immutable). Without this check the replanner has been
+// observed to mass-mark live OPEN tickets as CLOSED+MERGED, faking work that never landed.
+func validateReplanTransition(prior, next []Ticket) {
+	priorByN := map[int]Ticket{}
+
+	for _, t := range prior {
+		priorByN[t.N] = t
+	}
+
+	seen := map[int]bool{}
+
+	for _, t := range next {
+		seen[t.N] = true
+
+		p, was := priorByN[t.N]
+
+		if !was {
+			if t.State != StateOpen {
+				ThrowFmt("ticket %d: new tickets must be STATE=OPEN, got %s", t.N, t.State)
+			}
+
+			continue
+		}
+
+		if p.State == StateClosed {
+			if t.State != StateClosed || t.CloseReason != p.CloseReason {
+				ThrowFmt("ticket %d: cannot modify CLOSED history (was STATE=%s/CLOSE_REASON=%s, attempted STATE=%s/CLOSE_REASON=%s)",
+					t.N, p.State, p.CloseReason, t.State, t.CloseReason)
+			}
+
+			continue
+		}
+
+		if t.State == StateClosed && t.CloseReason == CloseMerged {
+			ThrowFmt("ticket %d: replanner cannot set CLOSE_REASON=MERGED — only the merger may mint MERGED after a real fast-forward into trunk", t.N)
+		}
+	}
+
+	for _, p := range prior {
+		if !seen[p.N] {
+			ThrowFmt("ticket %d: missing from new TASKS — replanner must preserve every prior ticket (CLOSED verbatim, OPEN modifiable)", p.N)
+		}
+	}
+}
+
 func (o *Orchestrator) mergerLoop() {
 	for {
 		select {
 		case <-o.StopCtx.Done():
 			return
 		case req := <-o.QMerger:
-			o.runMerger(req)
+			o.safe("MERGER", func() { o.runMerger(req) })
 		}
 	}
 }
 
 func (o *Orchestrator) runMerger(req MergeRequest) {
+	o.Mu.Lock()
+	t, ok := o.findTicketLocked(req.Ticket)
+	o.Mu.Unlock()
+
+	if !ok || t.State == StateClosed {
+		uiTicket("👻", RoleMerger, req.Ticket, "STALE", fmt.Sprintf("ticket %s before merger picked it up; skipping", t.CloseReason))
+
+		return
+	}
+
 	uiTicket("🚀", RoleMerger, req.Ticket, "START", "ws="+req.Workspace)
 
-	o.TrunkMu.Lock()
-	prevGoals := o.GoalsHash
-	TrunkPull(o.Trunk)
-	postPullHash := CurrentTrunkHash(o.Trunk)
+	trunkHead := CurrentTrunkHash(o.Trunk)
 	newGoals := readGoalsHash(o.Trunk)
 	mergerWS := NewWorkspace(o.Root, o.Trunk)
-	o.TrunkMu.Unlock()
+
+	o.Mu.Lock()
+	prevGoals := o.GoalsHash
+	o.GoalsHash = newGoals
+	o.Mu.Unlock()
 
 	if prevGoals != "" && newGoals != prevGoals {
-		o.GoalsHash = newGoals
-
 		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Reason: "GOALS.md changed in trunk pull"}:
+		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Reason: "GOALS.md changed locally in trunk"}:
 		default:
 		}
 	}
@@ -570,7 +719,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	mergerWSAbs := wsPath(o.Root, mergerWS)
 
 	input := fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
-		req.Ticket, diggerBranch, diggerWSAbs, mergerWSAbs, postPullHash)
+		req.Ticket, diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
 	prompt := loadPrompt(o.Root, RoleMerger)
 	stdin := concatPromptInput(prompt, input)
 
@@ -578,7 +727,6 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	defer cancel()
 
 	res := o.runAgent(ctx, RoleMerger, req.Ticket, mergerWS, stdin)
-	dumpAgentRun(o.Root, RoleMerger, req.Ticket, mergerWS, stdin, res)
 
 	for _, line := range res.ReplanLines {
 		select {
@@ -589,11 +737,9 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 	switch res.Verdict {
 	case VerdictMerged:
-		o.TrunkMu.Lock()
 		FetchBranch(o.Trunk, mergerWSAbs, "ovs/"+mergerWS)
 		ok, out := FfMergeBranch(o.Trunk, "ovs/"+mergerWS)
 		newHead := CurrentTrunkHash(o.Trunk)
-		o.TrunkMu.Unlock()
 
 		if !ok {
 			appendTicketLog(o.Root, req.Ticket, "MERGE_FF_FAIL", out)
@@ -624,15 +770,19 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		appendTicketLog(o.Root, req.Ticket, "MERGE_FAIL", res.Detail)
 		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", res.Detail)
 
-		o.TrunkMu.Lock()
 		head := CurrentTrunkHash(o.Trunk)
-		o.TrunkMu.Unlock()
 
 		o.spawnDiggerWithRebase(req.Ticket, req.Workspace, head, res.Detail)
 
 	default:
 		appendTicketLog(o.Root, req.Ticket, "MERGE_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", res.Verdict, res.Detail))
 		uiTicket("❓", RoleMerger, req.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", res.Verdict))
+
+		o.Mu.Lock()
+		o.setInProgressLocked(req.Ticket, false)
+		o.Mu.Unlock()
+
+		o.signalWake()
 	}
 }
 
@@ -648,6 +798,14 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 	}
 	o.Inflight[ticketN] = run
 
+	short := target
+
+	if len(short) > 8 {
+		short = short[:8]
+	}
+
+	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws+" rebase→"+short)
+
 	wsAbs := wsPath(o.Root, ws)
 	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs) +
 		"\nMERGE_FAIL_OUTPUT:\n" + mergeOut + "\nREBASE_TARGET: " + target + "\n"
@@ -657,8 +815,8 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 	o.Mu.Unlock()
 
 	go func() {
+		defer cancel()
 		res := o.runAgent(ctx, RoleDigger, ticketN, ws, stdin)
-		dumpAgentRun(o.Root, RoleDigger, ticketN, ws, stdin, res)
 		o.AgentDone <- res
 	}()
 }
@@ -669,7 +827,7 @@ func (o *Orchestrator) overseerLoop() {
 		case <-o.StopCtx.Done():
 			return
 		case req := <-o.QOverseer:
-			o.runOverseer(req)
+			o.safe("OVERSEER", func() { o.runOverseer(req) })
 		}
 	}
 }
@@ -677,9 +835,8 @@ func (o *Orchestrator) overseerLoop() {
 func (o *Orchestrator) runOverseer(req OverseerRequest) {
 	uiSys("🚀", "OVERSEER_START", "reason="+req.Reason)
 
-	o.TrunkMu.Lock()
 	wsID := NewWorkspace(o.Root, o.Trunk)
-	o.TrunkMu.Unlock()
+	
 
 	o.Mu.Lock()
 	currentTasks := SerializeTasks(o.Tickets)
@@ -693,7 +850,6 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 	defer cancel()
 
 	res := o.runAgent(ctx, RoleOverseer, 0, wsID, stdin)
-	dumpAgentRun(o.Root, RoleOverseer, 0, wsID, stdin, res)
 
 	switch res.Verdict {
 	case VerdictGoalsAchieved:

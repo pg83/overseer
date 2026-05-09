@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed prompts/*.txt
@@ -52,6 +53,7 @@ func jailRWPaths(home string, backend Backend) []string {
 		return append(common,
 			filepath.Join(home, ".config", "opencode"),
 			filepath.Join(home, ".local", "share", "opencode"),
+			filepath.Join(home, ".ya"),
 		)
 	}
 
@@ -139,6 +141,39 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 
 	argsCopy := append([]string{}, cmd.Args...)
 
+	// Single jsonl writer for the whole run; no other persistence path. All readers
+	// (priorRunsForTicket, replanner mining, operator) consume only this file.
+	Throw(os.MkdirAll(runsDir(o.Root), 0755))
+	runID := fmt.Sprintf("T-%d-%s-%s-%s",
+		ticket, time.Now().UTC().Format("20060102-150405.000000000"), role, wsID)
+	jsonlPath := filepath.Join(runsDir(o.Root), runID+".jsonl")
+	jf := Throw2(os.Create(jsonlPath))
+	defer jf.Close()
+
+	writeEvent := func(payload map[string]any) {
+		payload["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
+		b := Throw2(json.Marshal(payload))
+		Throw2(jf.Write(append(b, '\n')))
+	}
+
+	writeEvent(map[string]any{
+		"t": "start", "role": string(role), "ticket": ticket, "ws": wsID, "args": argsCopy,
+	})
+	writeEvent(map[string]any{"t": "stdin", "data": stdin})
+
+	res := AgentResult{
+		Role:      role,
+		Ticket:    ticket,
+		Workspace: wsID,
+		Args:      argsCopy,
+	}
+
+	defer func() {
+		writeEvent(map[string]any{
+			"t": "finish", "verdict": string(res.Verdict), "detail": res.Detail,
+		})
+	}()
+
 	stdoutPipe := Throw2(cmd.StdoutPipe())
 
 	var stderrBuf bytes.Buffer
@@ -146,7 +181,7 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 
 	Throw(cmd.Start())
 
-	var rawLines, finalText strings.Builder
+	var finalText strings.Builder
 	var streamFault streamErr
 
 	scanner := bufio.NewScanner(stdoutPipe)
@@ -154,8 +189,6 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		rawLines.Write(line)
-		rawLines.WriteByte('\n')
 
 		var ev map[string]any
 
@@ -163,20 +196,19 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 			continue
 		}
 
+		writeEvent(map[string]any{"t": "harness", "ev": ev})
+
 		parseLine(ev, &finalText, &streamFault, role, ticket)
 	}
 
 	err := cmd.Wait()
 
-	res := AgentResult{
-		Role:      role,
-		Ticket:    ticket,
-		Workspace: wsID,
-		Args:      argsCopy,
-		Stdout:    finalText.String(),
-		Stderr:    stderrBuf.String(),
-		RawStream: rawLines.String(),
+	if stderrBuf.Len() > 0 {
+		writeEvent(map[string]any{"t": "stderr", "data": stderrBuf.String()})
 	}
+
+	res.Stdout = finalText.String()
+	res.Stderr = stderrBuf.String()
 
 	if err != nil {
 		var ee *exec.ExitError
@@ -302,6 +334,8 @@ func parseOpencodeStreamLine(ev map[string]any, finalText *strings.Builder, faul
 			return
 		}
 
+		traceAssistantText(role, ticket, txt)
+
 		finalText.WriteString(txt)
 
 		if !strings.HasSuffix(txt, "\n") {
@@ -312,6 +346,26 @@ func parseOpencodeStreamLine(ev map[string]any, finalText *strings.Builder, faul
 	case "error":
 		fault.record(extractOpencodeErrorMsg(ev))
 	}
+}
+
+// traceAssistantText emits a one-line progress hint per assistant chunk so the operator
+// sees what the agent is "thinking" between tool calls.
+func traceAssistantText(role AgentRole, ticket int, txt string) {
+	line := strings.TrimSpace(txt)
+
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+
+	if len(line) > 120 {
+		line = line[:117] + "..."
+	}
+
+	if line == "" {
+		return
+	}
+
+	ui("💭", role, ticket, "say", line)
 }
 
 func extractOpencodeErrorMsg(ev map[string]any) string {
@@ -358,24 +412,32 @@ func traceClaudeAssistant(role AgentRole, ticket int, ev map[string]any) {
 
 		btyp, _ := block["type"].(string)
 
-		if btyp != "tool_use" {
-			continue
+		switch btyp {
+		case "tool_use":
+			name, _ := block["name"].(string)
+			input, _ := block["input"].(map[string]any)
+			ui("·", role, ticket, name, summarizeToolInput(name, input))
+		case "text":
+			if txt, _ := block["text"].(string); txt != "" {
+				traceAssistantText(role, ticket, txt)
+			}
 		}
-
-		name, _ := block["name"].(string)
-		input, _ := block["input"].(map[string]any)
-		ui("·", role, ticket, name, summarizeToolInput(name, input))
 	}
 }
 
 func traceOpencodeToolUse(role AgentRole, ticket int, ev map[string]any) {
-	tool, _ := ev["tool"].(string)
+	part, _ := ev["part"].(map[string]any)
+
+	if part == nil {
+		return
+	}
+
+	tool, _ := part["tool"].(string)
 
 	if tool == "" {
 		return
 	}
 
-	part, _ := ev["part"].(map[string]any)
 	state, _ := part["state"].(map[string]any)
 	input, _ := state["input"].(map[string]any)
 
@@ -389,12 +451,10 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 
 	switch toolName {
 	case "Read", "Edit", "Write", "NotebookEdit", "read", "edit", "write":
-		if p, ok := input["file_path"].(string); ok {
-			return p
-		}
-
-		if p, ok := input["path"].(string); ok {
-			return p
+		for _, k := range []string{"file_path", "filePath", "path"} {
+			if p, ok := input[k].(string); ok && p != "" {
+				return p
+			}
 		}
 	case "Bash", "bash":
 		if c, ok := input["command"].(string); ok {
@@ -418,7 +478,12 @@ func parseAgentOutput(res *AgentResult) {
 		res.Messages = append(res.Messages, strings.TrimSpace(m[1]))
 	}
 
-	if m := reVerdict.FindStringSubmatch(res.Stdout); m != nil {
+	// Take the LAST VERDICT line — the prompt instructs agents to emit verdict as the
+	// final line, but they sometimes quote/example earlier `VERDICT:` mid-thought.
+	verdicts := reVerdict.FindAllStringSubmatch(res.Stdout, -1)
+
+	if len(verdicts) > 0 {
+		m := verdicts[len(verdicts)-1]
 		res.Verdict = AgentVerdict(m[1])
 
 		if len(m) > 2 {

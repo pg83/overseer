@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -58,13 +59,13 @@ func FetchBranch(trunk, srcPath, branch string) {
 	Throw(cmd.Run())
 }
 
-func TrunkPull(trunk string) {
-	cmd := exec.Command("git", "-C", trunk, "pull", "--ff-only")
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-
-	_ = cmd.Run()
-}
+// Trunk's HEAD and working tree are mutated by exactly one function in this codebase:
+// FfMergeBranch (post-MergedVerdict fast-forward). Nothing else here may write to either.
+// In particular there is no TrunkPull / git pull / git rebase: with the user's global
+// `pull.rebase=true` even `pull --ff-only` becomes a rebase that, on conflict, leaves
+// trunk mid-rebase with files deleted from the working tree. If the operator wants to
+// integrate remote changes into trunk's master, they do it manually between runs:
+//     git -C <trunk> fetch && git -C <trunk> merge --ff-only origin/master
 
 func readGoalsHash(trunk string) string {
 	data, err := os.ReadFile(filepath.Join(trunk, "GOALS.md"))
@@ -77,10 +78,16 @@ func readGoalsHash(trunk string) string {
 }
 
 func FfMergeBranch(trunk, branch string) (bool, string) {
+	fmt.Fprintf(os.Stderr, "trunk: ff-merge %s into %s\n", branch, trunk)
+
 	cmd := exec.Command("git", "-C", trunk, "merge", "--ff-only", branch)
 	out, err := cmd.CombinedOutput()
 
+	os.Stderr.Write(out)
+
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "trunk: ff-merge FAILED: %v\n", err)
+
 		return false, string(out)
 	}
 
@@ -96,4 +103,28 @@ func CurrentTrunkHash(trunk string) string {
 	}
 
 	return strings.TrimSpace(string(out))
+}
+
+// WorkspaceCommitsAhead reports how many commits the workspace's HEAD has beyond the
+// clone-time base (origin/HEAD or origin/master). 0 means the digger emitted READY
+// without committing anything; -1 means we couldn't determine (don't gate on that).
+func WorkspaceCommitsAhead(wsAbs string) int {
+	for _, base := range []string{"origin/HEAD", "origin/master"} {
+		cmd := exec.Command("git", "-C", wsAbs, "rev-list", "--count", base+"..HEAD")
+		out, err := cmd.Output()
+
+		if err != nil {
+			continue
+		}
+
+		n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+
+		if err != nil {
+			continue
+		}
+
+		return n
+	}
+
+	return -1
 }
