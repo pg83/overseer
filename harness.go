@@ -44,7 +44,8 @@ type Harness interface {
 }
 
 // SelectHarness picks the implementation by basename of the harness path —
-// "*opencode*" or "*claude*". Anything else is a config bug.
+// must contain one of "claude" / "opencode" / "codex" / "gemini". Anything else
+// is a config bug.
 func SelectHarness(harnessAbs string) Harness {
 	base := strings.ToLower(filepath.Base(harnessAbs))
 
@@ -53,9 +54,13 @@ func SelectHarness(harnessAbs string) Harness {
 		return NewOpencode(harnessAbs)
 	case strings.Contains(base, "claude"):
 		return NewClaude(harnessAbs)
+	case strings.Contains(base, "codex"):
+		return NewCodex(harnessAbs)
+	case strings.Contains(base, "gemini"):
+		return NewGemini(harnessAbs)
 	}
 
-	ThrowFmt("--harness %q: basename must contain 'claude' or 'opencode'", harnessAbs)
+	ThrowFmt("--harness %q: basename must contain one of claude/opencode/codex/gemini", harnessAbs)
 
 	return nil
 }

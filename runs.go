@@ -109,25 +109,38 @@ func summarizeRunJsonl(path string) string {
 }
 
 // assistantTextFromHarnessEv pulls assistant text out of a harness event regardless of
-// which backend produced it. Claude (stream-json) emits `type:"result"` with a `result`
-// string at run end; opencode emits `type:"text"` with `part.text` per chunk. Generic
-// here on purpose — past runs of one ticket may span multiple harnesses.
+// which backend produced it — past runs of one ticket may span multiple harnesses
+// (per-role config). Each backend's shape:
+//
+//   claude    {"type":"result", "result":"<full text>"}
+//   opencode  {"type":"text", "part":{"text":"<chunk>"}}
+//   codex     {"msg":{"type":"agent_message", "message":"<turn text>"}}
+//   gemini    {"type":"text"|"content", "text":"<chunk>"}
 func assistantTextFromHarnessEv(ev map[string]any) string {
 	switch t, _ := ev["type"].(string); t {
 	case "result":
 		txt, _ := ev["result"].(string)
 
 		return txt
-	case "text":
-		part, _ := ev["part"].(map[string]any)
-
-		if part == nil {
-			return ""
+	case "text", "content":
+		// Opencode wraps text in {part:{text}}; gemini puts it at top level.
+		if part, _ := ev["part"].(map[string]any); part != nil {
+			if txt, _ := part["text"].(string); txt != "" {
+				return txt
+			}
 		}
 
-		txt, _ := part["text"].(string)
+		txt, _ := ev["text"].(string)
 
 		return txt
+	}
+
+	if msg, _ := ev["msg"].(map[string]any); msg != nil {
+		if t, _ := msg["type"].(string); t == "agent_message" {
+			txt, _ := msg["message"].(string)
+
+			return txt
+		}
 	}
 
 	return ""
