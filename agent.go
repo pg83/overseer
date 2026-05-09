@@ -33,7 +33,7 @@ var (
 	reVerdict      = regexp.MustCompile(mdLineStart + `VERDICT` + mdSep + `([A-Z_]+)(?:` + mdSep + `(.+?))?` + mdLineEnd)
 	reTargetHash   = regexp.MustCompile(mdLineStart + `REBASE_TARGET` + mdSep + `([0-9a-f]+)`)
 	reCancelTicket = regexp.MustCompile(mdLineStart + `CANCEL` + mdSep + `(\d+)`)
-	reMessage      = regexp.MustCompile(mdLineStart + `MESSAGE` + mdSep + `(.+?)` + mdLineEnd)
+	reMessage      = regexp.MustCompile(mdLineStart + `MESSAGE` + mdSep + `(.+?)\s*$`)
 )
 
 // modelForRole resolves the model to use for a given role. Precedence:
@@ -330,7 +330,7 @@ func buildOpencodeCmd(ctx context.Context, jail, harness, model, wsAbs string, r
 }
 
 func parseClaudeStreamLine(ev map[string]any, finalText *strings.Builder, fault *streamErr, role AgentRole, ticket int) {
-	traceClaudeAssistant(role, ticket, ev)
+	traceClaudeAssistant(finalText, role, ticket, ev)
 
 	if t, _ := ev["type"].(string); t == "result" {
 		if txt, _ := ev["result"].(string); txt != "" {
@@ -356,7 +356,7 @@ func parseOpencodeStreamLine(ev map[string]any, finalText *strings.Builder, faul
 			return
 		}
 
-		traceAssistantText(role, ticket, txt)
+		emitSayAsMessage(finalText, txt)
 
 		finalText.WriteString(txt)
 
@@ -370,24 +370,19 @@ func parseOpencodeStreamLine(ev map[string]any, finalText *strings.Builder, faul
 	}
 }
 
-// traceAssistantText emits a one-line progress hint per assistant chunk so the operator
-// sees what the agent is "thinking" between tool calls.
-func traceAssistantText(role AgentRole, ticket int, txt string) {
-	line := strings.TrimSpace(txt)
+// emitSayAsMessage injects a synthetic `MESSAGE:` line into the agent's accumulated
+// stdout so the existing parseAgentOutput regex captures the text chunk like an
+// explicit MESSAGE — same downstream pipeline (UI + messages.txt), no duplication.
+func emitSayAsMessage(finalText *strings.Builder, txt string) {
+	collapsed := strings.ReplaceAll(strings.TrimSpace(txt), "\n", " ⏎ ")
 
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
-	}
-
-	if len(line) > 120 {
-		line = line[:117] + "..."
-	}
-
-	if line == "" {
+	if collapsed == "" {
 		return
 	}
 
-	ui("💭", role, ticket, "say", line)
+	finalText.WriteString("MESSAGE: ")
+	finalText.WriteString(collapsed)
+	finalText.WriteByte('\n')
 }
 
 func extractOpencodeErrorMsg(ev map[string]any) string {
@@ -410,7 +405,7 @@ func extractOpencodeErrorMsg(ev map[string]any) string {
 	return "unknown"
 }
 
-func traceClaudeAssistant(role AgentRole, ticket int, ev map[string]any) {
+func traceClaudeAssistant(finalText *strings.Builder, role AgentRole, ticket int, ev map[string]any) {
 	typ, _ := ev["type"].(string)
 
 	if typ != "assistant" {
@@ -441,7 +436,7 @@ func traceClaudeAssistant(role AgentRole, ticket int, ev map[string]any) {
 			ui("·", role, ticket, name, summarizeToolInput(name, input))
 		case "text":
 			if txt, _ := block["text"].(string); txt != "" {
-				traceAssistantText(role, ticket, txt)
+				emitSayAsMessage(finalText, txt)
 			}
 		}
 	}
