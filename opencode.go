@@ -20,7 +20,7 @@ func NewOpencode(bin string) *Opencode {
 func (o *Opencode) Name() string { return "opencode" }
 func (o *Opencode) Bin() string  { return o.bin }
 
-func (o *Opencode) Args(model, wsAbs string) []string {
+func (o *Opencode) Args(model, wsAbs, _ string) []string {
 	args := []string{
 		"run",
 		"--format", "json",
@@ -35,6 +35,11 @@ func (o *Opencode) Args(model, wsAbs string) []string {
 		args = append(args, "--dir", wsAbs)
 	}
 
+	// TODO: opencode CLI's --session flag only accepts its own ses_xxx IDs (no
+	// custom IDs at create). To support cross-run memory: maintain a mapping
+	// file <orch-root>/sessions/opencode/<sessionID>.id that records the harness
+	// ID after first run (parsed from stream events), then pass --session on
+	// subsequent runs. Not implemented yet — every run is fresh.
 	return args
 }
 

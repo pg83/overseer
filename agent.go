@@ -59,6 +59,20 @@ func (hm HarnessModel) resolveModel(role AgentRole) string {
 	return hm.Harness.DefaultModel(role)
 }
 
+// sessionIDFor builds the cross-run session name we hand to the harness. Stable
+// per-root for replanner / overseer (one session each, ever); per-ticket for the
+// work roles so each ticket has its own digger / reviewer / merger / tasker memory
+// across REWORK and MERGE_FAIL iterations. The orch root is included so multiple
+// orchestrator instances on the same machine don't collide.
+func sessionIDFor(orchRoot string, role AgentRole, ticket int) string {
+	switch role {
+	case RoleReplanner, RoleOverseer:
+		return fmt.Sprintf("%s/%s", orchRoot, role)
+	}
+
+	return fmt.Sprintf("%s/%s/T-%d", orchRoot, role, ticket)
+}
+
 // runAgent is the only entry-point consumers use. It guarantees:
 //
 //   - The harness always runs to completion. We never kill it from outside (no ctx
@@ -75,6 +89,7 @@ func (hm HarnessModel) resolveModel(role AgentRole) string {
 // runAgentOnce communicates failures by Throw'ing an *agentFault.
 func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	harness := o.harnessModelForRole(role).Harness
+	sessionID := sessionIDFor(o.Root, role, ticket)
 
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
@@ -83,7 +98,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) 
 		var res AgentResult
 
 		exc := Try(func() {
-			res = o.runAgentOnce(role, ticket, wsID, stdin)
+			res = o.runAgentOnce(role, ticket, wsID, sessionID, stdin)
 		})
 
 		if exc == nil {
@@ -160,7 +175,7 @@ func (o *Orchestrator) fatal(reason string) {
 // *agentFault — the caller (runAgent) classifies and either retries or hard-stops the
 // process. Never returns a synthesized "crashed" verdict event. The harness is never
 // killed from outside — it always runs to completion, on the user's invariant.
-func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin string) AgentResult {
+func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID, stdin string) AgentResult {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
@@ -198,7 +213,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 
 	model := hm.resolveModel(role)
 
-	bin, args := wrapJail(o.JailBin, rwArgs, harness.Bin(), harness.Args(model, wsAbs))
+	bin, args := wrapJail(o.JailBin, rwArgs, harness.Bin(), harness.Args(model, wsAbs, sessionID))
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(stdin)
