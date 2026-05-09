@@ -38,30 +38,6 @@ func (o *Orchestrator) modelForRole(role AgentRole) string {
 	return o.Models["default"]
 }
 
-func jailRWPaths(home string, backend Backend) []string {
-	common := []string{
-		"/tmp",
-		filepath.Join(home, ".cache"),
-		filepath.Join(home, "go"),
-	}
-
-	switch backend {
-	case BackendClaude:
-		return append(common,
-			filepath.Join(home, ".claude"),
-			filepath.Join(home, ".claude.json"),
-		)
-	case BackendOpencode:
-		return append(common,
-			filepath.Join(home, ".config", "opencode"),
-			filepath.Join(home, ".local", "share", "opencode"),
-			filepath.Join(home, ".ya"),
-		)
-	}
-
-	return common
-}
-
 // runAgent is the only entry-point consumers use. It guarantees:
 //
 //   - The harness always runs to completion. We never kill it from outside (no ctx
@@ -98,7 +74,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) 
 				role, ticket, wsID, attempt, exc.Error()))
 		}
 
-		retryable, why := classifyAgentFault(fault)
+		retryable, why := o.Harness.ClassifyFault(fault)
 
 		if !retryable {
 			o.fatal(fmt.Sprintf("agent failed non-retryably [%s T-%d ws=%s attempt=%d]: %s",
@@ -121,8 +97,8 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) 
 }
 
 // agentFault is what runAgentOnce Throws when the harness invocation fails for a real
-// reason (non-zero exit, harness stream-level error, etc.). Carries enough signal for
-// classifyAgentFault to decide retryable vs. fatal.
+// reason (non-zero exit, harness stream-level error, ...). Carries enough signal for
+// Harness.ClassifyFault to decide retryable vs. fatal.
 type agentFault struct {
 	exitCode int
 	stderr   string
@@ -131,58 +107,6 @@ type agentFault struct {
 
 func (f *agentFault) Error() string {
 	return fmt.Sprintf("agent fault: exit=%d stderr=%s", f.exitCode, truncate(f.stderr, 200))
-}
-
-// classifyAgentFault decides whether a one-attempt harness failure is worth retrying.
-// Whitelist of well-known transient signatures (rate limits, quota, common network
-// glitches) — everything else is treated as a hard stop on the principle that mystery
-// failures are likely real bugs in our config or code, not transient flakes.
-//
-// Grow these lists as production reveals new transient modes; keep the default strict
-// so we surface bugs rather than mask them.
-func classifyAgentFault(f *agentFault) (retryable bool, reason string) {
-	haystack := strings.ToLower(f.stderr + "\n" + f.stdout)
-
-	rateLimit := []string{
-		"rate limit",
-		"rate_limit",
-		"429 too many requests",
-		"too many requests",
-		"quota exceeded",
-		"credit balance",
-		"insufficient credit",
-		"out of credits",
-		"monthly limit",
-		"usage limit",
-	}
-
-	network := []string{
-		"connection refused",
-		"connection reset",
-		"i/o timeout",
-		"deadline exceeded",
-		"no route to host",
-		"temporary failure in name resolution",
-		"name resolution failed",
-		"tls handshake timeout",
-		"503 service unavailable",
-		"502 bad gateway",
-		"504 gateway timeout",
-	}
-
-	for _, p := range rateLimit {
-		if strings.Contains(haystack, p) {
-			return true, "rate-limit/quota: " + p
-		}
-	}
-
-	for _, p := range network {
-		if strings.Contains(haystack, p) {
-			return true, "transient network: " + p
-		}
-	}
-
-	return false, fmt.Sprintf("exit=%d stderr=%q", f.exitCode, truncate(f.stderr, 200))
 }
 
 func truncate(s string, n int) string {
@@ -242,29 +166,20 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 		rwArgs = append(rwArgs, "--rw="+tmpdir)
 	}
 
-	for _, p := range jailRWPaths(home, o.Backend) {
+	for _, p := range o.Harness.JailRWPaths(home) {
 		rwArgs = append(rwArgs, "--rw="+p)
 	}
 
 	model := o.modelForRole(role)
 
-	if model == "" && o.Backend == BackendClaude && role == RoleDigger {
-		model = "sonnet"
+	if model == "" {
+		model = o.Harness.DefaultModel(role)
 	}
 
-	var cmd *exec.Cmd
-	var parseLine func(map[string]any, *strings.Builder, *streamErr, AgentRole, int)
+	bin, args := wrapJail(o.JailBin, rwArgs, o.Harness.Bin(), o.Harness.Args(model, wsAbs))
 
-	switch o.Backend {
-	case BackendClaude:
-		cmd = buildClaudeCmd(o.JailBin, o.Harness, model, rwArgs, stdin)
-		parseLine = parseClaudeStreamLine
-	case BackendOpencode:
-		cmd = buildOpencodeCmd(o.JailBin, o.Harness, model, wsAbs, rwArgs, stdin)
-		parseLine = parseOpencodeStreamLine
-	default:
-		ThrowFmt("unknown backend %q", o.Backend)
-	}
+	cmd := exec.Command(bin, args...)
+	cmd.Stdin = strings.NewReader(stdin)
 
 	if wsAbs != "" {
 		cmd.Dir = wsAbs
@@ -339,7 +254,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 
 		writeEvent(map[string]any{"t": "harness", "ev": ev})
 
-		parseLine(ev, &finalText, &streamFault, role, ticket)
+		o.Harness.ParseStreamLine(ev, &finalText, &streamFault, role, ticket)
 	}
 
 	err := cmd.Wait()
@@ -407,174 +322,25 @@ func (s *streamErr) record(msg string) {
 	}
 }
 
-func wrapJail(jail string, rwArgs []string, harness string, harnessArgs ...string) (string, []string) {
+// wrapJail composes the final exec invocation: if a jail binary was configured, the
+// harness runs under it with --rw=<path> arguments before the `--` separator;
+// otherwise the harness runs directly. Generic to all backends — only the inner
+// (bin, args) pair varies per Harness.
+func wrapJail(jail string, rwArgs []string, harnessBin string, harnessArgs []string) (string, []string) {
 	if jail == "" {
-		return harness, harnessArgs
+		return harnessBin, harnessArgs
 	}
 
 	args := append([]string{}, rwArgs...)
-	args = append(args, "--", harness)
+	args = append(args, "--", harnessBin)
 	args = append(args, harnessArgs...)
 
 	return jail, args
 }
 
-func buildClaudeCmd(jail, harness, model string, rwArgs []string, stdin string) *exec.Cmd {
-	harnessArgs := []string{
-		"-p",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--dangerously-skip-permissions",
-	}
-
-	if model != "" {
-		harnessArgs = append(harnessArgs, "--model", model)
-	}
-
-	bin, args := wrapJail(jail, rwArgs, harness, harnessArgs...)
-
-	cmd := exec.Command(bin, args...)
-	cmd.Stdin = strings.NewReader(stdin)
-
-	return cmd
-}
-
-func buildOpencodeCmd(jail, harness, model, wsAbs string, rwArgs []string, prompt string) *exec.Cmd {
-	harnessArgs := []string{"run",
-		"--format", "json",
-		"--dangerously-skip-permissions"}
-
-	if model != "" {
-		harnessArgs = append(harnessArgs, "-m", model)
-	}
-
-	if wsAbs != "" {
-		harnessArgs = append(harnessArgs, "--dir", wsAbs)
-	}
-
-	bin, args := wrapJail(jail, rwArgs, harness, harnessArgs...)
-
-	cmd := exec.Command(bin, args...)
-	cmd.Stdin = strings.NewReader(prompt)
-
-	return cmd
-}
-
-func parseClaudeStreamLine(ev map[string]any, finalText *strings.Builder, fault *streamErr, role AgentRole, ticket int) {
-	traceClaudeAssistant(finalText, role, ticket, ev)
-
-	if t, _ := ev["type"].(string); t == "result" {
-		if txt, _ := ev["result"].(string); txt != "" {
-			finalText.WriteString(txt)
-		}
-	}
-}
-
-func parseOpencodeStreamLine(ev map[string]any, finalText *strings.Builder, fault *streamErr, role AgentRole, ticket int) {
-	typ, _ := ev["type"].(string)
-
-	switch typ {
-	case "text":
-		part, _ := ev["part"].(map[string]any)
-
-		if part == nil {
-			return
-		}
-
-		txt, _ := part["text"].(string)
-
-		if txt == "" {
-			return
-		}
-
-		finalText.WriteString(txt)
-	case "tool_use":
-		traceOpencodeToolUse(role, ticket, ev)
-	case "error":
-		fault.record(extractOpencodeErrorMsg(ev))
-	}
-}
-
-func extractOpencodeErrorMsg(ev map[string]any) string {
-	e, _ := ev["error"].(map[string]any)
-
-	if e == nil {
-		return "unknown"
-	}
-
-	if data, ok := e["data"].(map[string]any); ok {
-		if msg, _ := data["message"].(string); msg != "" {
-			return msg
-		}
-	}
-
-	if name, _ := e["name"].(string); name != "" {
-		return name
-	}
-
-	return "unknown"
-}
-
-func traceClaudeAssistant(finalText *strings.Builder, role AgentRole, ticket int, ev map[string]any) {
-	typ, _ := ev["type"].(string)
-
-	if typ != "assistant" {
-		return
-	}
-
-	msg, _ := ev["message"].(map[string]any)
-
-	if msg == nil {
-		return
-	}
-
-	content, _ := msg["content"].([]any)
-
-	for _, c := range content {
-		block, _ := c.(map[string]any)
-
-		if block == nil {
-			continue
-		}
-
-		btyp, _ := block["type"].(string)
-
-		switch btyp {
-		case "tool_use":
-			name, _ := block["name"].(string)
-			input, _ := block["input"].(map[string]any)
-			ui("·", role, ticket, name, summarizeToolInput(name, input))
-		case "text":
-			if txt, _ := block["text"].(string); txt != "" {
-				finalText.WriteString(txt)
-
-				if !strings.HasSuffix(txt, "\n") {
-					finalText.WriteByte('\n')
-				}
-			}
-		}
-	}
-}
-
-func traceOpencodeToolUse(role AgentRole, ticket int, ev map[string]any) {
-	part, _ := ev["part"].(map[string]any)
-
-	if part == nil {
-		return
-	}
-
-	tool, _ := part["tool"].(string)
-
-	if tool == "" {
-		return
-	}
-
-	state, _ := part["state"].(map[string]any)
-	input, _ := state["input"].(map[string]any)
-
-	ui("·", role, ticket, tool, summarizeToolInput(tool, input))
-}
-
+// summarizeToolInput is the UI-trace helper shared by both backends — claude uses
+// CamelCase tool names (Read / Edit / Bash / Grep / Glob), opencode uses lowercase
+// (read / edit / bash / grep / glob), so the switch lists both forms together.
 func summarizeToolInput(toolName string, input map[string]any) string {
 	if input == nil {
 		return ""

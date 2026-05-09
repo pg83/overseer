@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -54,7 +53,7 @@ func mainBody() {
 		ThrowFmt("--harness %q: %v", *harness, err)
 	}
 
-	backend := detectBackend(harnessAbs)
+	harnessImpl := SelectHarness(harnessAbs)
 
 	jailAbs := ""
 
@@ -107,9 +106,9 @@ func mainBody() {
 		modelDescr = strings.Join(parts, " ")
 	}
 
-	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s harness=%s backend=%s models=[%s] jail=%s", *root, *trunk, harnessAbs, backend, modelDescr, jailDescr))
+	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s harness=%s backend=%s models=[%s] jail=%s", *root, *trunk, harnessAbs, harnessImpl.Name(), modelDescr, jailDescr))
 
-	o := NewOrchestrator(*root, *trunk, harnessAbs, backend, models, jailAbs)
+	o := NewOrchestrator(*root, *trunk, harnessImpl, models, jailAbs)
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
@@ -127,18 +126,3 @@ func mainBody() {
 	uiSys("🔚", "STOP", "overseer halted")
 }
 
-func detectBackend(harnessAbs string) Backend {
-	base := strings.ToLower(filepath.Base(harnessAbs))
-
-	if strings.Contains(base, "opencode") {
-		return BackendOpencode
-	}
-
-	if strings.Contains(base, "claude") {
-		return BackendClaude
-	}
-
-	ThrowFmt("--harness %q: basename must contain 'claude' or 'opencode'", harnessAbs)
-
-	return ""
-}

@@ -37,14 +37,13 @@ func eventReplans(events []map[string]any) []string {
 	return out
 }
 
-func NewOrchestrator(root, trunk, harness string, backend Backend, models map[string]string, jailBin string) *Orchestrator {
+func NewOrchestrator(root, trunk string, harness Harness, models map[string]string, jailBin string) *Orchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	o := &Orchestrator{
 		Root:       root,
 		Trunk:      trunk,
 		Harness:    harness,
-		Backend:    backend,
 		Models:     models,
 		JailBin:    jailBin,
 		AgentSem:   make(chan struct{}, 6),
@@ -228,7 +227,7 @@ func (o *Orchestrator) agentSelfBlock(role AgentRole) string {
 	}
 
 	return fmt.Sprintf("ROLE: %s\nMODEL: %s\nHARNESS: %s\nMESSAGES_LOG: %s\n",
-		role, model, o.Backend, messagesLogPath(o.Root))
+		role, model, o.Harness.Name(), messagesLogPath(o.Root))
 }
 
 func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string) string {
@@ -254,7 +253,7 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string
 		fmt.Fprintf(&sb, "\nLOG:\n%s\n", string(data))
 	}
 
-	if prior := priorRunsForTicket(o.Root, ticketN); prior != "" {
+	if prior := priorRunsForTicket(o.Root, ticketN, o.Harness); prior != "" {
 		fmt.Fprintf(&sb, "\nPRIOR_RUNS (compact summaries — Read each LOG_FILE for the full reasoning stream if you need tool-by-tool detail):\n%s\n", prior)
 	}
 

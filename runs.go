@@ -19,8 +19,10 @@ func runsDir(orchRoot string) string {
 // only this stream; nothing else writes to or reads from per-run state.
 //
 // priorRunsForTicket aggregates assistant text + final verdict from prior runs of a ticket
-// for inclusion in the next prompt's PRIOR_RUNS section.
-func priorRunsForTicket(orchRoot string, ticketN int) string {
+// for inclusion in the next prompt's PRIOR_RUNS section. Harness is consulted for the
+// per-backend AssistantText extractor — the run jsonls don't tag their backend (the
+// orchestrator never switches mid-run), so the active Harness is authoritative.
+func priorRunsForTicket(orchRoot string, ticketN int, harness Harness) string {
 	entries, err := os.ReadDir(runsDir(orchRoot))
 
 	if err != nil {
@@ -44,7 +46,7 @@ func priorRunsForTicket(orchRoot string, ticketN int) string {
 
 	for _, n := range matched {
 		path := filepath.Join(runsDir(orchRoot), n)
-		summary := summarizeRunJsonl(path)
+		summary := summarizeRunJsonl(path, harness)
 
 		if summary == "" {
 			continue
@@ -58,7 +60,7 @@ func priorRunsForTicket(orchRoot string, ticketN int) string {
 
 // summarizeRunJsonl scans a run's jsonl and returns the assistant's accumulated text plus
 // the final verdict line. Replanner/operator can grep the file directly for richer detail.
-func summarizeRunJsonl(path string) string {
+func summarizeRunJsonl(path string, harness Harness) string {
 	f, err := os.Open(path)
 
 	if err != nil {
@@ -89,7 +91,7 @@ func summarizeRunJsonl(path string) string {
 				continue
 			}
 
-			if txt := harnessAssistantText(ev); txt != "" {
+			if txt := harness.AssistantText(ev); txt != "" {
 				sb.WriteString(txt)
 
 				if !strings.HasSuffix(txt, "\n") {
@@ -104,28 +106,6 @@ func summarizeRunJsonl(path string) string {
 	}
 
 	return sb.String()
-}
-
-// harnessAssistantText extracts the assistant's text from one harness event, regardless of
-// backend. Claude (stream-json) emits `type:"result"` with a `result` string at the end;
-// opencode emits `type:"text"` with `part.text` per chunk.
-func harnessAssistantText(ev map[string]any) string {
-	typ, _ := ev["type"].(string)
-
-	switch typ {
-	case "result":
-		if txt, _ := ev["result"].(string); txt != "" {
-			return txt
-		}
-	case "text":
-		if part, ok := ev["part"].(map[string]any); ok {
-			if txt, _ := part["text"].(string); txt != "" {
-				return txt
-			}
-		}
-	}
-
-	return ""
 }
 
 func concatPromptInput(prompt, input string) string {
