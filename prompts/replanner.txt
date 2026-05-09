@@ -14,8 +14,6 @@ Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 
 Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `CANCELLED`, `TASK_NEW`, `TASK_UPDATE`.
 
-Each ticket also has a `bounce_count` field — how many times the ticket has cycled back from reviewer or merger to digger without landing. The higher it is, the more stuck the ticket. Treat it as a hard signal: `bounce_count ≥ 20` is a candidate to split or cancel; `bounce_count ≥ 40` should almost always be abandoned and recreated as smaller, narrower tickets.
-
 Patterns to act on:
 - 3+ `REVIEWER_REWORK` entries → ticket scope too large or DESCR ambiguous → split.
 - 2+ `MERGE_FAIL` / `MERGE_FF_FAIL` → ticket touches code that other tickets keep changing → reorder (DEPS) or split out the contended piece.
