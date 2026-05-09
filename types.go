@@ -115,8 +115,15 @@ type Orchestrator struct {
 	GoalsHash string
 	Harness   string
 	Backend   Backend
-	Model     string
 	JailBin   string
+
+	// Models is the model-resolution table. Lookup precedence (in modelForRole):
+	//   1. Models[<role-name>]      e.g. "tasker", "digger", "reviewer", ...
+	//   2. Models["think"]          for overseer / replanner / tasker
+	//   3. Models["work"]           for digger / reviewer
+	//   4. Models["default"]        from --model
+	// Empty string at every level falls through to backend's own default.
+	Models map[string]string
 
 	Mu       sync.Mutex
 	Tickets  []Ticket

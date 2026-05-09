@@ -36,6 +36,27 @@ var (
 	reMessage      = regexp.MustCompile(mdLineStart + `MESSAGE` + mdSep + `(.+?)` + mdLineEnd)
 )
 
+// modelForRole resolves the model to use for a given role. Precedence:
+// per-role override → group (think/work) → global default → empty (harness picks).
+func (o *Orchestrator) modelForRole(role AgentRole) string {
+	if m := o.Models[string(role)]; m != "" {
+		return m
+	}
+
+	switch role {
+	case RoleTasker, RoleReplanner, RoleOverseer:
+		if m := o.Models["think"]; m != "" {
+			return m
+		}
+	case RoleDigger, RoleReviewer:
+		if m := o.Models["work"]; m != "" {
+			return m
+		}
+	}
+
+	return o.Models["default"]
+}
+
 func jailRWPaths(home string, backend Backend) []string {
 	common := []string{
 		"/tmp",
@@ -113,7 +134,7 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 		rwArgs = append(rwArgs, "--rw="+p)
 	}
 
-	model := o.Model
+	model := o.modelForRole(role)
 
 	if model == "" && o.Backend == BackendClaude && role == RoleDigger {
 		model = "sonnet"

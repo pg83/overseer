@@ -11,7 +11,7 @@ import (
 
 const mergerQueueThrottle = 4
 
-func NewOrchestrator(root, trunk, harness string, backend Backend, model, jailBin string) *Orchestrator {
+func NewOrchestrator(root, trunk, harness string, backend Backend, models map[string]string, jailBin string) *Orchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	o := &Orchestrator{
@@ -19,7 +19,7 @@ func NewOrchestrator(root, trunk, harness string, backend Backend, model, jailBi
 		Trunk:      trunk,
 		Harness:    harness,
 		Backend:    backend,
-		Model:      model,
+		Models:     models,
 		JailBin:    jailBin,
 		Inflight:   map[int]*AgentRun{},
 		AgentSem:   make(chan struct{}, 6),
@@ -202,8 +202,23 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 	}()
 }
 
+// agentSelfBlock identifies the agent to itself: which role it is, which model is driving
+// it, which harness backend. Goes at the top of every agent's input so the agent can use
+// it for self-aware decisions (e.g. "I'm running on a small model, keep edits cheap").
+func (o *Orchestrator) agentSelfBlock(role AgentRole) string {
+	model := o.modelForRole(role)
+
+	if model == "" {
+		model = "(harness default)"
+	}
+
+	return fmt.Sprintf("ROLE: %s\nMODEL: %s\nHARNESS: %s\n", role, model, o.Backend)
+}
+
 func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string) string {
 	var sb strings.Builder
+
+	sb.WriteString(o.agentSelfBlock(role))
 
 	t, _ := o.findTicketLocked(ticketN)
 	fmt.Fprintf(&sb, "TICKET: %d\nDESCR: %s\nPRIO: %d\nDEPS: %v\n", t.N, t.Descr, t.Prio, t.Deps)
@@ -524,8 +539,9 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	currentTasks := SerializeTasks(o.Tickets)
 	o.Mu.Unlock()
 
-	input := fmt.Sprintf("REASON_FOR_REPLAN: %s\nSOURCE_AGENT: %s\nSOURCE_TICKET: %d\nRUNS_DIR: %s\n\nCURRENT_TASKS:\n%s\n",
-		req.Reason, req.Source, req.Ticket, runsDir(o.Root), currentTasks)
+	input := o.agentSelfBlock(RoleReplanner) +
+		fmt.Sprintf("REASON_FOR_REPLAN: %s\nSOURCE_AGENT: %s\nSOURCE_TICKET: %d\nRUNS_DIR: %s\n\nCURRENT_TASKS:\n%s\n",
+			req.Reason, req.Source, req.Ticket, runsDir(o.Root), currentTasks)
 
 	prompt := loadPrompt(o.Root, RoleReplanner)
 	stdin := concatPromptInput(prompt, input)
@@ -718,8 +734,9 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	diggerWSAbs := wsPath(o.Root, req.Workspace)
 	mergerWSAbs := wsPath(o.Root, mergerWS)
 
-	input := fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
-		req.Ticket, diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
+	input := o.agentSelfBlock(RoleMerger) +
+		fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
+			req.Ticket, diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
 	prompt := loadPrompt(o.Root, RoleMerger)
 	stdin := concatPromptInput(prompt, input)
 
@@ -842,7 +859,8 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 	currentTasks := SerializeTasks(o.Tickets)
 	o.Mu.Unlock()
 
-	input := fmt.Sprintf("REASON: %s\n\nCURRENT_TASKS:\n%s\n", req.Reason, currentTasks)
+	input := o.agentSelfBlock(RoleOverseer) +
+		fmt.Sprintf("REASON: %s\n\nCURRENT_TASKS:\n%s\n", req.Reason, currentTasks)
 	prompt := loadPrompt(o.Root, RoleOverseer)
 	stdin := concatPromptInput(prompt, input)
 

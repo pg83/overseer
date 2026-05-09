@@ -26,7 +26,15 @@ func mainBody() {
 	root := flag.String("root", "", "orchestrator root (where TASKS.md, tickets/, workspaces/ live)")
 	trunk := flag.String("trunk", "", "path to git working tree being modified")
 	harness := flag.String("harness", "claude", "agent harness binary (basename must contain 'claude' or 'opencode')")
-	model := flag.String("model", "", "model name to pass to harness (opencode: -m <model>); empty = harness default")
+	model := flag.String("model", "", "default model (lowest priority)")
+	thinkModel := flag.String("think-model", "", "model for overseer/replanner/tasker (overrides --model)")
+	workModel := flag.String("work-model", "", "model for digger/reviewer (overrides --model)")
+	taskerModel := flag.String("tasker-model", "", "model for tasker (overrides --think-model)")
+	diggerModel := flag.String("digger-model", "", "model for digger (overrides --work-model)")
+	reviewerModel := flag.String("reviewer-model", "", "model for reviewer (overrides --work-model)")
+	mergerModel := flag.String("merger-model", "", "model for merger (overrides --model)")
+	replannerModel := flag.String("replanner-model", "", "model for replanner (overrides --think-model)")
+	overseerModel := flag.String("overseer-model", "", "model for overseer (overrides --think-model)")
 	jailBin := flag.String("jail-bin", "", "jail binary (PATH-resolved or absolute); empty = run harness directly")
 	Throw(flag.CommandLine.Parse(os.Args[1:]))
 
@@ -64,15 +72,44 @@ func mainBody() {
 		jailDescr = "(none)"
 	}
 
-	modelDescr := *model
+	models := map[string]string{}
 
-	if modelDescr == "" {
-		modelDescr = "(default)"
+	for _, kv := range []struct {
+		k string
+		v string
+	}{
+		{"default", *model},
+		{"think", *thinkModel},
+		{"work", *workModel},
+		{string(RoleTasker), *taskerModel},
+		{string(RoleDigger), *diggerModel},
+		{string(RoleReviewer), *reviewerModel},
+		{string(RoleMerger), *mergerModel},
+		{string(RoleReplanner), *replannerModel},
+		{string(RoleOverseer), *overseerModel},
+	} {
+		if kv.v != "" {
+			models[kv.k] = kv.v
+		}
 	}
 
-	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s harness=%s backend=%s model=%s jail=%s", *root, *trunk, harnessAbs, backend, modelDescr, jailDescr))
+	modelDescr := "(harness default)"
 
-	o := NewOrchestrator(*root, *trunk, harnessAbs, backend, *model, jailAbs)
+	if len(models) > 0 {
+		var parts []string
+
+		for _, k := range []string{"default", "think", "work", string(RoleTasker), string(RoleDigger), string(RoleReviewer), string(RoleMerger), string(RoleReplanner), string(RoleOverseer)} {
+			if v, ok := models[k]; ok {
+				parts = append(parts, k+"="+v)
+			}
+		}
+
+		modelDescr = strings.Join(parts, " ")
+	}
+
+	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s harness=%s backend=%s models=[%s] jail=%s", *root, *trunk, harnessAbs, backend, modelDescr, jailDescr))
+
+	o := NewOrchestrator(*root, *trunk, harnessAbs, backend, models, jailAbs)
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
