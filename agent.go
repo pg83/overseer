@@ -162,6 +162,8 @@ func (o *Orchestrator) runAgentInner(ctx context.Context, role AgentRole, ticket
 
 	argsCopy := append([]string{}, cmd.Args...)
 
+	uiTicket("🔧", role, ticket, "EXEC", strings.Join(argsCopy, " "))
+
 	// Single jsonl writer for the whole run; no other persistence path. All readers
 	// (priorRunsForTicket, replanner mining, operator) consume only this file.
 	Throw(os.MkdirAll(runsDir(o.Root), 0755))
