@@ -518,11 +518,31 @@ func scanJSONObjects(s string, leftovers *[]string) []string {
 		end := matchBrace(s, j)
 
 		if end < 0 {
-			if tail := strings.TrimSpace(s[j:]); tail != "" {
-				*leftovers = append(*leftovers, tail)
+			// matchBrace ran off the end without balancing — typically the
+			// string-state walk fell out of phase (e.g. `{"type":task"...}`
+			// with a missing opening quote inverts every subsequent toggle).
+			// Find the next `{` and try again; the broken stretch is dropped
+			// into leftovers in a single chunk so later valid objects in the
+			// same stdout don't get swallowed alongside it.
+			nextRel := strings.IndexByte(s[j+1:], '{')
+
+			if nextRel < 0 {
+				if tail := strings.TrimSpace(s[j:]); tail != "" {
+					*leftovers = append(*leftovers, tail)
+				}
+
+				break
 			}
 
-			break
+			next := j + 1 + nextRel
+
+			if broken := strings.TrimSpace(s[j:next]); broken != "" {
+				*leftovers = append(*leftovers, broken)
+			}
+
+			i = next
+
+			continue
 		}
 
 		objs = append(objs, s[j:end+1])
