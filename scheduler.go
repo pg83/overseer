@@ -143,11 +143,15 @@ func (o *Orchestrator) scheduleReady() {
 }
 
 func (o *Orchestrator) readyCandidatesLocked() []Ticket {
-	closedMerged := map[int]bool{}
+	// Any CLOSED ticket counts as a satisfied dep — MERGED for the canonical
+	// "work landed" path, DISCARDED only ever appears here as a transient until
+	// the next replanner pass cleans up dependents (ValidateTasks rejects
+	// OPEN→DISCARDED at write time, so this is just defensive).
+	closed := map[int]bool{}
 
 	for _, t := range o.Tickets {
-		if t.State == StateClosed && t.CloseReason == CloseMerged {
-			closedMerged[t.N] = true
+		if t.State == StateClosed {
+			closed[t.N] = true
 		}
 	}
 
@@ -165,7 +169,7 @@ func (o *Orchestrator) readyCandidatesLocked() []Ticket {
 		ok := true
 
 		for _, d := range t.Deps {
-			if !closedMerged[d] {
+			if !closed[d] {
 				ok = false
 
 				break
@@ -485,10 +489,9 @@ func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 			continue
 		}
 
-		// Idempotent: if the ticket was already CLOSED (e.g. via replanner cancel op →
-		// CANCELLED), keep the original CLOSE_REASON. A late-arriving result from a
-		// goroutine that was already cancelled must not rewrite history (CANCELLED →
-		// DISCARDED).
+		// Idempotent: if the ticket was already CLOSED, keep the original CLOSE_REASON.
+		// A late-arriving result from a goroutine that lost its ticket mid-run must
+		// not rewrite history (e.g. MERGED → DISCARDED).
 		if o.Tickets[i].State == StateClosed {
 			o.Tickets[i].InProgress = false
 
@@ -672,7 +675,7 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 		}
 
 		tickets[idx].State = StateClosed
-		tickets[idx].CloseReason = CloseCancelled
+		tickets[idx].CloseReason = CloseDiscarded
 		tickets[idx].InProgress = false
 
 		return tickets
@@ -801,8 +804,8 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops
 				detail += " reason=" + reason
 			}
 
-			o.recordEventLocked(n, "CANCELLED", detail)
-			uiTicket("🛑", RoleReplanner, n, "CANCELLED", reason)
+			o.recordEventLocked(n, "DISCARDED", detail)
+			uiTicket("🛑", RoleReplanner, n, "DISCARDED", reason)
 		}
 	}
 

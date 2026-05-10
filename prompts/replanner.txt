@@ -12,7 +12,7 @@ Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 
 ## How to spot a stuck ticket
 
-Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `CANCELLED`, `TASK_NEW`, `TASK_UPDATE`.
+Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `DISCARDED`, `TASK_NEW`, `TASK_UPDATE`.
 
 Patterns to act on:
 - 3+ `REVIEWER_REWORK` entries → ticket scope too large or DESCR ambiguous → split.
@@ -53,7 +53,9 @@ Semantics:
 
 - `new` — create a new OPEN ticket. `n` must be unused (extend the sequence: `max(prior_n) + 1`, +2, ...). All four fields required.
 - `update` — modify an existing OPEN ticket. `descr` / `prio` / `deps` are optional — only the fields you include change; omit the rest. CLOSED tickets cannot be updated (immutable history).
-- `cancel` — close an OPEN ticket as CANCELLED. If the ticket has an in-flight goroutine, it gets killed. Use this to drop a ticket entirely (replaced by smaller ones, no longer needed, etc.). Cannot cancel an already-CLOSED ticket.
+- `cancel` — close an OPEN ticket as DISCARDED. Use this to drop a ticket (replaced by smaller ones, no longer needed, etc.).
+
+  When you cancel T-5, in the same batch also handle every OPEN ticket that has 5 in its deps: either `update` it to remove 5, or `cancel` it too. No OPEN ticket may depend on a DISCARDED one.
 
 Ops are applied in emission order. So `new T-7` followed by `update T-7` is valid; `cancel T-3` followed by `update T-3` fails because T-3 is now CLOSED.
 

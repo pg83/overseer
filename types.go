@@ -15,9 +15,15 @@ const (
 type CloseReason string
 
 const (
-	CloseMerged    CloseReason = "MERGED"
+	// CloseMerged means the ticket's work landed in trunk via fast-forward.
+	// Dependents of a MERGED ticket can rely on its work being present.
+	CloseMerged CloseReason = "MERGED"
+
+	// CloseDiscarded means the ticket won't ship — replanner cancelled it,
+	// reviewer rejected it, digger gave up, tasker couldn't plan, or any
+	// similar abandonment. Single state for "closed without merging" since
+	// every consumer treats them identically (history-only, not a "todo").
 	CloseDiscarded CloseReason = "DISCARDED"
-	CloseCancelled CloseReason = "CANCELLED"
 )
 
 type TicketEvent struct {

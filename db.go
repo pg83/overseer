@@ -131,7 +131,7 @@ func ValidateTasks(tickets []Ticket) {
 
 		if t.State == StateClosed {
 			switch t.CloseReason {
-			case CloseMerged, CloseDiscarded, CloseCancelled:
+			case CloseMerged, CloseDiscarded:
 			default:
 				ThrowFmt("ticket %d: STATE=CLOSED requires valid CLOSE_REASON, got %q", t.N, t.CloseReason)
 			}
@@ -146,6 +146,32 @@ func ValidateTasks(tickets []Ticket) {
 
 			if d == t.N {
 				ThrowFmt("ticket %d: DEPS contains self", t.N)
+			}
+		}
+	}
+
+	// An OPEN ticket cannot depend on a CLOSED-DISCARDED prerequisite — the
+	// dependent can never proceed. Whoever drops a ticket (replanner cancel,
+	// reviewer DISCARD, etc.) is responsible for cleaning up its dependents
+	// (update their deps to remove the dropped N, or cascade-cancel them).
+	// The validator catches anyone who forgets and rejects the whole batch.
+	byN := map[int]Ticket{}
+
+	for _, t := range tickets {
+		byN[t.N] = t
+	}
+
+	for _, t := range tickets {
+		if t.State != StateOpen {
+			continue
+		}
+
+		for _, d := range t.Deps {
+			dep := byN[d]
+
+			if dep.State == StateClosed && dep.CloseReason == CloseDiscarded {
+				ThrowFmt("ticket %d (OPEN) depends on T-%d which is DISCARDED — drop the dep or cancel ticket %d too",
+					t.N, d, t.N)
 			}
 		}
 	}
