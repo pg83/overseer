@@ -485,15 +485,24 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 	case VerdictReady:
 		// Structural sanity check: harness defaults often skip git commit unless explicitly
 		// asked. If the digger emitted READY but the branch has zero commits ahead of base,
-		// the work isn't actually visible to anyone — bounce back as REWORK with a concrete
-		// reason so the next digger iteration commits.
+		// the work isn't actually visible — route through the arbiter so persistent
+		// no-commit drift (digger confused about workspace, hallucinating done state, etc.)
+		// can ESCALATE to replanner instead of looping forever.
 		ahead := WorkspaceCommitsAhead(wsPath(o.Root, res.Workspace))
 
 		if ahead == 0 {
-			reason := fmt.Sprintf("READY claimed but %s has zero commits ahead of base — work was never committed; rerunning", res.Workspace)
+			reason := fmt.Sprintf("READY claimed but %s has zero commits ahead of base — work was never committed", res.Workspace)
 			o.recordEventLocked(res.Ticket, "DIGGER_NO_COMMIT", reason)
 			uiTicket("⚠️", RoleDigger, res.Ticket, "NO_COMMIT", reason)
-			o.spawnDiggerSameWorkspaceLocked(res.Ticket, res.Workspace)
+
+			o.QArbiter <- ArbiterRequest{
+				Ticket:    res.Ticket,
+				Workspace: res.Workspace,
+				Source:    RoleDigger,
+				Trigger:   VerdictNoCommit,
+				Detail:    reason,
+			}
+			uiTicket("📥", RoleDigger, res.Ticket, "→Q_arbiter", reason)
 
 			return
 		}

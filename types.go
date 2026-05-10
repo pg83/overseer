@@ -85,6 +85,12 @@ const (
 	// for the arbiter's input.
 	VerdictNoPlan AgentVerdict = "NO_PLAN"
 
+	// VerdictNoCommit is a synthetic trigger when a digger emitted READY but
+	// committed nothing — the work isn't visible. Routed to arbiter so persistent
+	// no-commit drift (workspace confusion, hallucinated done state) can ESCALATE
+	// instead of looping a same-workspace digger respawn forever.
+	VerdictNoCommit AgentVerdict = "NO_COMMIT"
+
 	// Arbiter verdicts.
 	VerdictContinue AgentVerdict = "CONTINUE"
 	VerdictEscalate AgentVerdict = "ESCALATE"
