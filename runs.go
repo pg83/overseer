@@ -146,11 +146,20 @@ func assistantTextFromHarnessEv(ev map[string]any) string {
 	return ""
 }
 
+// outputPriming is appended at the very end of every agent stdin. Research on
+// weak models (glm-4 family etc.) shows the last instruction before the
+// assistant turn has the strongest pull on the first emitted tokens — output
+// priming ("your reply begins with `{`") biases the model toward starting
+// generation with a JSON object instead of prose narration. The role-specific
+// rules already live in prompts/*.txt and common.txt; this is the universal
+// last-line nudge.
+const outputPriming = "\n\nYour reply contains only JSON-line events. Each non-blank line is one JSON object: {\"type\": \"...\", ...}. Begin your reply with `{`."
+
 func concatPromptInput(prompt, input string) string {
 	if prompt == "" {
-		return input
+		return input + outputPriming
 	}
 
-	return prompt + "\n\n" + input
+	return prompt + "\n\n" + input + outputPriming
 }
 
