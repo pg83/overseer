@@ -80,8 +80,6 @@ const (
 	VerdictPlanWritten   AgentVerdict = "PLAN_WRITTEN"
 	VerdictGoalsAchieved AgentVerdict = "GOALS_ACHIEVED"
 	VerdictNoAction      AgentVerdict = "NO_ACTION"
-	VerdictReplanApplied AgentVerdict = "REPLAN_APPLIED"
-	VerdictReplanInvalid AgentVerdict = "REPLAN_INVALID"
 )
 
 // AgentResult is pure transport: routing identity (Role/Ticket/Workspace), raw I/O

@@ -575,8 +575,7 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	ops := replannerTaskOps(res.Events)
 
 	if len(ops) == 0 {
-		verdict, detail := lastVerdict(res.Events)
-		uiTicket("💤", RoleReplanner, req.Ticket, "NO_ACTION", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
+		uiTicket("💤", RoleReplanner, req.Ticket, "NO_OPS", "replanner emitted no task events")
 
 		return
 	}

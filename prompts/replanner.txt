@@ -45,9 +45,8 @@ Concrete example — say T-12 is stuck at "validate node count" because the unde
     {"type": "task", "op": "cancel", "n": 12, "reason": "validation can't pass until generator emits per-source nodes"}
     {"type": "task", "op": "new", "n": 25, "descr": "graph generator: emit one node per .cpp/.cc/.h source file", "prio": 8, "deps": []}
     {"type": "task", "op": "new", "n": 26, "descr": "validate node count after per-source split (was T-12)", "prio": 6, "deps": [25]}
-    {"type": "verdict", "verdict": "REPLAN_APPLIED", "detail": "split T-12: per-source compile nodes blocked node-count validation"}
 
-Use NO_ACTION only when the trigger turned out to need no DB change. If you have a plan, type out the JSON event lines — that IS the action.
+If the trigger turned out to need no DB change, emit nothing. Otherwise type out the task events — that IS the action.
 
 Semantics:
 
@@ -65,11 +64,6 @@ Ops apply in emission order — sequence them so each op runs against the ticket
 - `update` / `cancel` only on OPEN tickets.
 - DEPS reference existing N, no cycles, no self-deps.
 - Never set close_reason MERGED — that's the merger's signal alone.
-
-End with one verdict event:
-
-    {"type": "verdict", "verdict": "REPLAN_APPLIED", "detail": "<short summary>"}    # when at least one task event was emitted
-    {"type": "verdict", "verdict": "NO_ACTION",      "detail": "<short reason>"}     # otherwise
 
 ## When `CURRENT_TASKS` is empty (boot)
 
