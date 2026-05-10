@@ -450,10 +450,15 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 		reason := "tasker produced no plan"
 		o.recordEventLocked(res.Ticket, "TASKER_NO_PLAN", reason)
 		uiTicket("💀", RoleTasker, res.Ticket, "NO_PLAN", reason)
-		o.setInProgressLocked(res.Ticket, false)
 
-		o.QReplanner <- ReplanRequest{Source: RoleTasker, Ticket: res.Ticket, Reason: reason}
-		uiTicket("📥", RoleTasker, res.Ticket, "→Q_replanner", reason)
+		o.QArbiter <- ArbiterRequest{
+			Ticket:    res.Ticket,
+			Workspace: res.Workspace,
+			Source:    RoleTasker,
+			Trigger:   VerdictNoPlan,
+			Detail:    reason,
+		}
+		uiTicket("📥", RoleTasker, res.Ticket, "→Q_arbiter", reason)
 
 		return
 	}
@@ -493,13 +498,17 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 		uiTicket("✅", RoleDigger, res.Ticket, "READY", detail)
 		o.spawnReviewerLocked(res.Ticket, res.Workspace)
 	case VerdictCantDo:
-		reason := "digger can't do: " + detail
 		o.recordEventLocked(res.Ticket, "DIGGER_CANT_DO", detail)
 		uiTicket("🛑", RoleDigger, res.Ticket, "CANT_DO", detail)
-		o.setInProgressLocked(res.Ticket, false)
 
-		o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}
-		uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
+		o.QArbiter <- ArbiterRequest{
+			Ticket:    res.Ticket,
+			Workspace: res.Workspace,
+			Source:    RoleDigger,
+			Trigger:   VerdictCantDo,
+			Detail:    detail,
+		}
+		uiTicket("📥", RoleDigger, res.Ticket, "→Q_arbiter", detail)
 	}
 }
 
@@ -918,11 +927,21 @@ func (o *Orchestrator) runArbiter(req ArbiterRequest) {
 		o.recordEvent(req.Ticket, "ARBITER_CONTINUE", detail)
 		uiTicket("➡️", RoleArbiter, req.Ticket, "CONTINUE", detail)
 
-		// Dispatch back into the cycle based on what triggered the call.
-		switch req.Trigger {
-		case VerdictRework, VerdictDiscard:
+		// Dispatch back into the cycle based on which role failed and how.
+		switch req.Source {
+		case RoleTasker:
+			// Tasker NO_PLAN — try planning again. Same session, fresh ws.
+			o.Mu.Lock()
+			o.spawnTaskerLocked(req.Ticket)
+			o.Mu.Unlock()
+		case RoleDigger:
+			// Digger CANT_DO — same workspace, prior session preserved.
 			o.spawnDiggerSameWorkspaceLocked(req.Ticket, req.Workspace)
-		case VerdictMergeFail:
+		case RoleReviewer:
+			// REWORK or DISCARD — digger gets the trigger detail as feedback.
+			o.spawnDiggerSameWorkspaceLocked(req.Ticket, req.Workspace)
+		case RoleMerger:
+			// MERGE_FAIL or FF_FAIL — digger rebases onto current trunk head.
 			o.spawnDiggerWithRebase(req.Ticket, req.Workspace, req.RebaseTarget, req.MergeOut)
 		}
 	case VerdictEscalate:

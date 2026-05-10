@@ -79,6 +79,12 @@ const (
 	VerdictMergeFail     AgentVerdict = "MERGE_FAIL"
 	VerdictGoalsAchieved AgentVerdict = "GOALS_ACHIEVED"
 
+	// VerdictNoPlan is a synthetic trigger sent to the arbiter when a tasker
+	// fails to produce a plan. The tasker doesn't emit it itself (it just emits
+	// no `plan` event); the orchestrator categorizes that absence as NO_PLAN
+	// for the arbiter's input.
+	VerdictNoPlan AgentVerdict = "NO_PLAN"
+
 	// Arbiter verdicts.
 	VerdictContinue AgentVerdict = "CONTINUE"
 	VerdictEscalate AgentVerdict = "ESCALATE"
