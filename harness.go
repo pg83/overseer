@@ -101,7 +101,7 @@ func classifyTransientNetworkFault(stderr, stdout string) (retryable bool, reaso
 // faultUnknown is the default "we don't know how to classify this" answer — caller
 // turns this into a hard-stop. Each harness composes it as the final fall-through.
 func faultUnknown(f *agentFault) (bool, string) {
-	return false, fmt.Sprintf("exit=%d stderr=%q", f.exitCode, truncate(f.stderr, 200))
+	return false, fmt.Sprintf("exit=%d stderr=%q", f.exitCode, f.stderr)
 }
 
 // orchestratorSessionNS is the UUID5 namespace for orchestrator-issued session names.

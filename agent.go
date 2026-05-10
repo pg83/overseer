@@ -178,8 +178,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 		if parseExc != nil {
 			parseFeedback = parseExc.Error()
 
-			uiTicket("🔄", role, ticket, "RESPAWN",
-				"malformed output: "+truncate(parseFeedback, 200))
+			uiTicket("🔄", role, ticket, "RESPAWN", "malformed output: "+parseFeedback)
 
 			bumpBackoff()
 
@@ -218,15 +217,7 @@ type agentFault struct {
 }
 
 func (f *agentFault) Error() string {
-	return fmt.Sprintf("agent fault: exit=%d stderr=%s", f.exitCode, truncate(f.stderr, 200))
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-
-	return s[:n] + "..."
+	return fmt.Sprintf("agent fault: exit=%d stderr=%s", f.exitCode, f.stderr)
 }
 
 // fatal hard-stops the orchestrator. The user's invariant: any agent-harness failure
@@ -502,7 +493,7 @@ func parseEvents(stdout string) []map[string]any {
 		idx := strings.IndexByte(line, '{')
 
 		if idx < 0 {
-			ThrowFmt("line %d has no JSON object: %s", i+1, truncate(line, 200))
+			ThrowFmt("line %d has no JSON object: %s", i+1, line)
 		}
 
 		rest := strings.TrimSpace(line[idx:])
@@ -510,11 +501,11 @@ func parseEvents(stdout string) []map[string]any {
 		var ev map[string]any
 
 		if err := json.Unmarshal([]byte(rest), &ev); err != nil {
-			ThrowFmt("line %d JSON parse failed (%v): %s", i+1, err, truncate(line, 200))
+			ThrowFmt("line %d JSON parse failed (%v): %s", i+1, err, line)
 		}
 
 		if t, _ := ev["type"].(string); t == "" {
-			ThrowFmt("line %d JSON missing `type` field: %s", i+1, truncate(line, 200))
+			ThrowFmt("line %d JSON missing `type` field: %s", i+1, line)
 		}
 
 		out = append(out, ev)
