@@ -12,7 +12,7 @@ Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 
 ## How to spot a stuck ticket
 
-Each ticket carries an `events` array — the orchestrator's append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `DISCARDED`, `TASK_NEW`, `TASK_UPDATE`.
+Each ticket carries an `events` array — the append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `DISCARDED`, `TASK_NEW`, `TASK_UPDATE`.
 
 Patterns to act on:
 - 3+ `REVIEWER_REWORK` entries → ticket scope too large or DESCR ambiguous → split.
@@ -32,7 +32,7 @@ Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs c
 
 ## Output (typed JSON events)
 
-To modify the task DB you write JSON event lines directly in your text response — see common.txt. There is no tool, no function call, no orchestrator API; the orchestrator parses your stdout for `{...}` lines. **You ARE the only mechanism that mutates the task DB. Emit `task` events for every change you decide on.**
+To modify the task DB you write JSON `task` event lines directly in your text response — see common.txt for the event-emission protocol. **You are the only role that mutates the task DB. Emit a `task` event for every change you decide on.**
 
 Three ops, one event per change:
 

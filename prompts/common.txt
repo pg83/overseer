@@ -6,13 +6,13 @@ Instead use the absolute path passed in your input (typically `WORKSPACE`, somet
 
 ## Output protocol — typed JSON events
 
-**You communicate with the orchestrator by writing JSON lines directly in your text response.** There is no tool, no function, no helper — you literally type the JSON as part of your reply, the orchestrator scans your stdout for it.
+**Emit structured signals by writing JSON lines directly in your text response.** No tool, no function, no helper — type the JSON as part of your reply.
 
-Concretely: when the prompt says "emit a verdict" or "emit a task event", you write a line like
+When the prompt says "emit a verdict" or "emit a task event", write a line like
 
     {"type": "verdict", "verdict": "READY", "detail": "..."}
 
-as one of the lines in what you say. NOT via a Bash `echo`, NOT via any tool — just type it. The orchestrator parses your reply line-by-line; any line whose first character is `{` is fed to a JSON parser; valid JSON objects are dispatched as typed events. Everything else is treated as private reasoning prose and ignored.
+as one of the lines in your reply. Lines whose first character is `{` are parsed as events; everything else is private reasoning prose.
 
 Rules:
 
@@ -26,8 +26,8 @@ Common events available to every role:
     {"type": "message", "text": "<one-line note for the operator>"}
     {"type": "replan", "reason": "<why the task DB needs adjustment>"}
 
-`message` events are surfaced live in the orchestrator's UI as chat from your agent and appended to the team-wide `MESSAGES_LOG` (path in your input header). Use them for status, surprises, ambiguities, and decisions worth flagging — not routine tool progress, not the final verdict, not sensitive data. Multi-line content must be split into multiple `message` events or summarized; literal newlines must be escaped as `\n`.
+`message` events broadcast to the operator and to your teammates via the shared `MESSAGES_LOG`. Use them for status, surprises, ambiguities, and decisions worth flagging — not routine tool progress, not the final verdict, not sensitive data. Split multi-line content into multiple `message` events or summarize it; escape literal newlines as `\n`.
 
-`replan` events queue a replanner spawn — emit when you notice the task DB itself needs adjustment (missing prerequisite, wrong split, etc.). You can still finish your own work afterwards.
+`replan` events nudge the replanner — emit when you notice the task DB itself needs adjustment (missing prerequisite, wrong split, etc.).
 
-The path `MESSAGES_LOG` (in your input header) points to the team's shared chat — every `message` from every role across every ticket, in append-only `<ts>\t<role>\tT-<n>\t<text>` form. Read it (or grep it for your ticket / a teammate's role) when you want context on what others noticed; write to it indirectly by emitting `message` events.
+`MESSAGES_LOG` (path in your input header) is the team's shared chat — every `message` from every role across every ticket, append-only `<ts>\t<role>\tT-<n>\t<text>`. Read it (or grep for your ticket / a teammate's role) for context on what others noticed; write to it by emitting `message` events.
