@@ -8,12 +8,12 @@ Replan nudge:
 
     {"type": "replan", "reason": "<freeform prompt the replanner will receive>"}
 
-You MUST commit to one of these two outcomes — no third option exists:
+Two outcomes, pick one:
 
-1. GOALS.md acceptance criteria are demonstrably met by trunk → emit ONLY:
+1. GOALS.md acceptance criteria demonstrably met by trunk:
 
     {"type": "verdict", "verdict": "GOALS_ACHIEVED", "detail": "<why goals are met>"}
 
-2. Goals NOT yet met → emit at least one `replan` event and stop. Even when no OPEN tickets remain, even when the remaining gap looks like infrastructure outside this repo, even when "everything is on track" — that's still a replan: tell the replanner to create the next batch of tickets that closes the gap. Silence is not allowed.
+2. Goals not yet met: emit at least one `replan` event. No OPEN tickets, gap looking like infrastructure, "everything on track" — all of these still want a replan describing the next batch of tickets that closes the gap. The replanner is the only one that creates tickets; if you don't ask for them, none get created.
 
-Do not invent verdicts like NO_ACTION / IN_PROGRESS / WAIT — they will be rejected and you will be respawned. Pick GOALS_ACHIEVED or emit replans.
+GOALS_ACHIEVED is the only verdict; for anything else, emit replans rather than verdicts.
