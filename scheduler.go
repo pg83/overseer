@@ -193,28 +193,100 @@ func (o *Orchestrator) readyCandidatesLocked() []Ticket {
 }
 
 func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
-	role := RoleDigger
+	if planExists(o.Root, t.N) {
+		o.spawnDiggerFreshLocked(t.N)
 
-	if !planExists(o.Root, t.N) {
-		role = RoleTasker
+		return
 	}
 
+	o.spawnTaskerLocked(t.N)
+}
+
+// runAgentDigger drives a digger invocation, retrying until the agent emits a
+// recognized verdict (READY or CANT_DO). Model glitches that finish without a
+// verdict are transient — the digger session preserves prior context.
+func (o *Orchestrator) runAgentDigger(ticketN int, ws, stdin string) AgentResult {
+	for {
+		res := o.runAgent(RoleDigger, ticketN, ws, stdin)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictReady || v == VerdictCantDo {
+			return res
+		}
+
+		uiTicket("🔄", RoleDigger, ticketN, "RESPAWN", fmt.Sprintf("verdict=%q — retrying", v))
+	}
+}
+
+// runAgentReviewer drives a reviewer invocation, retrying until it emits APPROVE,
+// REWORK, or DISCARD.
+func (o *Orchestrator) runAgentReviewer(ticketN int, ws, stdin string) AgentResult {
+	for {
+		res := o.runAgent(RoleReviewer, ticketN, ws, stdin)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictApprove || v == VerdictRework || v == VerdictDiscard {
+			return res
+		}
+
+		uiTicket("🔄", RoleReviewer, ticketN, "RESPAWN", fmt.Sprintf("verdict=%q — retrying", v))
+	}
+}
+
+// runAgentMerger drives a merger invocation, retrying until it emits MERGED or
+// MERGE_FAIL.
+func (o *Orchestrator) runAgentMerger(ticketN int, ws, stdin string) AgentResult {
+	for {
+		res := o.runAgent(RoleMerger, ticketN, ws, stdin)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictMerged || v == VerdictMergeFail {
+			return res
+		}
+
+		uiTicket("🔄", RoleMerger, ticketN, "RESPAWN", fmt.Sprintf("verdict=%q — retrying", v))
+	}
+}
+
+func (o *Orchestrator) spawnTaskerLocked(ticketN int) {
 	wsID := NewWorkspace(o.Root, o.Trunk)
 
-	o.setInProgressLocked(t.N, true)
-	o.appendWorkspaceLocked(t.N, wsID)
+	o.setInProgressLocked(ticketN, true)
+	o.appendWorkspaceLocked(ticketN, wsID)
 
 	wsAbs := wsPath(o.Root, wsID)
 
-	o.recordEventLocked(t.N, "AGENT_START", fmt.Sprintf("role=%s ws=%s", role, wsID))
-	uiTicket("🚀", role, t.N, "START", "ws="+wsID)
+	o.recordEventLocked(ticketN, "AGENT_START", fmt.Sprintf("role=%s ws=%s", RoleTasker, wsID))
+	uiTicket("🚀", RoleTasker, ticketN, "START", "ws="+wsID)
 
-	input := o.buildAgentInput(role, t.N, wsAbs)
-	prompt := loadPrompt(role)
+	input := o.buildAgentInput(RoleTasker, ticketN, wsAbs)
+	prompt := loadPrompt(RoleTasker)
+	stdin := concatPromptInput(prompt, input)
+
+	// Tasker signals via plan event, not verdict — single-shot, no retry loop.
+	go func() {
+		res := o.runAgent(RoleTasker, ticketN, wsID, stdin)
+		o.AgentDone <- res
+	}()
+}
+
+func (o *Orchestrator) spawnDiggerFreshLocked(ticketN int) {
+	wsID := NewWorkspace(o.Root, o.Trunk)
+
+	o.setInProgressLocked(ticketN, true)
+	o.appendWorkspaceLocked(ticketN, wsID)
+
+	wsAbs := wsPath(o.Root, wsID)
+
+	o.recordEventLocked(ticketN, "AGENT_START", fmt.Sprintf("role=%s ws=%s", RoleDigger, wsID))
+	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+wsID)
+
+	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs)
+	prompt := loadPrompt(RoleDigger)
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		res := o.runAgent(role, t.N, wsID, stdin)
+		res := o.runAgentDigger(ticketN, wsID, stdin)
 		o.AgentDone <- res
 	}()
 }
@@ -411,17 +483,6 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 			uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
 		default:
 		}
-	default:
-		reason := fmt.Sprintf("digger returned unclear verdict=%s detail=%s", verdict, detail)
-		o.recordEventLocked(res.Ticket, "DIGGER_UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
-		uiTicket("❓", RoleDigger, res.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", verdict))
-		o.setInProgressLocked(res.Ticket, false)
-
-		select {
-		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
-			uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
-		default:
-		}
 	}
 }
 
@@ -461,17 +522,6 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 		select {
 		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "reviewer discarded: " + detail}:
 			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", detail)
-		default:
-		}
-	default:
-		reason := fmt.Sprintf("reviewer unclear verdict=%s detail=%s", verdict, detail)
-		o.recordEventLocked(res.Ticket, "REVIEWER_UNCLEAR", reason)
-		uiTicket("❓", RoleReviewer, res.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s detail=%s", verdict, detail))
-		o.setInProgressLocked(res.Ticket, false)
-
-		select {
-		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
-			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", reason)
 		default:
 		}
 	}
@@ -517,7 +567,7 @@ func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		res := o.runAgent(RoleReviewer, ticketN, ws, stdin)
+		res := o.runAgentReviewer(ticketN, ws, stdin)
 		o.AgentDone <- res
 	}()
 }
@@ -532,7 +582,7 @@ func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
 	stdin := concatPromptInput(prompt, input)
 
 	go func() {
-		res := o.runAgent(RoleDigger, ticketN, ws, stdin)
+		res := o.runAgentDigger(ticketN, ws, stdin)
 		o.AgentDone <- res
 	}()
 }
@@ -872,7 +922,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	prompt := loadPrompt(RoleMerger)
 	stdin := concatPromptInput(prompt, input)
 
-	res := o.runAgent(RoleMerger, req.Ticket, mergerWS, stdin)
+	res := o.runAgentMerger(req.Ticket, mergerWS, stdin)
 
 	for _, line := range eventReplans(res.Events) {
 		select {
@@ -938,23 +988,6 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		head := CurrentTrunkHash(o.Trunk)
 
 		o.spawnDiggerWithRebase(req.Ticket, req.Workspace, head, detail)
-
-	default:
-		reason := fmt.Sprintf("merger unclear verdict=%s detail=%s", verdict, detail)
-		o.recordEvent(req.Ticket, "MERGE_UNCLEAR", reason)
-		uiTicket("❓", RoleMerger, req.Ticket, "UNCLEAR", fmt.Sprintf("verdict=%s", verdict))
-
-		o.Mu.Lock()
-		o.setInProgressLocked(req.Ticket, false)
-		o.Mu.Unlock()
-
-		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: reason}:
-			uiTicket("📥", RoleMerger, req.Ticket, "→Q_replanner", reason)
-		default:
-		}
-
-		o.signalWake()
 	}
 }
 
@@ -979,7 +1012,7 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 	o.Mu.Unlock()
 
 	go func() {
-		res := o.runAgent(RoleDigger, ticketN, ws, stdin)
+		res := o.runAgentDigger(ticketN, ws, stdin)
 		o.AgentDone <- res
 	}()
 }
