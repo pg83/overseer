@@ -89,9 +89,19 @@ func (o *Opencode) ParseStreamLine(ev map[string]any, finalText *strings.Builder
 
 // ClassifyFault: opencode/quasi_opencode-side transient signatures plus the shared
 // network set. Grow the rate-limit list as we observe new patterns from this CLI.
+//
+// Stream-level `type:"error"` events (recorded as "stream error: ..." in stderr)
+// are treated as retryable: opencode surfaces real model output as content
+// chunks, so a stream-error marker means harness-side serialization / transport
+// flakiness — not a model-content failure. Observed in the wild:
+// `UnknownError: Expected 'id' to be a string.`
 func (o *Opencode) ClassifyFault(f *agentFault) (bool, string) {
 	if ok, reason := classifyTransientNetworkFault(f.stderr, f.stdout); ok {
 		return true, reason
+	}
+
+	if strings.HasPrefix(f.stderr, "stream error: ") {
+		return true, "opencode stream error: " + strings.TrimPrefix(f.stderr, "stream error: ")
 	}
 
 	haystack := strings.ToLower(f.stderr + "\n" + f.stdout)
