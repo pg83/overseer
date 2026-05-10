@@ -30,6 +30,22 @@ Each run log is JSONL of `start` / `stdin` / `harness` / `stderr` / `finish` eve
 
 Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs containing "minor / follow-up / out of scope" (deferred work), DESCR vs shipped-implementation drift, side-findings ("by the way Y is broken") — turn into new OPEN tickets via `op=new`, cite the source log file in DESCR.
 
+## Process: draft → critique → emit
+
+Work through this in three phases inside the same response. The critique step is the point — it forces you to check your own work before it ships.
+
+1. **Draft (prose).** Describe the situation: what's stuck, why, what you'd change. List the ops you intend to emit, in the order you'll emit them.
+
+2. **Critique (prose).** Re-read your draft as a skeptical reviewer would. Address every one of:
+   - Did any cancel orphan a dep on an OPEN ticket? Did you handle every dependent in the same batch?
+   - Are op orderings sane (update before cancel; new before update on same N)?
+   - Is each new ticket scoped tight enough that a single digger pass can finish it?
+   - Are there alternative approaches you didn't consider — splitting differently, just updating descr instead of cancelling, etc.?
+   - Will GOALS.md actually advance from this batch? Or is this just rearranging?
+   - Is there a weakest assumption in your plan? What would break it?
+
+3. **Emit (JSON).** Type the final `task` events. If the critique surfaced issues, fix them in this step — don't leave the bad version in the draft and emit it anyway.
+
 ## Output (typed JSON events)
 
 Emit a `task` event for every change you decide on. See common.txt for the event-emission protocol.
