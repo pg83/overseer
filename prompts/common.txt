@@ -16,10 +16,10 @@ as one of the lines in what you say. NOT via a Bash `echo`, NOT via any tool —
 
 Rules:
 
-- One event per line. The `{` MUST be at column 0 (no leading spaces, no markdown wrappers).
-- The whole event MUST fit on a single line — newlines inside string fields must be escaped as `\n`.
-- Unknown event types are silently dropped. Stick to the events documented for your role.
-- You can interleave prose and events in any order; only events have semantic effect.
+- One event per line. Put the `{` at column 0 (no leading spaces, no markdown wrappers).
+- Keep each event on a single line — escape newlines inside string fields as `\n`.
+- Stick to the events documented for your role.
+- Interleave prose and events in any order — only events have semantic effect.
 
 Common events available to every role:
 

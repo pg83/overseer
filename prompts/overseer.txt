@@ -13,5 +13,5 @@ End every response with exactly one verdict event:
     {"type": "verdict", "verdict": "GOALS_ACHIEVED", "detail": "<why goals are met>"}
     {"type": "verdict", "verdict": "NO_ACTION",      "detail": "<short status>"}
 
-- GOALS_ACHIEVED — when GOALS.md acceptance criteria are demonstrably met by trunk; the orchestrator writes REPORT.md and stops.
+- GOALS_ACHIEVED — emit when GOALS.md acceptance criteria are demonstrably met by trunk.
 - NO_ACTION — otherwise. Pair with however many `replan` events you think necessary, or none if the project is on track.

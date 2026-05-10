@@ -32,7 +32,7 @@ Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs c
 
 ## Output (typed JSON events)
 
-To modify the task DB you write JSON event lines directly in your text response — see common.txt. There is no tool, no function call, no orchestrator API; the orchestrator parses your stdout for `{...}` lines. **You ARE the only mechanism that mutates the task DB. If you finish without emitting `task` events, the situation that triggered you stays unfixed.**
+To modify the task DB you write JSON event lines directly in your text response — see common.txt. There is no tool, no function call, no orchestrator API; the orchestrator parses your stdout for `{...}` lines. **You ARE the only mechanism that mutates the task DB. Emit `task` events for every change you decide on.**
 
 Three ops, one event per change:
 
@@ -47,26 +47,24 @@ Concrete example — say T-12 is stuck at "validate node count" because the unde
     {"type": "task", "op": "new", "n": 26, "descr": "validate node count after per-source split (was T-12)", "prio": 6, "deps": [25]}
     {"type": "verdict", "verdict": "REPLAN_APPLIED", "detail": "split T-12: per-source compile nodes blocked node-count validation"}
 
-Don't end with `NO_ACTION` because "no tool exists" — the tool IS writing the JSON. If you have a real plan, type it out.
+Use NO_ACTION only when the trigger turned out to need no DB change. If you have a plan, type out the JSON event lines — that IS the action.
 
 Semantics:
 
-- `new` — create a new OPEN ticket. `n` must be unused (extend the sequence: `max(prior_n) + 1`, +2, ...). All four fields required.
-- `update` — modify an existing OPEN ticket. `descr` / `prio` / `deps` are optional — only the fields you include change; omit the rest. CLOSED tickets cannot be updated (immutable history).
+- `new` — create a new OPEN ticket. Use the next unused N (`max(prior_n) + 1`, +2, ...). All four fields required.
+- `update` — modify an existing OPEN ticket. `descr` / `prio` / `deps` are optional — only the fields you include change. Operate only on OPEN tickets; CLOSED history is immutable.
 - `cancel` — close an OPEN ticket as DISCARDED. Use this to drop a ticket (replaced by smaller ones, no longer needed, etc.).
 
   When you cancel T-5, in the same batch also handle every OPEN ticket that has 5 in its deps: either `update` it to remove 5, or `cancel` it too. No OPEN ticket may depend on a DISCARDED one.
 
-Ops are applied in emission order. So `new T-7` followed by `update T-7` is valid; `cancel T-3` followed by `update T-3` fails because T-3 is now CLOSED.
+Ops apply in emission order — sequence them so each op runs against the ticket's expected state at that point (e.g. `update` a ticket BEFORE `cancel`'ing it, not after).
 
-## Schema invariants (orchestrator validates the resulting list and rejects on violation)
+## Schema invariants
 
-- Never emit `op=new` for an N that already exists (CLOSED or OPEN).
-- Never emit `op=update` or `op=cancel` for a CLOSED ticket — history is immutable.
+- Use a fresh N for `new` (never one that already exists, OPEN or CLOSED).
+- `update` / `cancel` only on OPEN tickets.
 - DEPS reference existing N, no cycles, no self-deps.
-- You cannot mint MERGED — only the merger creates MERGED close_reason after a real fast-forward into trunk.
-
-If validation fails, the entire batch is rejected (atomic) and you're spawned again with the rejection reason — fix and retry.
+- Never set close_reason MERGED — that's the merger's signal alone.
 
 End with one verdict event:
 

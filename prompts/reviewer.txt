@@ -8,6 +8,6 @@ Emit exactly one verdict event as your final structured output:
     {"type": "verdict", "verdict": "REWORK",  "detail": "<specific feedback>"}
     {"type": "verdict", "verdict": "DISCARD", "detail": "<reason>"}
 
-- APPROVE — work is acceptable, send to merger.
+- APPROVE — work is acceptable.
 - REWORK — digger should iterate; be concrete in `detail`.
-- DISCARD — the ticket as defined cannot be solved here; the orchestrator will close the ticket DISCARDED and notify the replanner.
+- DISCARD — the ticket as defined cannot be solved here.
