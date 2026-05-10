@@ -43,6 +43,13 @@ func LoadTasks(root string) []Ticket {
 
 		var t Ticket
 		Throw(json.Unmarshal(line, &t))
+
+		// Back-compat: CANCELLED was merged into DISCARDED. Migrate on load so
+		// old tasks.jsonl files don't trip the validator's enum check.
+		if t.CloseReason == "CANCELLED" {
+			t.CloseReason = CloseDiscarded
+		}
+
 		tickets = append(tickets, t)
 	}
 
