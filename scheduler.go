@@ -46,10 +46,10 @@ func NewOrchestrator(root, trunk string, bindings map[string]HarnessModel, jailB
 		Bindings:   bindings,
 		JailBin:    jailBin,
 		AgentSem:   make(chan struct{}, 6),
-		QReplanner: make(chan ReplanRequest, 256),
-		QMerger:    make(chan MergeRequest, 256),
-		QOverseer:  make(chan OverseerRequest, 64),
-		AgentDone:  make(chan AgentResult, 64),
+		QReplanner: make(chan ReplanRequest, 1000),
+		QMerger:    make(chan MergeRequest, 1000),
+		QOverseer:  make(chan OverseerRequest, 1000),
+		AgentDone:  make(chan AgentResult, 1000),
 		Wakeup:     make(chan struct{}, 1),
 		StopCtx:    ctx,
 		StopCancel: cancel,
@@ -383,10 +383,7 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 	}
 
 	for _, line := range eventReplans(res.Events) {
-		select {
-		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: line}:
-		default:
-		}
+		o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: line}
 	}
 
 	switch res.Role {
@@ -429,11 +426,8 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 		uiTicket("💀", RoleTasker, res.Ticket, "NO_PLAN", reason)
 		o.setInProgressLocked(res.Ticket, false)
 
-		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleTasker, Ticket: res.Ticket, Reason: reason}:
-			uiTicket("📥", RoleTasker, res.Ticket, "→Q_replanner", reason)
-		default:
-		}
+		o.QReplanner <- ReplanRequest{Source: RoleTasker, Ticket: res.Ticket, Reason: reason}
+		uiTicket("📥", RoleTasker, res.Ticket, "→Q_replanner", reason)
 
 		return
 	}
@@ -478,11 +472,8 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 		uiTicket("🛑", RoleDigger, res.Ticket, "CANT_DO", detail)
 		o.setInProgressLocked(res.Ticket, false)
 
-		select {
-		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}:
-			uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
-		default:
-		}
+		o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: reason}
+		uiTicket("📥", RoleDigger, res.Ticket, "→Q_replanner", reason)
 	}
 }
 
@@ -494,11 +485,8 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 		o.recordEventLocked(res.Ticket, "REVIEWER_APPROVE", detail)
 		uiTicket("👍", RoleReviewer, res.Ticket, "APPROVE", detail)
 
-		select {
-		case o.QMerger <- MergeRequest{Ticket: res.Ticket, Workspace: res.Workspace}:
-			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_merger", "ws="+res.Workspace)
-		default:
-		}
+		o.QMerger <- MergeRequest{Ticket: res.Ticket, Workspace: res.Workspace}
+		uiTicket("📥", RoleReviewer, res.Ticket, "→Q_merger", "ws="+res.Workspace)
 	case VerdictRework:
 		o.recordEventLocked(res.Ticket, "REVIEWER_REWORK", detail)
 		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", detail)
@@ -506,11 +494,8 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 		bounce := o.bumpBounceLocked(res.Ticket)
 
 		if bounce > 0 && bounce%bounceReplanInterval == 0 {
-			select {
-			case o.QReplanner <- ReplanRequest{Source: RoleReviewer, Ticket: res.Ticket, Reason: fmt.Sprintf("REWORK on T-%d (bounce=%d): %s", res.Ticket, bounce, detail)}:
-				uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", fmt.Sprintf("bounce=%d", bounce))
-			default:
-			}
+			o.QReplanner <- ReplanRequest{Source: RoleReviewer, Ticket: res.Ticket, Reason: fmt.Sprintf("REWORK on T-%d (bounce=%d): %s", res.Ticket, bounce, detail)}
+			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", fmt.Sprintf("bounce=%d", bounce))
 		}
 
 		o.spawnDiggerSameWorkspaceLocked(res.Ticket, res.Workspace)
@@ -519,11 +504,8 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 		uiTicket("👎", RoleReviewer, res.Ticket, "DISCARD", detail)
 		o.setInProgressLocked(res.Ticket, false)
 
-		select {
-		case o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "reviewer discarded: " + detail}:
-			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", detail)
-		default:
-		}
+		o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "reviewer discarded: " + detail}
+		uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", detail)
 	}
 }
 
@@ -550,11 +532,8 @@ func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 	SaveTasks(o.Root, o.Tickets)
 
 	if o.openCountLocked() <= 2 {
-		select {
-		case o.QOverseer <- OverseerRequest{Reason: fmt.Sprintf("low-open after T-%d closed (%s)", n, reason)}:
-			uiSys("📥", "→Q_overseer", fmt.Sprintf("after T-%d %s", n, reason))
-		default:
-		}
+		o.QOverseer <- OverseerRequest{Reason: fmt.Sprintf("low-open after T-%d closed (%s)", n, reason)}
+		uiSys("📥", "→Q_overseer", fmt.Sprintf("after T-%d %s", n, reason))
 	}
 }
 
@@ -790,11 +769,8 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops
 		feedback := fmt.Sprintf("previous replanner output invalid: %s\n\nREJECTED_OUTPUT:\n%s",
 			exc.Error(), res.Stdout)
 
-		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleReplanner, Ticket: req.Ticket, Reason: feedback}:
-			uiTicket("📥", RoleReplanner, req.Ticket, "→Q_replanner", "retry after reject")
-		default:
-		}
+		o.QReplanner <- ReplanRequest{Source: RoleReplanner, Ticket: req.Ticket, Reason: feedback}
+		uiTicket("📥", RoleReplanner, req.Ticket, "→Q_replanner", "retry after reject")
 
 		return
 	}
@@ -855,11 +831,8 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops
 	// Only fire an overseer nudge when cancel ops actually dropped open tickets — new /
 	// update ops can't reduce open count.
 	if canceledAny && o.openCountLocked() <= 2 {
-		select {
-		case o.QOverseer <- OverseerRequest{Reason: fmt.Sprintf("low-open after replanner batch (req T-%d)", req.Ticket)}:
-			uiSys("📥", "→Q_overseer", "after replanner cancels")
-		default:
-		}
+		o.QOverseer <- OverseerRequest{Reason: fmt.Sprintf("low-open after replanner batch (req T-%d)", req.Ticket)}
+		uiSys("📥", "→Q_overseer", "after replanner cancels")
 	}
 
 	o.Mu.Unlock()
@@ -906,10 +879,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	o.Mu.Unlock()
 
 	if prevGoals != "" && newGoals != prevGoals {
-		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Reason: "GOALS.md changed locally in trunk"}:
-		default:
-		}
+		o.QReplanner <- ReplanRequest{Source: RoleMerger, Reason: "GOALS.md changed locally in trunk"}
 	}
 
 	diggerBranch := "ovs/" + req.Workspace
@@ -925,10 +895,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	res := o.runAgentMerger(req.Ticket, mergerWS, stdin)
 
 	for _, line := range eventReplans(res.Events) {
-		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: line}:
-		default:
-		}
+		o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: line}
 	}
 
 	verdict, detail := lastVerdict(res.Events)
@@ -961,11 +928,8 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 		uiTicket("🏁", "", req.Ticket, "CLOSED", "MERGED")
 
-		select {
-		case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: "merged"}:
-			uiTicket("📥", RoleMerger, req.Ticket, "→Q_replanner", "post-merge")
-		default:
-		}
+		o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: "merged"}
+		uiTicket("📥", RoleMerger, req.Ticket, "→Q_replanner", "post-merge")
 
 		o.signalWake()
 
@@ -978,11 +942,8 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		o.Mu.Unlock()
 
 		if bounce > 0 && bounce%bounceReplanInterval == 0 {
-			select {
-			case o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: fmt.Sprintf("MERGE_FAIL on T-%d (bounce=%d): %s", req.Ticket, bounce, detail)}:
-				uiTicket("📥", RoleMerger, req.Ticket, "→Q_replanner", fmt.Sprintf("bounce=%d", bounce))
-			default:
-			}
+			o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: fmt.Sprintf("MERGE_FAIL on T-%d (bounce=%d): %s", req.Ticket, bounce, detail)}
+			uiTicket("📥", RoleMerger, req.Ticket, "→Q_replanner", fmt.Sprintf("bounce=%d", bounce))
 		}
 
 		head := CurrentTrunkHash(o.Trunk)
@@ -1057,11 +1018,8 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 		uiSys("🦉", "OVERSEER_DONE", fmt.Sprintf("verdict=%s replans=%d", verdict, len(replans)))
 
 		for _, line := range replans {
-			select {
-			case o.QReplanner <- ReplanRequest{Source: RoleOverseer, Ticket: 0, Reason: line}:
-				uiSys("📥", "→Q_replanner", "from overseer: "+line)
-			default:
-			}
+			o.QReplanner <- ReplanRequest{Source: RoleOverseer, Ticket: 0, Reason: line}
+			uiSys("📥", "→Q_replanner", "from overseer: "+line)
 		}
 	}
 }
