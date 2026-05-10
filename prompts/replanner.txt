@@ -63,7 +63,6 @@ Ops apply in emission order — sequence them so each op runs against the ticket
 - Use a fresh N for `new` (never one that already exists, OPEN or CLOSED).
 - `update` / `cancel` only on OPEN tickets.
 - DEPS reference existing N, no cycles, no self-deps.
-- Never set close_reason MERGED — that's the merger's signal alone.
 
 ## When `CURRENT_TASKS` is empty (boot)
 
