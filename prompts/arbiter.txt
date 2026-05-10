@@ -8,7 +8,7 @@ Inputs (header + env):
 - TRIGGER_ROLE — REVIEWER or MERGER
 - TRIGGER_VERDICT — REWORK / DISCARD / MERGE_FAIL
 - TRIGGER_DETAIL — their reasoning verbatim
-- LOG / PRIOR_RUNS — full ticket history including bounce_count
+- LOG / PRIOR_RUNS — full ticket history (events array shows every REVIEWER_REWORK / MERGE_FAIL / MERGE_FF_FAIL the loop produced)
 
 Pick CONTINUE when another digger pass on the same workspace will plausibly resolve the trigger:
 - TRIGGER_DETAIL is concrete and actionable (specific function, test, edge)
@@ -16,7 +16,7 @@ Pick CONTINUE when another digger pass on the same workspace will plausibly reso
 - DESCR matches what's being attempted; only the implementation needs more iteration
 
 Pick ESCALATE when the ticket itself is broken:
-- bounce_count is large and the digger keeps reproducing the same kind of failure
+- many cycle-back events of the same kind and the digger keeps reproducing the same failure
 - the trigger names a missing prerequisite (a separate ticket must land first)
 - DESCR is ambiguous or the scope is too large; the work needs splitting
 - tests pass but acceptance criteria are unreachable from this code shape

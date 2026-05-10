@@ -27,7 +27,7 @@ func tasksDBPath(orchRoot string) string {
 // one JSON object per line in tasks.events.jsonl. Required fields:
 //
 //	ts: RFC3339Nano timestamp
-//	k:  kind discriminator — "create" | "update" | "close" | "event" | "bounce" | "ws"
+//	k:  kind discriminator — "create" | "update" | "close" | "event" | "ws"
 //	n:  ticket number
 //
 // Kind-specific fields:
@@ -36,7 +36,6 @@ func tasksDBPath(orchRoot string) string {
 //	update: descr? (string), prio? (int), deps? ([]int) — only present fields change
 //	close:  reason ("MERGED" | "DISCARDED")
 //	event:  kind (string), detail (string) — append to ticket.Events
-//	bounce: — increments BounceCount by 1
 //	ws:     ws (string) — appends to ticket.Workspaces
 type LogEvent = map[string]any
 
@@ -147,10 +146,6 @@ func emitLegacyTicketAsEvents(w io.Writer, t Ticket) {
 		write(LogEvent{"k": "ws", "n": t.N, "ws": ws})
 	}
 
-	for i := 0; i < t.BounceCount; i++ {
-		write(LogEvent{"k": "bounce", "n": t.N})
-	}
-
 	for _, e := range t.Events {
 		write(LogEvent{"ts": e.Ts, "k": "event", "n": t.N, "kind": e.Kind, "detail": e.Detail})
 	}
@@ -245,14 +240,6 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 		det, _ := ev["detail"].(string)
 
 		tickets[idx].Events = append(tickets[idx].Events, TicketEvent{Ts: ts, Kind: ek, Detail: det})
-
-		return tickets
-	case "bounce":
-		if idx < 0 {
-			return tickets
-		}
-
-		tickets[idx].BounceCount++
 
 		return tickets
 	case "ws":
@@ -451,16 +438,3 @@ func (o *Orchestrator) recordEvent(n int, kind, detail string) {
 	o.recordEventLocked(n, kind, detail)
 }
 
-// bumpBounceLocked appends a bounce event and returns the new count.
-// Caller must hold o.Mu.
-func (o *Orchestrator) bumpBounceLocked(n int) int {
-	o.appendLogEventLocked(LogEvent{"k": "bounce", "n": n})
-
-	for _, t := range o.Tickets {
-		if t.N == n {
-			return t.BounceCount
-		}
-	}
-
-	return 0
-}

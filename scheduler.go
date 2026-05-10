@@ -516,7 +516,6 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 	case VerdictRework:
 		o.recordEventLocked(res.Ticket, "REVIEWER_REWORK", detail)
 		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", detail)
-		o.bumpBounceLocked(res.Ticket)
 
 		o.QArbiter <- ArbiterRequest{
 			Ticket:    res.Ticket,
@@ -529,7 +528,6 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 	case VerdictDiscard:
 		o.recordEventLocked(res.Ticket, "REVIEWER_DISCARD", detail)
 		uiTicket("👎", RoleReviewer, res.Ticket, "DISCARD", detail)
-		o.bumpBounceLocked(res.Ticket)
 
 		o.QArbiter <- ArbiterRequest{
 			Ticket:    res.Ticket,
@@ -1017,10 +1015,6 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 			o.recordEvent(req.Ticket, "MERGE_FF_FAIL", out)
 			uiTicket("⚠️", RoleMerger, req.Ticket, "FF_FAIL", out)
 
-			o.Mu.Lock()
-			o.bumpBounceLocked(req.Ticket)
-			o.Mu.Unlock()
-
 			o.QArbiter <- ArbiterRequest{
 				Ticket:       req.Ticket,
 				Workspace:    req.Workspace,
@@ -1052,10 +1046,6 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	case VerdictMergeFail:
 		o.recordEvent(req.Ticket, "MERGE_FAIL", detail)
 		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", detail)
-
-		o.Mu.Lock()
-		o.bumpBounceLocked(req.Ticket)
-		o.Mu.Unlock()
 
 		head := CurrentTrunkHash(o.Trunk)
 

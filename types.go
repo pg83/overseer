@@ -42,13 +42,6 @@ type Ticket struct {
 	CloseReason CloseReason   `json:"close_reason,omitempty"`
 	Events      []TicketEvent `json:"events,omitempty"`
 
-	// BounceCount counts cycle-back events on this ticket: each REVIEWER_REWORK,
-	// MERGE_FAIL, MERGE_FF_FAIL increments it. Read by the bounce throttle that
-	// fires the replanner only every Nth iteration so we don't overwhelm it on
-	// every loop pass; also visible to the replanner itself in CURRENT_TASKS so
-	// it can see "this ticket has bounced 30 times" and act accordingly.
-	BounceCount int `json:"bounce_count,omitempty"`
-
 	// In-memory only; never persisted.
 	// Set true when the ticket enters the work pipeline (tasker / digger / reviewer / merger),
 	// cleared only on terminal close. Source of truth for scheduleReady's "is this ticket busy".
