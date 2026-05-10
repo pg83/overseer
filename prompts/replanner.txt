@@ -32,7 +32,7 @@ Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs c
 
 ## Output (typed JSON events)
 
-To modify the task DB you write JSON `task` event lines directly in your text response — see common.txt for the event-emission protocol. **You are the only role that mutates the task DB. Emit a `task` event for every change you decide on.**
+Emit a `task` event for every change you decide on. See common.txt for the event-emission protocol.
 
 Three ops, one event per change:
 
