@@ -1,32 +1,21 @@
 ## CWD vs WORKSPACE
 
-Your current working directory is a session-storage directory the harness uses to remember context across runs — it is NOT the project tree. Do NOT run git, read source, or write files there.
+Your cwd is a session-storage directory the harness uses for cross-run memory — not the project tree. For git, source reads, and file ops, use the absolute path from your input (`WORKSPACE`, or a role-specific name like `MERGER_WORKTREE`): either `cd "$WORKSPACE"` first or pass paths explicitly (`git -C "$WORKSPACE" ...`, absolute file paths).
 
-Instead use the absolute path passed in your input (typically `WORKSPACE`, sometimes a role-specific name like `MERGER_WORKTREE`). Either `cd "$WORKSPACE"` first or pass paths explicitly to every command (`git -C "$WORKSPACE" ...`, absolute file paths to file tools).
+## Output protocol — JSON-line events
 
-## Output protocol — strict JSON-line only
-
-**Your stdout consists of JSON-line events and nothing else.** Every non-empty line is one JSON object with a non-empty `type` field, e.g.
+Every non-empty line of stdout is one JSON object with a non-empty `type` field:
 
     {"type": "verdict", "verdict": "READY", "detail": "..."}
     {"type": "message", "text": "running tests now"}
 
-Anything else — prose, reasoning text, "Here is my answer:", markdown wrappers, code fences, leading whitespace, reasoning-tag leakage like `</think>{...}` — fails strict parsing and the harness respawns you. Blank lines are allowed.
-
-Rules:
-
-- One JSON object per line. Each event self-contained on a single line.
-- Escape newlines inside string fields as `\n`. Escape double quotes as `\"`.
-- Output starts at the first line with a JSON object and ends with the last one. No prologue, no epilogue.
-- All thinking, status updates, "let me check X" — wrap as a `message` event.
+Wrap thinking, status updates, "let me check X" as `message` events. Each event fits on a single line — escape newlines as `\n`, double quotes as `\"`.
 
 Common events available to every role:
 
-    {"type": "message", "text": "<one-line note posted to the team chat>"}
+    {"type": "message", "text": "<one-line note for the team chat>"}
     {"type": "replan", "reason": "<why the task DB needs adjustment>"}
 
-`message` events post to the shared team chat (`MESSAGES_LOG`) where every role across every ticket reads each other. Use them for status, surprises, ambiguities, and decisions worth flagging — not routine tool progress, not the final verdict, not sensitive data. Split multi-line content into multiple `message` events or summarize it; escape literal newlines as `\n`.
+`message` events post to the shared team chat (`MESSAGES_LOG`) where every role across every ticket reads each other. Status, surprises, ambiguities, decisions worth flagging. `MESSAGES_LOG` (path in your input header) is the same chat as a file: read or grep it for context on prior runs.
 
-`replan` events nudge the replanner — emit when you notice the task DB itself needs adjustment (missing prerequisite, wrong split, etc.).
-
-`MESSAGES_LOG` (path in your input header) is the team's shared chat — every `message` from every role across every ticket, append-only `<ts>\t<role>\tT-<n>\t<text>`. Read it (or grep for your ticket / a teammate's role) for context on what others noticed; write to it by emitting `message` events.
+`replan` events nudge the replanner when the task DB itself needs adjustment (missing prerequisite, wrong split, etc.).
