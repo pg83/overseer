@@ -265,6 +265,26 @@ func (o *Orchestrator) runAgentArbiter(ticketN int, ws, stdin string, env map[st
 	}
 }
 
+// runAgentOverseer drives an overseer invocation, retrying until the agent
+// either certifies goals are met (GOALS_ACHIEVED verdict) or emits at least
+// one replan event. Anything else — invented "NO_ACTION" verdicts, empty
+// output, prose-only responses — is a protocol violation that stalls the
+// system; respawn until the overseer commits to a real decision.
+func (o *Orchestrator) runAgentOverseer(wsID, stdin string, env map[string]string) AgentResult {
+	for {
+		res := o.runAgent(RoleOverseer, 0, wsID, stdin, env)
+		v, _ := lastVerdict(res.Events)
+		replans := eventReplans(res.Events)
+
+		if v == VerdictGoalsAchieved || len(replans) > 0 {
+			return res
+		}
+
+		uiSys("🔄", "OVERSEER_RESPAWN",
+			fmt.Sprintf("verdict=%q replans=0 — neither GOALS_ACHIEVED nor replan emitted", v))
+	}
+}
+
 // ticketEnv returns the common environment-variable map every ticket-bound role
 // (tasker / digger / reviewer) gets. Prompts reference `$WORKSPACE`, `$TRUNK_PATH`,
 // etc. in bash tool calls; we export the values so the agent's shell actually
@@ -1148,7 +1168,7 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 		"RUNS_DIR":   runsDir(o.Root),
 	}
 
-	res := o.runAgent(RoleOverseer, 0, wsID, stdin, env)
+	res := o.runAgentOverseer(wsID, stdin, env)
 
 	verdict, _ := lastVerdict(res.Events)
 	replans := eventReplans(res.Events)
