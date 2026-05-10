@@ -71,7 +71,15 @@ func (o *Opencode) ParseStreamLine(ev map[string]any, finalText *strings.Builder
 			return
 		}
 
+		// Opencode streams logical chunks (one sentence / one JSON object per
+		// event) without trailing newlines. Without inserting a newline we'd
+		// concatenate prose and the agent's verdict line into one long string,
+		// the JSON wouldn't be at column 0, and parseEvents would miss it.
 		finalText.WriteString(txt)
+
+		if !strings.HasSuffix(txt, "\n") {
+			finalText.WriteByte('\n')
+		}
 	case "tool_use":
 		o.traceToolUse(role, ticket, ev)
 	case "error":

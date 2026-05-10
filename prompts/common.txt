@@ -16,7 +16,7 @@ as one of the lines in your reply. Lines whose first character is `{` are parsed
 
 Rules:
 
-- One event per line. Put the `{` at column 0 (no leading spaces, no markdown wrappers).
+- One event per line. Put each event on its own line, no markdown wrappers.
 - Keep each event on a single line — escape newlines inside string fields as `\n`.
 - Stick to the events documented for your role.
 - Interleave prose and events in any order — only events have semantic effect.

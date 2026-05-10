@@ -426,23 +426,32 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 	return ""
 }
 
-// parseEvents scans agent stdout line-by-line for embedded JSON events: any line whose
-// first character is `{` (column 0) is fed to json.Unmarshal; valid objects accumulate
-// in order. Lines that don't parse — prose, agent reasoning, tool traces — are dropped.
-// AgentResult holds the resulting slice as-is; per-role consumers walk it and pull the
-// event types they care about (see lastVerdict / messageText below + role-specific
-// extractors in scheduler.go).
+// parseEvents scans agent stdout line-by-line for embedded JSON events. For each
+// line: find the first `{`, try to decode one JSON object from there, accept it if
+// it's a map with a string `type` field. Per-line scanning means each event must
+// fit on one line; locating `{` rather than requiring column-0 tolerates reasoning-
+// model leakage where the closing tag of a thought block ends up glued to the
+// final answer line (e.g. `</think>{"type":"verdict",...}`). The mandatory `type`
+// field filters out incidental JSON-looking substrings the model might quote.
 func parseEvents(stdout string) []map[string]any {
 	var out []map[string]any
 
 	for _, line := range strings.Split(stdout, "\n") {
-		if !strings.HasPrefix(line, "{") {
+		idx := strings.IndexByte(line, '{')
+
+		if idx < 0 {
 			continue
 		}
 
+		dec := json.NewDecoder(strings.NewReader(line[idx:]))
+
 		var ev map[string]any
 
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		if err := dec.Decode(&ev); err != nil {
+			continue
+		}
+
+		if t, _ := ev["type"].(string); t == "" {
 			continue
 		}
 

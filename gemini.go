@@ -60,9 +60,15 @@ func (g *Gemini) DefaultModel(_ AgentRole) string { return "" }
 func (g *Gemini) ParseStreamLine(ev map[string]any, finalText *strings.Builder, fault *streamErr, role AgentRole, ticket int) {
 	switch t, _ := ev["type"].(string); t {
 	case "text":
-		// Streaming assistant text chunk.
+		// Streaming assistant text chunk. Add a trailing newline if missing —
+		// otherwise consecutive chunks glue together and JSON-event lines lose
+		// their column-0 anchor (see opencode.go for the same fix).
 		if txt, _ := ev["text"].(string); txt != "" {
 			finalText.WriteString(txt)
+
+			if !strings.HasSuffix(txt, "\n") {
+				finalText.WriteByte('\n')
+			}
 		}
 	case "content":
 		// Some gemini-cli versions emit a `content` event with the full message.
