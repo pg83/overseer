@@ -78,7 +78,6 @@ const (
 	VerdictMerged        AgentVerdict = "MERGED"
 	VerdictMergeFail     AgentVerdict = "MERGE_FAIL"
 	VerdictGoalsAchieved AgentVerdict = "GOALS_ACHIEVED"
-	VerdictNoAction      AgentVerdict = "NO_ACTION"
 )
 
 // AgentResult is pure transport: routing identity (Role/Ticket/Workspace), raw I/O

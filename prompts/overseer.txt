@@ -8,10 +8,8 @@ Replan nudge:
 
     {"type": "replan", "reason": "<freeform prompt the replanner will receive>"}
 
-End every response with exactly one verdict event:
+When (and only when) GOALS.md acceptance criteria are demonstrably met by trunk, emit:
 
     {"type": "verdict", "verdict": "GOALS_ACHIEVED", "detail": "<why goals are met>"}
-    {"type": "verdict", "verdict": "NO_ACTION",      "detail": "<short status>"}
 
-- GOALS_ACHIEVED — emit when GOALS.md acceptance criteria are demonstrably met by trunk.
-- NO_ACTION — otherwise. Pair with however many `replan` events you think necessary, or none if the project is on track.
+Otherwise emit any replan nudges you decide on and stop.

@@ -452,12 +452,12 @@ func parseEvents(stdout string) []map[string]any {
 	return out
 }
 
-// lastVerdict returns the last `verdict` event in the stream — agents sometimes quote
-// VERDICT lines mid-thought (back when they were textual) or emit multiple verdicts;
-// the protocol says the FINAL verdict is authoritative. Falls back to NO_ACTION when
-// the stream contained no verdict event at all.
+// lastVerdict returns the last `verdict` event in the stream — agents sometimes
+// emit multiple verdicts; the protocol says the FINAL one is authoritative. Falls
+// back to the empty AgentVerdict when no verdict event was emitted; consumers'
+// default switch arms handle both cases the same way.
 func lastVerdict(events []map[string]any) (AgentVerdict, string) {
-	v := VerdictNoAction
+	var v AgentVerdict
 	d := ""
 
 	for _, ev := range events {
