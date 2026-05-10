@@ -77,7 +77,6 @@ const (
 	VerdictDiscard         AgentVerdict = "DISCARD"
 	VerdictMerged        AgentVerdict = "MERGED"
 	VerdictMergeFail     AgentVerdict = "MERGE_FAIL"
-	VerdictPlanWritten   AgentVerdict = "PLAN_WRITTEN"
 	VerdictGoalsAchieved AgentVerdict = "GOALS_ACHIEVED"
 	VerdictNoAction      AgentVerdict = "NO_ACTION"
 )

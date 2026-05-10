@@ -8,11 +8,6 @@ Emit the plan as a single JSON event whose `body` field carries the full markdow
 
     {"type": "plan", "body": "# Plan\n\n## Step 1\n..."}
 
-Then emit the verdict:
-
-    {"type": "verdict", "verdict": "PLAN_WRITTEN", "detail": "<one-line summary>"}
-
-If the task makes no sense (already done / impossible / overlaps with another in-flight plan), skip the `plan` event and emit:
+If the task makes no sense (already done / impossible / overlaps with another in-flight plan), skip the `plan` event and emit a replan nudge instead:
 
     {"type": "replan", "reason": "<why this ticket should be re-broken-down>"}
-    {"type": "verdict", "verdict": "NO_ACTION", "detail": "<short reason>"}

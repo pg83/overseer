@@ -349,11 +349,10 @@ func taskerPlanBody(events []map[string]any) string {
 }
 
 func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
-	verdict, detail := lastVerdict(res.Events)
 	plan := strings.TrimSpace(taskerPlanBody(res.Events))
 
 	if plan == "" {
-		reason := fmt.Sprintf("tasker produced no plan: verdict=%s detail=%s", verdict, detail)
+		reason := "tasker produced no plan"
 		o.recordEventLocked(res.Ticket, "TASKER_NO_PLAN", reason)
 		uiTicket("💀", RoleTasker, res.Ticket, "NO_PLAN", reason)
 		o.closeTicketLocked(res.Ticket, CloseDiscarded)
@@ -369,8 +368,8 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 	}
 
 	writePlan(o.Root, res.Ticket, plan)
-	o.recordEventLocked(res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace+" summary="+detail)
-	uiTicket("📝", RoleTasker, res.Ticket, "PLAN_WRITTEN", detail)
+	o.recordEventLocked(res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace)
+	uiTicket("📝", RoleTasker, res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace)
 
 	// Tasker done; ticket stays InProgress=true. scheduleReady won't pick it again,
 	// so spawn digger explicitly with a fresh workspace.
