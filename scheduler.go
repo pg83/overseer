@@ -360,7 +360,11 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, ticketN int, wsAbs string
 	}
 
 	if data, err := os.ReadFile(ticketLogPath(o.Root, ticketN)); err == nil {
-		fmt.Fprintf(&sb, "\nLOG:\n%s\n", string(data))
+		fmt.Fprintf(&sb, "\nLOG (state transitions for this ticket, append-only):\n%s\n", string(data))
+	}
+
+	if msgs := ticketMessages(o.Root, ticketN); msgs != "" {
+		fmt.Fprintf(&sb, "\nTICKET_CHAT (lines from MESSAGES_LOG mentioning this ticket — what teammates noticed across prior agent runs):\n%s\n", msgs)
 	}
 
 	if prior := priorRunsForTicket(o.Root, ticketN); prior != "" {
@@ -1002,9 +1006,12 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	diggerWSAbs := wsPath(o.Root, req.Workspace)
 	mergerWSAbs := wsPath(o.Root, mergerWS)
 
-	input := o.agentSelfBlock(RoleMerger, req.Ticket) +
-		fmt.Sprintf("TICKET: %d\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
-			req.Ticket, diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
+	o.Mu.Lock()
+	input := o.buildAgentInput(RoleMerger, req.Ticket, mergerWSAbs) +
+		fmt.Sprintf("\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
+			diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
+	o.Mu.Unlock()
+
 	prompt := loadPrompt(RoleMerger)
 	stdin := concatPromptInput(prompt, input)
 

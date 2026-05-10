@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -67,4 +69,36 @@ func appendMessage(orchRoot string, role AgentRole, ticket int, msg string) {
 	line := fmt.Sprintf("%s\t%s\tT-%d\t%s\n",
 		time.Now().UTC().Format(time.RFC3339Nano), role, ticket, msg)
 	Throw2(f.WriteString(line))
+}
+
+// ticketMessages reads the team chat and returns the lines that mention the
+// given ticket — used to inject a per-ticket "what teammates said" digest into
+// every spawn's prompt (alongside LOG of state transitions and PRIOR_RUNS).
+// Returns "" if the chat doesn't exist or no lines match.
+func ticketMessages(orchRoot string, ticketN int) string {
+	f, err := os.Open(messagesLogPath(orchRoot))
+
+	if err != nil {
+		return ""
+	}
+
+	defer f.Close()
+
+	needle := fmt.Sprintf("\tT-%d\t", ticketN)
+
+	var sb strings.Builder
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 16<<20)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.Contains(line, needle) {
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+		}
+	}
+
+	return sb.String()
 }
