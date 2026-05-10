@@ -4,22 +4,21 @@ Your current working directory is a session-storage directory the harness uses t
 
 Instead use the absolute path passed in your input (typically `WORKSPACE`, sometimes a role-specific name like `MERGER_WORKTREE`). Either `cd "$WORKSPACE"` first or pass paths explicitly to every command (`git -C "$WORKSPACE" ...`, absolute file paths to file tools).
 
-## Output protocol — typed JSON events
+## Output protocol — strict JSON-line only
 
-**Emit structured signals by writing JSON lines directly in your text response.** No tool, no function, no helper — type the JSON as part of your reply.
-
-When the prompt says "emit a verdict" or "emit a task event", write a line like
+**Your stdout consists of JSON-line events and nothing else.** Every non-empty line is one JSON object with a non-empty `type` field, e.g.
 
     {"type": "verdict", "verdict": "READY", "detail": "..."}
+    {"type": "message", "text": "running tests now"}
 
-as one of the lines in your reply. Lines whose first character is `{` are parsed as events; everything else is private reasoning prose.
+Anything else — prose, reasoning text, "Here is my answer:", markdown wrappers, code fences, leading whitespace, reasoning-tag leakage like `</think>{...}` — fails strict parsing and the harness respawns you. Blank lines are allowed.
 
 Rules:
 
-- One event per line. Put each event on its own line, no markdown wrappers.
-- Keep each event on a single line — escape newlines inside string fields as `\n`.
-- Stick to the events documented for your role.
-- Interleave prose and events in any order — only events have semantic effect.
+- One JSON object per line. Each event self-contained on a single line.
+- Escape newlines inside string fields as `\n`. Escape double quotes as `\"`.
+- Output starts at the first line with a JSON object and ends with the last one. No prologue, no epilogue.
+- All thinking, status updates, "let me check X" — wrap as a `message` event.
 
 Common events available to every role:
 

@@ -32,11 +32,11 @@ Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs c
 
 ## Process: draft → critique → emit
 
-Work through this in three phases inside the same response. The critique step is the point — it forces you to check your own work before it ships.
+Work through this in three phases. Phase one and two communicate by `message` events (one per thought); phase three is the final `task` events. Output stays strict JSON-line throughout.
 
-1. **Draft (prose).** Describe the situation: what's stuck, why, what you'd change. List the ops you intend to emit, in the order you'll emit them.
+1. **Draft.** Emit one or more `message` events describing the situation: what's stuck, why, what you'd change. List the ops you intend to emit, in the order you'll emit them.
 
-2. **Critique (prose).** Re-read your draft as a skeptical reviewer would. Address every one of:
+2. **Critique.** Emit `message` events as a skeptical reviewer addressing every one of:
    - Did any cancel orphan a dep on an OPEN ticket? Did you handle every dependent in the same batch?
    - Are op orderings sane (update before cancel; new before update on same N)?
    - Is each new ticket scoped tight enough that a single digger pass can finish it?
@@ -44,7 +44,7 @@ Work through this in three phases inside the same response. The critique step is
    - Will GOALS.md actually advance from this batch? Or is this just rearranging?
    - Is there a weakest assumption in your plan? What would break it?
 
-3. **Emit (JSON).** Type the final `task` events. If the critique surfaced issues, fix them in this step — don't leave the bad version in the draft and emit it anyway.
+3. **Emit.** Output the final `task` events. If the critique surfaced issues, fix them here — don't leave the bad version in the draft and emit it anyway.
 
 ## Output (typed JSON events)
 

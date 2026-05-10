@@ -97,22 +97,18 @@ func (o *Orchestrator) sessionDirFor(role AgentRole, ticket int) string {
 
 // runAgent is the only entry-point consumers use. It guarantees:
 //
-//   - The harness always runs to completion. We never kill it from outside (no ctx
-//     cancellation, no signals). If the orchestrator wants to drop a ticket mid-flight,
-//     it closes the ticket; the agent finishes anyway, the result lands in AgentDone,
-//     and the consumer's STALE check drops it.
+//   - The harness always runs to completion. We never kill it from outside.
 //   - On retryable transport failures (rate limit, quota, network glitch) — retries
-//     internally with exponential backoff; the consumer never sees the failure.
-//   - On any other failure — hard-stops the orchestrator process via fatal(). The
-//     user's invariant: agent-side failures never leak back as some "crashed" verdict;
-//     either they're transient and we paper over them, or they're real bugs and we
-//     surface them by killing the process.
+//     with exponential backoff; the consumer never sees the failure.
+//   - On any other transport failure — fatal() the orchestrator process.
+//   - Agent stdout is enforced as strict JSON-line: every non-empty line must be a
+//     JSON object with a non-empty `type` field. Anything else (prose, reasoning
+//     leakage like `</think>{...}`, markdown wrappers) → respawn the agent.
+//   - On success, surfaces `message` events to the team chat + UI before returning.
 //
-// `env` is exported as environment variables to the harness process so prompts can
-// reference inputs as `$WORKSPACE`, `$MERGER_WORKTREE`, etc. in bash tool calls and
-// they actually resolve. The same values appear in the prose `stdin` for context.
-//
-// runAgentOnce communicates failures by Throw'ing an *agentFault.
+// `env` is exported as environment variables so prompts can reference inputs as
+// `$WORKSPACE`, `$MERGER_WORKTREE`, etc. in bash tool calls. The same values appear
+// in the prose `stdin` for context.
 func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, env map[string]string) AgentResult {
 	harness := o.harnessModelForRole(role).Harness
 	sessionID := sessionIDFor(o.Root, role, ticket)
@@ -120,34 +116,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
 
-	for attempt := 1; ; attempt++ {
-		var res AgentResult
-
-		exc := Try(func() {
-			res = o.runAgentOnce(role, ticket, wsID, sessionID, stdin, env)
-		})
-
-		if exc == nil {
-			return res
-		}
-
-		fault, ok := exc.AsError().(*agentFault)
-
-		if !ok {
-			o.fatal(fmt.Sprintf("runAgent panic [%s T-%d ws=%s attempt=%d]: %s",
-				role, ticket, wsID, attempt, exc.Error()))
-		}
-
-		retryable, why := harness.ClassifyFault(fault)
-
-		if !retryable {
-			o.fatal(fmt.Sprintf("agent failed non-retryably [%s T-%d ws=%s attempt=%d]: %s",
-				role, ticket, wsID, attempt, why))
-		}
-
-		uiTicket("⏳", role, ticket, "RETRY",
-			fmt.Sprintf("attempt=%d backoff=%s reason=%s", attempt, backoff, why))
-
+	bumpBackoff := func() {
 		time.Sleep(backoff)
 
 		if backoff < maxBackoff {
@@ -157,6 +126,74 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 				backoff = maxBackoff
 			}
 		}
+	}
+
+	for attempt := 1; ; attempt++ {
+		var res AgentResult
+
+		exc := Try(func() {
+			res = o.runAgentOnce(role, ticket, wsID, sessionID, stdin, env)
+		})
+
+		if exc != nil {
+			fault, ok := exc.AsError().(*agentFault)
+
+			if !ok {
+				o.fatal(fmt.Sprintf("runAgent panic [%s T-%d ws=%s attempt=%d]: %s",
+					role, ticket, wsID, attempt, exc.Error()))
+			}
+
+			retryable, why := harness.ClassifyFault(fault)
+
+			if !retryable {
+				o.fatal(fmt.Sprintf("agent failed non-retryably [%s T-%d ws=%s attempt=%d]: %s",
+					role, ticket, wsID, attempt, why))
+			}
+
+			uiTicket("⏳", role, ticket, "RETRY",
+				fmt.Sprintf("attempt=%d backoff=%s reason=%s", attempt, backoff, why))
+
+			bumpBackoff()
+
+			continue
+		}
+
+		// Strict parse. Any non-JSON-line content is a protocol violation and
+		// the agent gets respawned. parseEvents Throw's on the first bad line.
+		var events []map[string]any
+
+		parseExc := Try(func() {
+			events = parseEvents(res.Stdout)
+		})
+
+		if parseExc != nil {
+			uiTicket("🔄", role, ticket, "RESPAWN",
+				"malformed output: "+truncate(parseExc.Error(), 200))
+
+			bumpBackoff()
+
+			continue
+		}
+
+		res.Events = events
+
+		// Surface `message` events to UI + team chat before returning.
+		for _, ev := range res.Events {
+			if t, _ := ev["type"].(string); t != "message" {
+				continue
+			}
+
+			text := messageText(ev)
+
+			if text == "" {
+				continue
+			}
+
+			uiTicket("💬", role, ticket, "MESSAGE", text)
+			appendMessage(o.Root, role, ticket, text)
+		}
+
+		return res
 	}
 }
 
@@ -288,7 +325,17 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 	}
 
 	defer func() {
-		v, d := lastVerdict(res.Events)
+		// Best-effort verdict for the run jsonl finish event. Strict parse may
+		// throw on malformed output — swallow that here, the runAgent retry
+		// loop handles it. Worst case finish records empty verdict.
+		var v AgentVerdict
+		d := ""
+
+		Try(func() {
+			events := parseEvents(res.Stdout)
+			v, d = lastVerdict(events)
+		})
+
 		writeEvent(map[string]any{
 			"t": "finish", "verdict": string(v), "detail": d,
 		})
@@ -333,7 +380,6 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 
 	res.Stdout = finalText.String()
 	res.RawStream = rawStream.String()
-	res.Events = parseEvents(res.Stdout)
 
 	if err != nil {
 		fault := &agentFault{
@@ -358,21 +404,6 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 			stderr: "stream error: " + streamFault.msg,
 			stdout: res.Stdout,
 		})
-	}
-
-	for _, ev := range res.Events {
-		if t, _ := ev["type"].(string); t != "message" {
-			continue
-		}
-
-		text := messageText(ev)
-
-		if text == "" {
-			continue
-		}
-
-		uiTicket("💬", role, ticket, "MESSAGE", text)
-		appendMessage(o.Root, role, ticket, text)
 	}
 
 	return res
@@ -434,33 +465,30 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 	return ""
 }
 
-// parseEvents scans agent stdout line-by-line for embedded JSON events. For each
-// line: find the first `{`, try to decode one JSON object from there, accept it if
-// it's a map with a string `type` field. Per-line scanning means each event must
-// fit on one line; locating `{` rather than requiring column-0 tolerates reasoning-
-// model leakage where the closing tag of a thought block ends up glued to the
-// final answer line (e.g. `</think>{"type":"verdict",...}`). The mandatory `type`
-// field filters out incidental JSON-looking substrings the model might quote.
+// parseEvents enforces strict JSON-line output: every non-empty line of agent
+// stdout MUST be a single JSON object with a non-empty `type` field, exactly as
+// emitted, no markdown wrappers, no leading prose, no reasoning-tag leakage like
+// `</think>{...}`. Whitespace-only lines are skipped. Anything else is a
+// protocol violation — Throw'n with the offending line for the caller (runAgent)
+// to catch and respawn the agent.
 func parseEvents(stdout string) []map[string]any {
 	var out []map[string]any
 
-	for _, line := range strings.Split(stdout, "\n") {
-		idx := strings.IndexByte(line, '{')
+	for i, raw := range strings.Split(stdout, "\n") {
+		line := strings.TrimSpace(raw)
 
-		if idx < 0 {
+		if line == "" {
 			continue
 		}
-
-		dec := json.NewDecoder(strings.NewReader(line[idx:]))
 
 		var ev map[string]any
 
-		if err := dec.Decode(&ev); err != nil {
-			continue
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			ThrowFmt("line %d not a JSON object: %s", i+1, truncate(line, 200))
 		}
 
 		if t, _ := ev["type"].(string); t == "" {
-			continue
+			ThrowFmt("line %d JSON missing `type` field: %s", i+1, truncate(line, 200))
 		}
 
 		out = append(out, ev)
