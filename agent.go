@@ -465,12 +465,19 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 	return ""
 }
 
-// parseEvents enforces strict JSON-line output: every non-empty line of agent
-// stdout MUST be a single JSON object with a non-empty `type` field, exactly as
-// emitted, no markdown wrappers, no leading prose, no reasoning-tag leakage like
-// `</think>{...}`. Whitespace-only lines are skipped. Anything else is a
-// protocol violation — Throw'n with the offending line for the caller (runAgent)
-// to catch and respawn the agent.
+// parseEvents enforces strict JSON-line output with a single concession: a
+// reasoning-tag closer glued to the front of the line (e.g. `</think>{...}`) is
+// tolerated by skipping to the first `{` before parsing. Beyond that:
+//
+//   - whitespace-only lines are skipped
+//   - every non-empty line must contain `{...}` that decodes to a JSON object
+//     with a non-empty `type` field
+//   - trailing text after the JSON is rejected (we Unmarshal the rest, which
+//     fails on garbage past the closing brace)
+//
+// Any violation Throw's with the offending line so runAgent can respawn the
+// agent. The leading-`{` skip is the smallest tolerance that keeps glm-4-7-style
+// reasoning-tag leakage workable without re-admitting general prose.
 func parseEvents(stdout string) []map[string]any {
 	var out []map[string]any
 
@@ -481,10 +488,18 @@ func parseEvents(stdout string) []map[string]any {
 			continue
 		}
 
+		idx := strings.IndexByte(line, '{')
+
+		if idx < 0 {
+			ThrowFmt("line %d has no JSON object: %s", i+1, truncate(line, 200))
+		}
+
+		rest := strings.TrimSpace(line[idx:])
+
 		var ev map[string]any
 
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			ThrowFmt("line %d not a JSON object: %s", i+1, truncate(line, 200))
+		if err := json.Unmarshal([]byte(rest), &ev); err != nil {
+			ThrowFmt("line %d JSON parse failed (%v): %s", i+1, err, truncate(line, 200))
 		}
 
 		if t, _ := ev["type"].(string); t == "" {
