@@ -27,4 +27,4 @@ Emit one verdict event:
     {"type": "verdict", "verdict": "CONTINUE", "detail": "<one-line: why another pass will fix it>"}
     {"type": "verdict", "verdict": "ESCALATE", "detail": "<one-line: why replanner needed>"}
 
-You can interleave `message` events to flag a pattern for the operator.
+You can interleave `message` events to flag a pattern in the team chat.

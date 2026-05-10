@@ -23,10 +23,10 @@ Rules:
 
 Common events available to every role:
 
-    {"type": "message", "text": "<one-line note for the operator>"}
+    {"type": "message", "text": "<one-line note posted to the team chat>"}
     {"type": "replan", "reason": "<why the task DB needs adjustment>"}
 
-`message` events broadcast to the operator and to your teammates via the shared `MESSAGES_LOG`. Use them for status, surprises, ambiguities, and decisions worth flagging — not routine tool progress, not the final verdict, not sensitive data. Split multi-line content into multiple `message` events or summarize it; escape literal newlines as `\n`.
+`message` events post to the shared team chat (`MESSAGES_LOG`) where every role across every ticket reads each other. Use them for status, surprises, ambiguities, and decisions worth flagging — not routine tool progress, not the final verdict, not sensitive data. Split multi-line content into multiple `message` events or summarize it; escape literal newlines as `\n`.
 
 `replan` events nudge the replanner — emit when you notice the task DB itself needs adjustment (missing prerequisite, wrong split, etc.).
 
