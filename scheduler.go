@@ -580,6 +580,7 @@ func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
 }
 
 func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
+	o.recordEvent(ticketN, "AGENT_START", fmt.Sprintf("role=%s ws=%s", RoleDigger, ws))
 	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws)
 
 	wsAbs := wsPath(o.Root, ws)
@@ -1097,6 +1098,8 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 		short = short[:8]
 	}
 
+	o.recordEventLocked(ticketN, "AGENT_START",
+		fmt.Sprintf("role=%s ws=%s rebase=%s", RoleDigger, ws, short))
 	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws+" rebase→"+short)
 
 	wsAbs := wsPath(o.Root, ws)
