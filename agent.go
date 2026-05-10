@@ -128,11 +128,20 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 		}
 	}
 
+	parseFeedback := ""
+
 	for attempt := 1; ; attempt++ {
+		activeStdin := stdin
+
+		if parseFeedback != "" {
+			activeStdin = stdin + "\n\nPRIOR_PARSE_FAILURE: " + parseFeedback +
+				"\nRe-emit your response with every non-blank line as a single JSON object with a `type` field. Wrap prose / reasoning / status as a `{\"type\":\"message\",\"text\":\"...\"}` event.\n"
+		}
+
 		var res AgentResult
 
 		exc := Try(func() {
-			res = o.runAgentOnce(role, ticket, wsID, sessionID, stdin, env)
+			res = o.runAgentOnce(role, ticket, wsID, sessionID, activeStdin, env)
 		})
 
 		if exc != nil {
@@ -167,8 +176,10 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 		})
 
 		if parseExc != nil {
+			parseFeedback = parseExc.Error()
+
 			uiTicket("🔄", role, ticket, "RESPAWN",
-				"malformed output: "+truncate(parseExc.Error(), 200))
+				"malformed output: "+truncate(parseFeedback, 200))
 
 			bumpBackoff()
 
