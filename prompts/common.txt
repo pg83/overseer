@@ -1,10 +1,6 @@
-## CWD vs WORKSPACE
+## ONLY ACCEPTED OUTPUT — JSON-line encoded events
 
-Your cwd is a session-storage directory the harness uses for cross-run memory — not the project tree. For git, source reads, and file ops, use the absolute path from your input (`WORKSPACE`, or a role-specific name like `MERGER_WORKTREE`): either `cd "$WORKSPACE"` first or pass paths explicitly (`git -C "$WORKSPACE" ...`, absolute file paths).
-
-## Output protocol — JSON-line events
-
-Every non-empty line of stdout is one JSON object with a non-empty `type` field:
+Every non-blank line of stdout is one JSON object with a non-empty `type` field. Examples:
 
     {"type": "verdict", "verdict": "READY", "detail": "..."}
     {"type": "message", "text": "running tests now"}
@@ -19,3 +15,7 @@ Common events available to every role:
 `message` events post to the shared team chat (`MESSAGES_LOG`) where every role across every ticket reads each other. Status, surprises, ambiguities, decisions worth flagging. `MESSAGES_LOG` (path in your input header) is the same chat as a file: read or grep it for context on prior runs.
 
 `replan` events nudge the replanner when the task DB itself needs adjustment (missing prerequisite, wrong split, etc.).
+
+## CWD vs WORKSPACE
+
+Your cwd is a session-storage directory the harness uses for cross-run memory — not the project tree. For git, source reads, and file ops, use the absolute path from your input (`WORKSPACE`, or a role-specific name like `MERGER_WORKTREE`): either `cd "$WORKSPACE"` first or pass paths explicitly (`git -C "$WORKSPACE" ...`, absolute file paths).
