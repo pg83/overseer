@@ -440,48 +440,35 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 	return ""
 }
 
-// parseEvents extracts JSON-line events from stdout permissively: it tolerates
-// reasoning-tag preambles, markdown code fences, prose narration between events,
-// and the occasional trailing brace from glm-style emit drift. Per line:
+// parseEvents extracts JSON event objects from stdout permissively. Tolerates
+// reasoning-tag preambles, markdown code fences, prose narration between
+// events, pretty-printed multi-line JSON, and the occasional trailing brace
+// from glm-style emit drift.
 //
-//   - whitespace-trimmed; blank lines dropped
-//   - if it doesn't start with `{`, treat as unparsed
-//   - try Unmarshal; on failure retry with a `}` appended (covers truncated
-//     closing-brace cases); if still fails, treat as unparsed
-//   - if `type` is missing or empty, treat as unparsed
+// Algorithm: scan the stream looking for top-level balanced `{...}` runs
+// (string-aware so braces inside string literals don't confuse the depth
+// counter). Each balanced run is Unmarshal'd; if it parses as a JSON object
+// with a non-empty `type`, it becomes an event. Everything else (text outside
+// braces, runs that don't unmarshal, objects without a `type`) is collected.
 //
-// Every unparsed line is collected and surfaced at the end as a single synthetic
-// `{"type":"unparsed","text":"<joined lines>"}` event so downstream code (UI,
-// run logs, replanner mining) can still see what the agent emitted. The
-// role-specific helpers ignore the synthetic type and respawn naturally when no
-// verdict event arrived.
+// The collected leftovers surface at the end as a single synthetic
+// `{"type":"unparsed","text":"<joined>"}` event so the UI, run logs, and
+// replanner mining still see what the agent emitted. Role-specific helpers
+// ignore the synthetic type and respawn naturally when no verdict arrived.
 func parseEvents(stdout string) []map[string]any {
 	var out []map[string]any
 	var unparsed []string
 
-	for _, raw := range strings.Split(stdout, "\n") {
-		line := strings.TrimSpace(raw)
-
-		if line == "" {
-			continue
-		}
-
-		if !strings.HasPrefix(line, "{") {
-			unparsed = append(unparsed, line)
-			continue
-		}
-
+	for _, raw := range scanJSONObjects(stdout, &unparsed) {
 		var ev map[string]any
 
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			if err := json.Unmarshal([]byte(line+"}"), &ev); err != nil {
-				unparsed = append(unparsed, line)
-				continue
-			}
+		if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+			unparsed = append(unparsed, raw)
+			continue
 		}
 
 		if t, _ := ev["type"].(string); t == "" {
-			unparsed = append(unparsed, line)
+			unparsed = append(unparsed, raw)
 			continue
 		}
 
@@ -496,6 +483,97 @@ func parseEvents(stdout string) []map[string]any {
 	}
 
 	return out
+}
+
+// scanJSONObjects walks the input collecting top-level balanced `{...}`
+// substrings. String literals are tracked so braces inside JSON strings don't
+// affect the depth counter. Anything between balanced runs (prose preamble,
+// code fences, trailing junk) is appended to leftovers verbatim, trimmed.
+//
+// An unterminated `{` (depth never returns to zero before EOF) is treated as
+// trailing junk and dumped into leftovers.
+func scanJSONObjects(s string, leftovers *[]string) []string {
+	var objs []string
+
+	i := 0
+	n := len(s)
+
+	for i < n {
+		j := strings.IndexByte(s[i:], '{')
+
+		if j < 0 {
+			if tail := strings.TrimSpace(s[i:]); tail != "" {
+				*leftovers = append(*leftovers, tail)
+			}
+
+			break
+		}
+
+		j += i
+
+		if pre := strings.TrimSpace(s[i:j]); pre != "" {
+			*leftovers = append(*leftovers, pre)
+		}
+
+		end := matchBrace(s, j)
+
+		if end < 0 {
+			if tail := strings.TrimSpace(s[j:]); tail != "" {
+				*leftovers = append(*leftovers, tail)
+			}
+
+			break
+		}
+
+		objs = append(objs, s[j:end+1])
+		i = end + 1
+	}
+
+	return objs
+}
+
+// matchBrace finds the index of the `}` that closes the `{` at start, with
+// JSON-aware string + escape handling. Returns -1 if the input ends before
+// depth reaches zero.
+func matchBrace(s string, start int) int {
+	depth := 0
+	inString := false
+	escape := false
+
+	for k := start; k < len(s); k++ {
+		c := s[k]
+
+		if escape {
+			escape = false
+			continue
+		}
+
+		if inString {
+			switch c {
+			case '\\':
+				escape = true
+			case '"':
+				inString = false
+			}
+
+			continue
+		}
+
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+
+			if depth == 0 {
+				return k
+			}
+		}
+	}
+
+	return -1
 }
 
 // lastVerdict returns the last `verdict` event in the stream — agents sometimes
