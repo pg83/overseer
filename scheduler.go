@@ -381,13 +381,7 @@ func (o *Orchestrator) findTicketLocked(n int) (Ticket, bool) {
 }
 
 func (o *Orchestrator) appendWorkspaceLocked(n int, ws string) {
-	for i := range o.Tickets {
-		if o.Tickets[i].N == n {
-			o.Tickets[i].Workspaces = append(o.Tickets[i].Workspaces, ws)
-		}
-	}
-
-	SaveTasks(o.Root, o.Tickets)
+	o.appendLogEventLocked(LogEvent{"k": "ws", "n": n, "ws": ws})
 }
 
 func (o *Orchestrator) setInProgressLocked(n int, v bool) {
@@ -549,26 +543,9 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 }
 
 func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
-	for i := range o.Tickets {
-		if o.Tickets[i].N != n {
-			continue
-		}
-
-		// Idempotent: if the ticket was already CLOSED, keep the original CLOSE_REASON.
-		// A late-arriving result from a goroutine that lost its ticket mid-run must
-		// not rewrite history (e.g. MERGED → DISCARDED).
-		if o.Tickets[i].State == StateClosed {
-			o.Tickets[i].InProgress = false
-
-			continue
-		}
-
-		o.Tickets[i].State = StateClosed
-		o.Tickets[i].CloseReason = reason
-		o.Tickets[i].InProgress = false
-	}
-
-	SaveTasks(o.Root, o.Tickets)
+	// Idempotent: applyLogEvent on a "close" event for an already-CLOSED ticket
+	// preserves the original close_reason and just clears InProgress.
+	o.appendLogEventLocked(LogEvent{"k": "close", "n": n, "reason": string(reason)})
 
 	if o.openCountLocked() <= 2 {
 		o.QOverseer <- OverseerRequest{Reason: fmt.Sprintf("low-open after T-%d closed (%s)", n, reason)}
@@ -791,11 +768,11 @@ func jsonIntArray(v any) []int {
 	return out
 }
 
-// applyReplannerOps sandboxes the ops, validates the resulting list against the global
-// schema (no cycles, valid deps, etc.), then commits in one shot — swapping o.Tickets,
-// killing in-flight goroutines for every `cancel` op, and recording per-ticket events.
-// On any apply or validation error nothing is committed; the replanner is bounced with
-// its original output as feedback so it can fix and retry.
+// applyReplannerOps sandboxes the ops, validates the resulting list against the
+// schema (no cycles, valid deps, no orphan DISCARDED-deps), and on success
+// emits one log event per op. Each op is its own atomic event in the log; the
+// pre-emit validation guarantees the cumulative state is consistent. On
+// validation failure the replanner is bounced with its output as feedback.
 func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops []map[string]any) {
 	o.Mu.Lock()
 
@@ -825,11 +802,8 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops
 		return
 	}
 
-	// Validation passed — swap state, then apply the ops' side-effects (kill in-flight
-	// goroutines on cancel, record per-ticket events). recordEventLocked saves
-	// tasks.jsonl on each call which covers the final write too.
-	o.Tickets = sandbox
-
+	// Validation passed — emit one log event per op. applyLogEvent inside
+	// appendLogEventLocked maintains o.Tickets as we go.
 	canceledAny := false
 
 	for _, ev := range ops {
@@ -840,22 +814,36 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops
 		switch op {
 		case "new":
 			descr, _ := ev["descr"].(string)
+			prio := jsonInt(ev["prio"])
+			deps := jsonIntArray(ev["deps"])
+
+			o.appendLogEventLocked(LogEvent{
+				"k": "create", "n": n, "descr": descr, "prio": prio, "deps": deps,
+			})
 			o.recordEventLocked(n, "TASK_NEW", "by=replanner descr="+descr)
 			uiTicket("🆕", RoleReplanner, n, "NEW", descr)
 		case "update":
+			change := LogEvent{"k": "update", "n": n}
 			var changes []string
 
 			if d, ok := ev["descr"].(string); ok {
+				change["descr"] = d
 				changes = append(changes, "descr="+d)
 			}
 
 			if _, ok := ev["prio"]; ok {
-				changes = append(changes, fmt.Sprintf("prio=%d", jsonInt(ev["prio"])))
+				p := jsonInt(ev["prio"])
+				change["prio"] = p
+				changes = append(changes, fmt.Sprintf("prio=%d", p))
 			}
 
 			if _, ok := ev["deps"]; ok {
-				changes = append(changes, fmt.Sprintf("deps=%v", jsonIntArray(ev["deps"])))
+				d := jsonIntArray(ev["deps"])
+				change["deps"] = d
+				changes = append(changes, fmt.Sprintf("deps=%v", d))
 			}
+
+			o.appendLogEventLocked(change)
 
 			summary := strings.Join(changes, " ")
 			o.recordEventLocked(n, "TASK_UPDATE", "by=replanner "+summary)
@@ -863,9 +851,7 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops
 		case "cancel":
 			canceledAny = true
 
-			// We never kill the agent goroutine — it runs to completion and its result
-			// is dropped by handleAgentResult's STALE check. Closing the ticket here
-			// (already done by applyTaskOp) is the only state change we need.
+			o.appendLogEventLocked(LogEvent{"k": "close", "n": n, "reason": string(CloseDiscarded)})
 
 			detail := "by=replanner"
 
