@@ -4,13 +4,21 @@ You receive: TICKET (number), DIGGER_BRANCH (the branch the digger committed wor
 
 Your job:
 
-1. `cd "$MERGER_WORKTREE"`, fetch the digger's branch into your clone: `git fetch <DIGGER_WORKTREE> <DIGGER_BRANCH>:<DIGGER_BRANCH>`. Then run `git merge --no-ff <DIGGER_BRANCH>`.
-2. If the merge produces conflicts you cannot resolve cleanly, run `git merge --abort` and emit a MERGE_FAIL verdict.
-3. If the merge succeeded, run the project's test command (look in CLAUDE.md or GOALS.md for it; if absent, infer from the codebase: `make test`, `go test ./...`, `pytest`, `cargo test`, etc.).
-4. If tests pass, emit a MERGED verdict. Leave the merge commit on your branch as-is.
-5. If tests fail, run `git reset --hard ORIG_HEAD` (or `git merge --abort`) to undo the merge, and emit a MERGE_FAIL verdict with the test failure summary in `detail`.
+1. `cd "$MERGER_WORKTREE"`. **Before merging**, run the project's test command on the unmodified trunk to capture the pre-merge baseline (which tests already failed, what the target metrics report). Look in CLAUDE.md / GOALS.md / ACCEPTANCE.md for the canonical test command; otherwise infer (`make test`, `go test ./...`, `pytest`, `cargo test`, ...). Save the failing-test set and any target-metric numbers.
+2. Fetch the digger's branch into your clone: `git fetch <DIGGER_WORKTREE> <DIGGER_BRANCH>:<DIGGER_BRANCH>`. Then `git merge --no-ff <DIGGER_BRANCH>`.
+3. If the merge produces conflicts you cannot resolve cleanly, run `git merge --abort` and emit a MERGE_FAIL verdict.
+4. Re-run the test command on the merged tree.
+5. Compare against the baseline:
+   - Tests that were green before AND green after: still green. Good.
+   - Tests that were red before AND red after with the same failure: pre-existing breakage, not this PR's fault — ignore.
+   - Tests that were green before AND red after: regression. MERGE_FAIL.
+   - New tests added by this PR that are red after: regression. MERGE_FAIL.
+   - Target metrics in CLAUDE.md / ACCEPTANCE.md (e.g. node-count, coverage thresholds): must move toward the goal or stay flat. If they regressed, MERGE_FAIL.
+   What matters is **no new failures and no regressed metrics**, not "all tests pass". A repo that already fails 17 tests at HEAD doesn't suddenly become this PR's burden.
+6. If everything that mattered before still works (and ideally a bit better), emit a MERGED verdict. Leave the merge commit on your branch as-is.
+7. If a regression appeared, run `git reset --hard ORIG_HEAD` (or `git merge --abort`) and emit MERGE_FAIL with the specific regressed-tests / regressed-metrics in `detail`.
 
-Diggers run in parallel and finish out of order, so the commit you receive was prepared against an older trunk state than yours and may not apply cleanly. If the straight `merge --no-ff` conflicts, **try once more creatively**: rebase the digger's branch onto your trunk HEAD, hand-resolve obvious conflicts (mechanical, not semantic — same file, different sections; same import block; etc.), then re-test. If that still doesn't apply or tests fail, emit MERGE_FAIL.
+Diggers run in parallel and finish out of order, so the commit you receive was prepared against an older trunk state than yours and may not apply cleanly. If the straight `merge --no-ff` conflicts, **try once more creatively**: rebase the digger's branch onto your trunk HEAD, hand-resolve obvious conflicts (mechanical, not semantic — same file, different sections; same import block; etc.), then re-test. If that still doesn't apply or regresses, emit MERGE_FAIL.
 
 You may emit a `replan` event if you notice systemic issues (consistent test gaps, missing infrastructure tickets). Do not push anywhere.
 
