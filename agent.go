@@ -101,9 +101,10 @@ func (o *Orchestrator) sessionDirFor(role AgentRole, ticket int) string {
 //   - On retryable transport failures (rate limit, quota, network glitch) — retries
 //     with exponential backoff; the consumer never sees the failure.
 //   - On any other transport failure — fatal() the orchestrator process.
-//   - Agent stdout is enforced as strict JSON-line: every non-empty line must be a
-//     JSON object with a non-empty `type` field. Anything else (prose, reasoning
-//     leakage like `</think>{...}`, markdown wrappers) → respawn the agent.
+//   - Agent stdout is parsed permissively as JSON-line (see parseEvents): prose
+//     preamble, code fences, and minor brace drift are silently skipped. Role-
+//     specific helpers retry when no matching verdict arrives, so garbled output
+//     turns into a "no verdict" respawn at that layer rather than here.
 //   - On success, surfaces `message` events to the team chat + UI before returning.
 //
 // `env` is exported as environment variables so prompts can reference inputs as
@@ -128,20 +129,11 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 		}
 	}
 
-	parseFeedback := ""
-
 	for attempt := 1; ; attempt++ {
-		activeStdin := stdin
-
-		if parseFeedback != "" {
-			activeStdin = stdin + "\n\nPRIOR_PARSE_FAILURE: " + parseFeedback +
-				"\nRe-emit your response with every non-blank line as a single JSON object with a `type` field. Wrap prose / reasoning / status as a `{\"type\":\"message\",\"text\":\"...\"}` event.\n"
-		}
-
 		var res AgentResult
 
 		exc := Try(func() {
-			res = o.runAgentOnce(role, ticket, wsID, sessionID, activeStdin, env)
+			res = o.runAgentOnce(role, ticket, wsID, sessionID, stdin, env)
 		})
 
 		if exc != nil {
@@ -167,40 +159,31 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 			continue
 		}
 
-		// Strict parse. Any non-JSON-line content is a protocol violation and
-		// the agent gets respawned. parseEvents Throw's on the first bad line.
-		var events []map[string]any
+		res.Events = parseEvents(res.Stdout)
 
-		parseExc := Try(func() {
-			events = parseEvents(res.Stdout)
-		})
-
-		if parseExc != nil {
-			parseFeedback = parseExc.Error()
-
-			uiTicket("🔄", role, ticket, "RESPAWN", "malformed output: "+parseFeedback)
-
-			bumpBackoff()
-
-			continue
-		}
-
-		res.Events = events
-
-		// Surface `message` events to UI + team chat before returning.
 		for _, ev := range res.Events {
-			if t, _ := ev["type"].(string); t != "message" {
-				continue
+			t, _ := ev["type"].(string)
+
+			switch t {
+			case "message":
+				text := messageText(ev)
+
+				if text == "" {
+					continue
+				}
+
+				uiTicket("💬", role, ticket, "MESSAGE", text)
+				appendMessage(o.Root, role, ticket, text)
+
+			case "unparsed":
+				text, _ := ev["text"].(string)
+
+				if text == "" {
+					continue
+				}
+
+				uiTicket("⚠️", role, ticket, "UNPARSED", text)
 			}
-
-			text := messageText(ev)
-
-			if text == "" {
-				continue
-			}
-
-			uiTicket("💬", role, ticket, "MESSAGE", text)
-			appendMessage(o.Root, role, ticket, text)
 		}
 
 		return res
@@ -327,17 +310,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 	}
 
 	defer func() {
-		// Best-effort verdict for the run jsonl finish event. Strict parse may
-		// throw on malformed output — swallow that here, the runAgent retry
-		// loop handles it. Worst case finish records empty verdict.
-		var v AgentVerdict
-		d := ""
-
-		Try(func() {
-			events := parseEvents(res.Stdout)
-			v, d = lastVerdict(events)
-		})
-
+		v, d := lastVerdict(parseEvents(res.Stdout))
 		writeEvent(map[string]any{
 			"t": "finish", "verdict": string(v), "detail": d,
 		})
@@ -467,48 +440,59 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 	return ""
 }
 
-// parseEvents enforces strict JSON-line output with a single concession: a
-// reasoning-tag closer glued to the front of the line (e.g. `</think>{...}`) is
-// tolerated by skipping to the first `{` before parsing. Beyond that:
+// parseEvents extracts JSON-line events from stdout permissively: it tolerates
+// reasoning-tag preambles, markdown code fences, prose narration between events,
+// and the occasional trailing brace from glm-style emit drift. Per line:
 //
-//   - whitespace-only lines are skipped
-//   - every non-empty line must contain `{...}` that decodes to a JSON object
-//     with a non-empty `type` field
-//   - trailing text after the JSON is rejected (we Unmarshal the rest, which
-//     fails on garbage past the closing brace)
+//   - whitespace-trimmed; blank lines dropped
+//   - if it doesn't start with `{`, treat as unparsed
+//   - try Unmarshal; on failure retry with a `}` appended (covers truncated
+//     closing-brace cases); if still fails, treat as unparsed
+//   - if `type` is missing or empty, treat as unparsed
 //
-// Any violation Throw's with the offending line so runAgent can respawn the
-// agent. The leading-`{` skip is the smallest tolerance that keeps glm-4-7-style
-// reasoning-tag leakage workable without re-admitting general prose.
+// Every unparsed line is collected and surfaced at the end as a single synthetic
+// `{"type":"unparsed","text":"<joined lines>"}` event so downstream code (UI,
+// run logs, replanner mining) can still see what the agent emitted. The
+// role-specific helpers ignore the synthetic type and respawn naturally when no
+// verdict event arrived.
 func parseEvents(stdout string) []map[string]any {
 	var out []map[string]any
+	var unparsed []string
 
-	for i, raw := range strings.Split(stdout, "\n") {
+	for _, raw := range strings.Split(stdout, "\n") {
 		line := strings.TrimSpace(raw)
 
 		if line == "" {
 			continue
 		}
 
-		idx := strings.IndexByte(line, '{')
-
-		if idx < 0 {
-			ThrowFmt("line %d has no JSON object: %s", i+1, line)
+		if !strings.HasPrefix(line, "{") {
+			unparsed = append(unparsed, line)
+			continue
 		}
-
-		rest := strings.TrimSpace(line[idx:])
 
 		var ev map[string]any
 
-		if err := json.Unmarshal([]byte(rest), &ev); err != nil {
-			ThrowFmt("line %d JSON parse failed (%v): %s", i+1, err, line)
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			if err := json.Unmarshal([]byte(line+"}"), &ev); err != nil {
+				unparsed = append(unparsed, line)
+				continue
+			}
 		}
 
 		if t, _ := ev["type"].(string); t == "" {
-			ThrowFmt("line %d JSON missing `type` field: %s", i+1, line)
+			unparsed = append(unparsed, line)
+			continue
 		}
 
 		out = append(out, ev)
+	}
+
+	if len(unparsed) > 0 {
+		out = append(out, map[string]any{
+			"type": "unparsed",
+			"text": strings.Join(unparsed, "\n"),
+		})
 	}
 
 	return out
