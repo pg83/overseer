@@ -108,8 +108,12 @@ func (o *Orchestrator) sessionDirFor(role AgentRole, ticket int) string {
 //     either they're transient and we paper over them, or they're real bugs and we
 //     surface them by killing the process.
 //
+// `env` is exported as environment variables to the harness process so prompts can
+// reference inputs as `$WORKSPACE`, `$MERGER_WORKTREE`, etc. in bash tool calls and
+// they actually resolve. The same values appear in the prose `stdin` for context.
+//
 // runAgentOnce communicates failures by Throw'ing an *agentFault.
-func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) AgentResult {
+func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, env map[string]string) AgentResult {
 	harness := o.harnessModelForRole(role).Harness
 	sessionID := sessionIDFor(o.Root, role, ticket)
 
@@ -120,7 +124,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string) 
 		var res AgentResult
 
 		exc := Try(func() {
-			res = o.runAgentOnce(role, ticket, wsID, sessionID, stdin)
+			res = o.runAgentOnce(role, ticket, wsID, sessionID, stdin, env)
 		})
 
 		if exc == nil {
@@ -197,7 +201,7 @@ func (o *Orchestrator) fatal(reason string) {
 // *agentFault — the caller (runAgent) classifies and either retries or hard-stops the
 // process. Never returns a synthesized "crashed" verdict event. The harness is never
 // killed from outside — it always runs to completion, on the user's invariant.
-func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID, stdin string) AgentResult {
+func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID, stdin string, env map[string]string) AgentResult {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
@@ -246,6 +250,10 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Dir = sessionDir
 	cmd.Env = append(os.Environ(), "TMPDIR="+tmpdir)
+
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 
 	argsCopy := append([]string{}, cmd.Args...)
 

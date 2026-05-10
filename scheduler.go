@@ -205,9 +205,9 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 // runAgentDigger drives a digger invocation, retrying until the agent emits a
 // recognized verdict (READY or CANT_DO). Model glitches that finish without a
 // verdict are transient — the digger session preserves prior context.
-func (o *Orchestrator) runAgentDigger(ticketN int, ws, stdin string) AgentResult {
+func (o *Orchestrator) runAgentDigger(ticketN int, ws, stdin string, env map[string]string) AgentResult {
 	for {
-		res := o.runAgent(RoleDigger, ticketN, ws, stdin)
+		res := o.runAgent(RoleDigger, ticketN, ws, stdin, env)
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictReady || v == VerdictCantDo {
@@ -220,9 +220,9 @@ func (o *Orchestrator) runAgentDigger(ticketN int, ws, stdin string) AgentResult
 
 // runAgentReviewer drives a reviewer invocation, retrying until it emits APPROVE,
 // REWORK, or DISCARD.
-func (o *Orchestrator) runAgentReviewer(ticketN int, ws, stdin string) AgentResult {
+func (o *Orchestrator) runAgentReviewer(ticketN int, ws, stdin string, env map[string]string) AgentResult {
 	for {
-		res := o.runAgent(RoleReviewer, ticketN, ws, stdin)
+		res := o.runAgent(RoleReviewer, ticketN, ws, stdin, env)
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictApprove || v == VerdictRework || v == VerdictDiscard {
@@ -235,9 +235,9 @@ func (o *Orchestrator) runAgentReviewer(ticketN int, ws, stdin string) AgentResu
 
 // runAgentMerger drives a merger invocation, retrying until it emits MERGED or
 // MERGE_FAIL.
-func (o *Orchestrator) runAgentMerger(ticketN int, ws, stdin string) AgentResult {
+func (o *Orchestrator) runAgentMerger(ticketN int, ws, stdin string, env map[string]string) AgentResult {
 	for {
-		res := o.runAgent(RoleMerger, ticketN, ws, stdin)
+		res := o.runAgent(RoleMerger, ticketN, ws, stdin, env)
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictMerged || v == VerdictMergeFail {
@@ -245,6 +245,19 @@ func (o *Orchestrator) runAgentMerger(ticketN int, ws, stdin string) AgentResult
 		}
 
 		uiTicket("🔄", RoleMerger, ticketN, "RESPAWN", fmt.Sprintf("verdict=%q — retrying", v))
+	}
+}
+
+// ticketEnv returns the common environment-variable map every ticket-bound role
+// (tasker / digger / reviewer) gets. Prompts reference `$WORKSPACE`, `$TRUNK_PATH`,
+// etc. in bash tool calls; we export the values so the agent's shell actually
+// resolves them. Same values still appear in the prose input header for context.
+func (o *Orchestrator) ticketEnv(ticketN int, wsAbs string) map[string]string {
+	return map[string]string{
+		"WORKSPACE":  wsAbs,
+		"TICKET":     fmt.Sprintf("%d", ticketN),
+		"TRUNK_PATH": o.Trunk,
+		"TRUNK_HASH": CurrentTrunkHash(o.Trunk),
 	}
 }
 
@@ -262,10 +275,11 @@ func (o *Orchestrator) spawnTaskerLocked(ticketN int) {
 	input := o.buildAgentInput(RoleTasker, ticketN, wsAbs)
 	prompt := loadPrompt(RoleTasker)
 	stdin := concatPromptInput(prompt, input)
+	env := o.ticketEnv(ticketN, wsAbs)
 
 	// Tasker signals via plan event, not verdict — single-shot, no retry loop.
 	go func() {
-		res := o.runAgent(RoleTasker, ticketN, wsID, stdin)
+		res := o.runAgent(RoleTasker, ticketN, wsID, stdin, env)
 		o.AgentDone <- res
 	}()
 }
@@ -284,9 +298,10 @@ func (o *Orchestrator) spawnDiggerFreshLocked(ticketN int) {
 	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs)
 	prompt := loadPrompt(RoleDigger)
 	stdin := concatPromptInput(prompt, input)
+	env := o.ticketEnv(ticketN, wsAbs)
 
 	go func() {
-		res := o.runAgentDigger(ticketN, wsID, stdin)
+		res := o.runAgentDigger(ticketN, wsID, stdin, env)
 		o.AgentDone <- res
 	}()
 }
@@ -544,9 +559,10 @@ func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
 	input := o.buildAgentInput(RoleReviewer, ticketN, wsAbs)
 	prompt := loadPrompt(RoleReviewer)
 	stdin := concatPromptInput(prompt, input)
+	env := o.ticketEnv(ticketN, wsAbs)
 
 	go func() {
-		res := o.runAgentReviewer(ticketN, ws, stdin)
+		res := o.runAgentReviewer(ticketN, ws, stdin, env)
 		o.AgentDone <- res
 	}()
 }
@@ -559,9 +575,11 @@ func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
 		fmt.Sprintf("PREV_WORKSPACE: %s\n", wsAbs)
 	prompt := loadPrompt(RoleDigger)
 	stdin := concatPromptInput(prompt, input)
+	env := o.ticketEnv(ticketN, wsAbs)
+	env["PREV_WORKSPACE"] = wsAbs
 
 	go func() {
-		res := o.runAgentDigger(ticketN, ws, stdin)
+		res := o.runAgentDigger(ticketN, ws, stdin, env)
 		o.AgentDone <- res
 	}()
 }
@@ -593,7 +611,15 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	prompt := loadPrompt(RoleReplanner)
 	stdin := concatPromptInput(prompt, input)
 
-	res := o.runAgent(RoleReplanner, req.Ticket, wsID, stdin)
+	env := map[string]string{
+		"REASON_FOR_REPLAN": req.Reason,
+		"SOURCE_AGENT":      string(req.Source),
+		"SOURCE_TICKET":     fmt.Sprintf("%d", req.Ticket),
+		"RUNS_DIR":          runsDir(o.Root),
+		"TASKS_DB":          tasksDBPath(o.Root),
+	}
+
+	res := o.runAgent(RoleReplanner, req.Ticket, wsID, stdin, env)
 
 	ops := replannerTaskOps(res.Events)
 
@@ -892,7 +918,15 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	prompt := loadPrompt(RoleMerger)
 	stdin := concatPromptInput(prompt, input)
 
-	res := o.runAgentMerger(req.Ticket, mergerWS, stdin)
+	env := map[string]string{
+		"TICKET":          fmt.Sprintf("%d", req.Ticket),
+		"DIGGER_BRANCH":   diggerBranch,
+		"DIGGER_WORKTREE": diggerWSAbs,
+		"MERGER_WORKTREE": mergerWSAbs,
+		"TRUNK_HEAD":      trunkHead,
+	}
+
+	res := o.runAgentMerger(req.Ticket, mergerWS, stdin, env)
 
 	for _, line := range eventReplans(res.Events) {
 		o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: line}
@@ -969,11 +1003,14 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 		"\nMERGE_FAIL_OUTPUT:\n" + mergeOut + "\nREBASE_TARGET: " + target + "\n"
 	prompt := loadPrompt(RoleDigger)
 	stdin := concatPromptInput(prompt, input)
+	env := o.ticketEnv(ticketN, wsAbs)
+	env["PREV_WORKSPACE"] = wsAbs
+	env["REBASE_TARGET"] = target
 
 	o.Mu.Unlock()
 
 	go func() {
-		res := o.runAgentDigger(ticketN, ws, stdin)
+		res := o.runAgentDigger(ticketN, ws, stdin, env)
 		o.AgentDone <- res
 	}()
 }
@@ -1004,7 +1041,15 @@ func (o *Orchestrator) runOverseer(req OverseerRequest) {
 	prompt := loadPrompt(RoleOverseer)
 	stdin := concatPromptInput(prompt, input)
 
-	res := o.runAgent(RoleOverseer, 0, wsID, stdin)
+	env := map[string]string{
+		"REASON":     req.Reason,
+		"TRUNK_PATH": o.Trunk,
+		"TRUNK_HASH": CurrentTrunkHash(o.Trunk),
+		"TASKS_DB":   tasksDBPath(o.Root),
+		"RUNS_DIR":   runsDir(o.Root),
+	}
+
+	res := o.runAgent(RoleOverseer, 0, wsID, stdin, env)
 
 	verdict, _ := lastVerdict(res.Events)
 	replans := eventReplans(res.Events)
