@@ -34,6 +34,7 @@ func mainBody() {
 	mergerHarness := flag.String("merger-harness", "", "harness:model for merger (overrides --harness)")
 	replannerHarness := flag.String("replanner-harness", "", "harness:model for replanner (overrides --think-harness)")
 	overseerHarness := flag.String("overseer-harness", "", "harness:model for overseer (overrides --think-harness)")
+	arbiterHarness := flag.String("arbiter-harness", "", "harness:model for arbiter (overrides --think-harness)")
 
 	jailBin := flag.String("jail-bin", "", "jail binary (PATH-resolved or absolute); empty = run harness directly")
 	Throw(flag.CommandLine.Parse(os.Args[1:]))
@@ -69,6 +70,7 @@ func mainBody() {
 		{"--merger-harness", string(RoleMerger), *mergerHarness},
 		{"--replanner-harness", string(RoleReplanner), *replannerHarness},
 		{"--overseer-harness", string(RoleOverseer), *overseerHarness},
+		{"--arbiter-harness", string(RoleArbiter), *arbiterHarness},
 	} {
 		if kv.val == "" {
 			continue
@@ -149,6 +151,7 @@ func formatBindings(b map[string]HarnessModel) string {
 		"default", "think", "work",
 		string(RoleTasker), string(RoleDigger), string(RoleReviewer),
 		string(RoleMerger), string(RoleReplanner), string(RoleOverseer),
+		string(RoleArbiter),
 	}
 
 	var parts []string

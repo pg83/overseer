@@ -34,7 +34,7 @@ func (o *Orchestrator) harnessModelForRole(role AgentRole) HarnessModel {
 		if hm, ok := o.Bindings["think"]; ok {
 			return hm
 		}
-	case RoleDigger, RoleReviewer:
+	case RoleDigger, RoleReviewer, RoleArbiter:
 		if hm, ok := o.Bindings["work"]; ok {
 			return hm
 		}

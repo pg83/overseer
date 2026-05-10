@@ -64,6 +64,13 @@ const (
 	RoleMerger    AgentRole = "merger"
 	RoleReplanner AgentRole = "replanner"
 	RoleOverseer  AgentRole = "overseer"
+
+	// Arbiter is the cycle-internal escalation gate. When a digger →
+	// reviewer / merger cycle hits a disagreement (REWORK / DISCARD /
+	// MERGE_FAIL), the arbiter decides: keep iterating in the cycle, or
+	// escalate to the full replanner. Replanner-lite, called on every
+	// disagreement instead of bouncing the full replanner only every N.
+	RoleArbiter AgentRole = "arbiter"
 )
 
 
@@ -78,6 +85,10 @@ const (
 	VerdictMerged        AgentVerdict = "MERGED"
 	VerdictMergeFail     AgentVerdict = "MERGE_FAIL"
 	VerdictGoalsAchieved AgentVerdict = "GOALS_ACHIEVED"
+
+	// Arbiter verdicts.
+	VerdictContinue AgentVerdict = "CONTINUE"
+	VerdictEscalate AgentVerdict = "ESCALATE"
 )
 
 // AgentResult is pure transport: routing identity (Role/Ticket/Workspace), raw I/O
@@ -108,6 +119,20 @@ type MergeRequest struct {
 	Ticket    int
 	Workspace string
 	History   string
+}
+
+// ArbiterRequest is what the cycle hands to the arbiter when a disagreement
+// surfaces (reviewer REWORK / DISCARD, merger MERGE_FAIL / FF_FAIL). The arbiter
+// reads ticket history + workspace state + the trigger detail and decides
+// CONTINUE (spawn next digger iteration) or ESCALATE (queue full replanner).
+type ArbiterRequest struct {
+	Ticket       int
+	Workspace    string       // digger's branch workspace to continue on
+	Source       AgentRole    // who triggered: reviewer or merger
+	Trigger      AgentVerdict // REWORK / DISCARD / MERGE_FAIL
+	Detail       string       // what the trigger source said
+	RebaseTarget string       // for MERGE_FAIL: trunk head to rebase onto
+	MergeOut     string       // for MERGE_FAIL: merge command output to surface in digger input
 }
 
 type OverseerRequest struct {
@@ -144,6 +169,7 @@ type Orchestrator struct {
 	QReplanner chan ReplanRequest
 	QMerger    chan MergeRequest
 	QOverseer  chan OverseerRequest
+	QArbiter   chan ArbiterRequest
 
 	AgentDone chan AgentResult
 

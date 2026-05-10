@@ -263,8 +263,3 @@ func (o *Orchestrator) bumpBounceLocked(n int) int {
 	return 0
 }
 
-// bounceReplanInterval is how often (in cycle-back iterations) the orchestrator
-// pings the replanner for a ticket bouncing through digger → reviewer → merger →
-// digger. The replanner is heavy and rarely productive every iteration; spawn it
-// at multiples of this interval so the loop has a chance to settle on its own.
-const bounceReplanInterval = 10

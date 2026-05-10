@@ -49,6 +49,7 @@ func NewOrchestrator(root, trunk string, bindings map[string]HarnessModel, jailB
 		QReplanner: make(chan ReplanRequest, 1000),
 		QMerger:    make(chan MergeRequest, 1000),
 		QOverseer:  make(chan OverseerRequest, 1000),
+		QArbiter:   make(chan ArbiterRequest, 1000),
 		AgentDone:  make(chan AgentResult, 1000),
 		Wakeup:     make(chan struct{}, 1),
 		StopCtx:    ctx,
@@ -71,6 +72,7 @@ func (o *Orchestrator) Run() {
 	go o.replannerLoop()
 	go o.mergerLoop()
 	go o.overseerLoop()
+	go o.arbiterLoop()
 
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
@@ -245,6 +247,21 @@ func (o *Orchestrator) runAgentMerger(ticketN int, ws, stdin string, env map[str
 		}
 
 		uiTicket("🔄", RoleMerger, ticketN, "RESPAWN", fmt.Sprintf("verdict=%q — retrying", v))
+	}
+}
+
+// runAgentArbiter drives an arbiter invocation, retrying until it emits CONTINUE
+// or ESCALATE.
+func (o *Orchestrator) runAgentArbiter(ticketN int, ws, stdin string, env map[string]string) AgentResult {
+	for {
+		res := o.runAgent(RoleArbiter, ticketN, ws, stdin, env)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictContinue || v == VerdictEscalate {
+			return res
+		}
+
+		uiTicket("🔄", RoleArbiter, ticketN, "RESPAWN", fmt.Sprintf("verdict=%q — retrying", v))
 	}
 }
 
@@ -505,22 +522,29 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 	case VerdictRework:
 		o.recordEventLocked(res.Ticket, "REVIEWER_REWORK", detail)
 		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", detail)
+		o.bumpBounceLocked(res.Ticket)
 
-		bounce := o.bumpBounceLocked(res.Ticket)
-
-		if bounce > 0 && bounce%bounceReplanInterval == 0 {
-			o.QReplanner <- ReplanRequest{Source: RoleReviewer, Ticket: res.Ticket, Reason: fmt.Sprintf("REWORK on T-%d (bounce=%d): %s", res.Ticket, bounce, detail)}
-			uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", fmt.Sprintf("bounce=%d", bounce))
+		o.QArbiter <- ArbiterRequest{
+			Ticket:    res.Ticket,
+			Workspace: res.Workspace,
+			Source:    RoleReviewer,
+			Trigger:   VerdictRework,
+			Detail:    detail,
 		}
-
-		o.spawnDiggerSameWorkspaceLocked(res.Ticket, res.Workspace)
+		uiTicket("📥", RoleReviewer, res.Ticket, "→Q_arbiter", detail)
 	case VerdictDiscard:
 		o.recordEventLocked(res.Ticket, "REVIEWER_DISCARD", detail)
 		uiTicket("👎", RoleReviewer, res.Ticket, "DISCARD", detail)
-		o.setInProgressLocked(res.Ticket, false)
+		o.bumpBounceLocked(res.Ticket)
 
-		o.QReplanner <- ReplanRequest{Source: res.Role, Ticket: res.Ticket, Reason: "reviewer discarded: " + detail}
-		uiTicket("📥", RoleReviewer, res.Ticket, "→Q_replanner", detail)
+		o.QArbiter <- ArbiterRequest{
+			Ticket:    res.Ticket,
+			Workspace: res.Workspace,
+			Source:    RoleReviewer,
+			Trigger:   VerdictDiscard,
+			Detail:    detail,
+		}
+		uiTicket("📥", RoleReviewer, res.Ticket, "→Q_arbiter", detail)
 	}
 }
 
@@ -868,6 +892,69 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, req ReplanRequest, ops
 	o.signalWake()
 }
 
+func (o *Orchestrator) arbiterLoop() {
+	for {
+		select {
+		case <-o.StopCtx.Done():
+			return
+		case req := <-o.QArbiter:
+			o.safe("ARBITER", func() { o.runArbiter(req) })
+		}
+	}
+}
+
+// runArbiter is the cycle-internal escalation gate. Called on every disagreement
+// inside the digger → reviewer → merger cycle (REWORK / DISCARD / MERGE_FAIL),
+// it decides CONTINUE (spawn next digger iteration) or ESCALATE (queue full
+// replanner). Replaces the bounce-count trigger that used to ping the replanner
+// every Nth iteration regardless of context.
+func (o *Orchestrator) runArbiter(req ArbiterRequest) {
+	uiTicket("🚀", RoleArbiter, req.Ticket, "START",
+		fmt.Sprintf("trigger=%s/%s ws=%s", req.Source, req.Trigger, req.Workspace))
+
+	wsAbs := wsPath(o.Root, req.Workspace)
+
+	input := o.buildAgentInput(RoleArbiter, req.Ticket, wsAbs) +
+		fmt.Sprintf("\nTRIGGER_ROLE: %s\nTRIGGER_VERDICT: %s\nTRIGGER_DETAIL: %s\n",
+			req.Source, req.Trigger, req.Detail)
+
+	prompt := loadPrompt(RoleArbiter)
+	stdin := concatPromptInput(prompt, input)
+
+	env := o.ticketEnv(req.Ticket, wsAbs)
+	env["TRIGGER_ROLE"] = string(req.Source)
+	env["TRIGGER_VERDICT"] = string(req.Trigger)
+	env["TRIGGER_DETAIL"] = req.Detail
+
+	res := o.runAgentArbiter(req.Ticket, req.Workspace, stdin, env)
+	verdict, detail := lastVerdict(res.Events)
+
+	switch verdict {
+	case VerdictContinue:
+		o.recordEvent(req.Ticket, "ARBITER_CONTINUE", detail)
+		uiTicket("➡️", RoleArbiter, req.Ticket, "CONTINUE", detail)
+
+		// Dispatch back into the cycle based on what triggered the call.
+		switch req.Trigger {
+		case VerdictRework, VerdictDiscard:
+			o.spawnDiggerSameWorkspaceLocked(req.Ticket, req.Workspace)
+		case VerdictMergeFail:
+			o.spawnDiggerWithRebase(req.Ticket, req.Workspace, req.RebaseTarget, req.MergeOut)
+		}
+	case VerdictEscalate:
+		o.recordEvent(req.Ticket, "ARBITER_ESCALATE", detail)
+		uiTicket("⤴️", RoleArbiter, req.Ticket, "ESCALATE", detail)
+
+		o.QReplanner <- ReplanRequest{
+			Source: RoleArbiter,
+			Ticket: req.Ticket,
+			Reason: fmt.Sprintf("arbiter escalated from %s/%s: %s — original trigger detail: %s",
+				req.Source, req.Trigger, detail, req.Detail),
+		}
+		uiTicket("📥", RoleArbiter, req.Ticket, "→Q_replanner", detail)
+	}
+}
+
 func (o *Orchestrator) mergerLoop() {
 	for {
 		select {
@@ -948,7 +1035,16 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 			o.bumpBounceLocked(req.Ticket)
 			o.Mu.Unlock()
 
-			o.spawnDiggerWithRebase(req.Ticket, req.Workspace, newHead, out)
+			o.QArbiter <- ArbiterRequest{
+				Ticket:       req.Ticket,
+				Workspace:    req.Workspace,
+				Source:       RoleMerger,
+				Trigger:      VerdictMergeFail,
+				Detail:       "ff-merge into trunk failed: " + out,
+				RebaseTarget: newHead,
+				MergeOut:     out,
+			}
+			uiTicket("📥", RoleMerger, req.Ticket, "→Q_arbiter", "ff_fail")
 
 			return
 		}
@@ -972,17 +1068,21 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 		uiTicket("❌", RoleMerger, req.Ticket, "FAIL", detail)
 
 		o.Mu.Lock()
-		bounce := o.bumpBounceLocked(req.Ticket)
+		o.bumpBounceLocked(req.Ticket)
 		o.Mu.Unlock()
-
-		if bounce > 0 && bounce%bounceReplanInterval == 0 {
-			o.QReplanner <- ReplanRequest{Source: RoleMerger, Ticket: req.Ticket, Reason: fmt.Sprintf("MERGE_FAIL on T-%d (bounce=%d): %s", req.Ticket, bounce, detail)}
-			uiTicket("📥", RoleMerger, req.Ticket, "→Q_replanner", fmt.Sprintf("bounce=%d", bounce))
-		}
 
 		head := CurrentTrunkHash(o.Trunk)
 
-		o.spawnDiggerWithRebase(req.Ticket, req.Workspace, head, detail)
+		o.QArbiter <- ArbiterRequest{
+			Ticket:       req.Ticket,
+			Workspace:    req.Workspace,
+			Source:       RoleMerger,
+			Trigger:      VerdictMergeFail,
+			Detail:       detail,
+			RebaseTarget: head,
+			MergeOut:     detail,
+		}
+		uiTicket("📥", RoleMerger, req.Ticket, "→Q_arbiter", detail)
 	}
 }
 
