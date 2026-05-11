@@ -279,6 +279,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 
 	argsCopy := append([]string{}, cmd.Args...)
 
+	fmt.Print(stdin)
 	uiTicket("🔧", role, ticket, "EXEC", strings.Join(argsCopy, " "))
 
 	// Single jsonl writer for the whole run; no other persistence path. All readers
