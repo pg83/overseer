@@ -205,11 +205,27 @@ func (o *Orchestrator) startAgentForTicketLocked(t Ticket) {
 }
 
 // runAgentDigger drives a digger invocation, retrying until the agent emits a
-// recognized verdict (READY or CANT_DO). Model glitches that finish without a
-// verdict are transient — the digger session preserves prior context.
-func (o *Orchestrator) runAgentDigger(ticketN int, ws, stdin string, env map[string]string) AgentResult {
+// recognized verdict (READY or CANT_DO). On each retry the stdin is rebuilt so
+// PRIOR_RUNS includes the just-completed failed attempt — otherwise every retry
+// within the same spawn sees a stale snapshot that predates the digger's own
+// runs, causing the model to start from scratch instead of continuing.
+//
+// extraInput is appended after buildAgentInput on every iteration — use it for
+// per-call context like MERGE_FAIL_OUTPUT / REBASE_TARGET that doesn't change
+// between retries but is specific to this spawn (e.g. merge-fail digger pass).
+func (o *Orchestrator) runAgentDigger(ticketN int, ws, extraInput string, env map[string]string) AgentResult {
+	wsAbs := wsPath(o.Root, ws)
+	prompt := loadPrompt(RoleDigger)
+
+	buildStdin := func() string {
+		input := o.buildAgentInput(RoleDigger, ticketN, wsAbs) +
+			fmt.Sprintf("PREV_WORKSPACE: %s\n", wsAbs) +
+			extraInput
+		return concatPromptInput(prompt, input)
+	}
+
 	for {
-		res := o.runAgent(RoleDigger, ticketN, ws, stdin, env)
+		res := o.runAgent(RoleDigger, ticketN, ws, buildStdin(), env)
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictReady || v == VerdictCantDo {
@@ -327,18 +343,13 @@ func (o *Orchestrator) spawnDiggerFreshLocked(ticketN int) {
 	o.setInProgressLocked(ticketN, true)
 	o.appendWorkspaceLocked(ticketN, wsID)
 
-	wsAbs := wsPath(o.Root, wsID)
-
 	o.recordEventLocked(ticketN, "AGENT_START", fmt.Sprintf("role=%s ws=%s", RoleDigger, wsID))
 	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+wsID)
 
-	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs)
-	prompt := loadPrompt(RoleDigger)
-	stdin := concatPromptInput(prompt, input)
-	env := o.ticketEnv(ticketN, wsAbs)
+	env := o.ticketEnv(ticketN, wsPath(o.Root, wsID))
 
 	go func() {
-		res := o.runAgentDigger(ticketN, wsID, stdin, env)
+		res := o.runAgentDigger(ticketN, wsID, "", env)
 		o.AgentDone <- res
 	}()
 }
@@ -609,15 +620,11 @@ func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
 	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws)
 
 	wsAbs := wsPath(o.Root, ws)
-	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs) +
-		fmt.Sprintf("PREV_WORKSPACE: %s\n", wsAbs)
-	prompt := loadPrompt(RoleDigger)
-	stdin := concatPromptInput(prompt, input)
 	env := o.ticketEnv(ticketN, wsAbs)
 	env["PREV_WORKSPACE"] = wsAbs
 
 	go func() {
-		res := o.runAgentDigger(ticketN, ws, stdin, env)
+		res := o.runAgentDigger(ticketN, ws, "", env)
 		o.AgentDone <- res
 	}()
 }
@@ -1128,11 +1135,9 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws+" rebase→"+short)
 
 	wsAbs := wsPath(o.Root, ws)
-	input := o.buildAgentInput(RoleDigger, ticketN, wsAbs) +
-		fmt.Sprintf("PREV_WORKSPACE: %s\n", wsAbs) +
-		"\nMERGE_FAIL_OUTPUT:\n" + mergeOut + "\nREBASE_TARGET: " + target + "\n"
-	prompt := loadPrompt(RoleDigger)
-	stdin := concatPromptInput(prompt, input)
+	// MERGE_FAIL_OUTPUT is passed as extraInput so it stays in stdin on every
+	// retry iteration alongside fresh PRIOR_RUNS from buildAgentInput.
+	extraInput := "\nMERGE_FAIL_OUTPUT:\n" + mergeOut + "\nREBASE_TARGET: " + target + "\n"
 	env := o.ticketEnv(ticketN, wsAbs)
 	env["PREV_WORKSPACE"] = wsAbs
 	env["REBASE_TARGET"] = target
@@ -1140,7 +1145,7 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 	o.Mu.Unlock()
 
 	go func() {
-		res := o.runAgentDigger(ticketN, ws, stdin, env)
+		res := o.runAgentDigger(ticketN, ws, extraInput, env)
 		o.AgentDone <- res
 	}()
 }
