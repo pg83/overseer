@@ -303,18 +303,17 @@ func (o *Orchestrator) runAgentTasker(ticketN int, wsID, stdin string, env map[s
 }
 
 // runAgentReplanner drives a replanner invocation, retrying when the model
-// produced malformed JSON without emitting any task ops. If there are ops (or
-// genuinely none needed), return immediately — the caller decides what to do.
+// produced malformed JSON output. JSON-in-unparsed is checked first: if the
+// unparsed bucket contains JSON fragments, some task ops may have failed to
+// parse — applying a partial op set is worse than retrying for a clean run.
+// Only return when the output is clean (no JSON garbage), whether or not there
+// are task ops.
 func (o *Orchestrator) runAgentReplanner(ticketN int, wsID, stdin string, env map[string]string) AgentResult {
 	for {
 		res := o.runAgent(RoleReplanner, ticketN, wsID, stdin, env)
 
-		if len(replannerTaskOps(res.Events)) > 0 {
-			return res
-		}
-
 		if hasJSONInUnparsed(res.Events) {
-			uiTicket("🔄", RoleReplanner, ticketN, "RESPAWN", "unparsed JSON, no task ops — retrying")
+			uiTicket("🔄", RoleReplanner, ticketN, "RESPAWN", "unparsed JSON — retrying for clean output")
 			continue
 		}
 
