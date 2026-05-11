@@ -94,10 +94,11 @@ func (c *Claude) ClassifyFault(f *agentFault) (bool, string) {
 	return faultUnknown(f)
 }
 
-// traceAssistant pulls tool_use and text blocks out of a stream-json `assistant`
-// event — tool blocks become UI traces, text blocks accumulate into finalText so
-// embedded JSON events can be parsed downstream.
-func (c *Claude) traceAssistant(finalText *strings.Builder, role AgentRole, ticket int, ev map[string]any) {
+// traceAssistant pulls tool_use blocks out of a stream-json `assistant` event
+// for UI traces. Text blocks are intentionally NOT accumulated into finalText —
+// the final `result` event already carries the full concatenated text, and
+// double-collecting duplicates every embedded JSON event downstream.
+func (c *Claude) traceAssistant(_ *strings.Builder, role AgentRole, ticket int, ev map[string]any) {
 	if t, _ := ev["type"].(string); t != "assistant" {
 		return
 	}
@@ -117,21 +118,10 @@ func (c *Claude) traceAssistant(finalText *strings.Builder, role AgentRole, tick
 			continue
 		}
 
-		btyp, _ := block["type"].(string)
-
-		switch btyp {
-		case "tool_use":
+		if btyp, _ := block["type"].(string); btyp == "tool_use" {
 			name, _ := block["name"].(string)
 			input, _ := block["input"].(map[string]any)
 			ui("·", role, ticket, name, summarizeToolInput(name, input))
-		case "text":
-			if txt, _ := block["text"].(string); txt != "" {
-				finalText.WriteString(txt)
-
-				if !strings.HasSuffix(txt, "\n") {
-					finalText.WriteByte('\n')
-				}
-			}
 		}
 	}
 }
