@@ -23,7 +23,7 @@ func (g *Gemini) Bin() string  { return g.bin }
 // Args invokes the gemini CLI in non-interactive mode. Prompt is fed via stdin
 // (`-p -` reads stdin). --yolo bypasses the per-tool confirmation prompt; the
 // orchestrator's jail is the only sandbox we trust.
-func (g *Gemini) Args(model, wsAbs, _ string) []string {
+func (g *Gemini) Args(model, wsAbs string) []string {
 	args := []string{
 		"-p", "-",
 		"--output-format", "json",
@@ -38,10 +38,6 @@ func (g *Gemini) Args(model, wsAbs, _ string) []string {
 		args = append(args, "--include-directories", wsAbs)
 	}
 
-	// TODO: gemini-cli supports `--resume <uuid>` for existing sessions but
-	// generates its own UUID at create-time (no custom-ID-at-create). Mapping-
-	// file approach (capture UUID first run, store under <orch-root>/sessions/
-	// gemini/<sessionID>.id, --resume on subsequent) — not implemented yet.
 	return args
 }
 

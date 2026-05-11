@@ -59,42 +59,6 @@ func (hm HarnessModel) resolveModel(role AgentRole) string {
 	return hm.Harness.DefaultModel(role)
 }
 
-// sessionIDFor builds the cross-run session name we hand to the harness. Stable
-// per-root for replanner / overseer (one session each, ever); per-ticket for the
-// work roles so each ticket has its own digger / reviewer / merger / tasker memory
-// across REWORK and MERGE_FAIL iterations. The orch root is included so multiple
-// orchestrator instances on the same machine don't collide.
-func sessionIDFor(orchRoot string, role AgentRole, ticket int) string {
-	switch role {
-	case RoleReplanner, RoleOverseer:
-		return fmt.Sprintf("%s/%s", orchRoot, role)
-	}
-
-	return fmt.Sprintf("%s/%s/T-%d", orchRoot, role, ticket)
-}
-
-// sessionDirFor returns the absolute, stable cwd that anchors this session's
-// harness transcripts. Harnesses encode the working directory into their session
-// storage path (e.g. claude → ~/.claude/projects/<encoded-cwd>/<UUID>.jsonl), so
-// for cross-run resumption to actually find the prior transcript the cwd must be
-// the same every time. The git workspace is volatile (per-attempt clones); the
-// session dir is permanent under <orch-root>/sessions/<role>[-T-<n>]/.
-//
-// The sessionDir is not the workspace — agents read $WORKSPACE from their input
-// to know where to do real git work. cwd here is just for harness bookkeeping.
-func (o *Orchestrator) sessionDirFor(role AgentRole, ticket int) string {
-	var name string
-
-	switch role {
-	case RoleReplanner, RoleOverseer:
-		name = string(role)
-	default:
-		name = fmt.Sprintf("%s-T-%d", role, ticket)
-	}
-
-	return filepath.Join(o.Root, "sessions", name)
-}
-
 // runAgent is the only entry-point consumers use. It guarantees:
 //
 //   - The harness always runs to completion. We never kill it from outside.
@@ -112,7 +76,6 @@ func (o *Orchestrator) sessionDirFor(role AgentRole, ticket int) string {
 // in the prose `stdin` for context.
 func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, env map[string]string) AgentResult {
 	harness := o.harnessModelForRole(role).Harness
-	sessionID := sessionIDFor(o.Root, role, ticket)
 
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
@@ -133,7 +96,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 		var res AgentResult
 
 		exc := Try(func() {
-			res = o.runAgentOnce(role, ticket, wsID, sessionID, stdin, env)
+			res = o.runAgentOnce(role, ticket, wsID, stdin, env)
 		})
 
 		if exc != nil {
@@ -234,23 +197,17 @@ func (o *Orchestrator) fatal(reason string) {
 // *agentFault — the caller (runAgent) classifies and either retries or hard-stops the
 // process. Never returns a synthesized "crashed" verdict event. The harness is never
 // killed from outside — it always runs to completion, on the user's invariant.
-func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID, stdin string, env map[string]string) AgentResult {
+func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin string, env map[string]string) AgentResult {
 	o.AgentSem <- struct{}{}
 	defer func() { <-o.AgentSem }()
 
-	// sessionDir is the agent's stable cwd — anchors harness transcripts so the
-	// same role+ticket resumes the same session across runs. wsAbs is the volatile
-	// per-attempt git workspace; agents see it via $WORKSPACE in their input.
-	sessionDir := o.sessionDirFor(role, ticket)
-	Throw(os.MkdirAll(sessionDir, 0755))
-
-	tmpdir := filepath.Join(sessionDir, ".tmp")
-	Throw(os.MkdirAll(tmpdir, 0755))
-
 	wsAbs := ""
+	tmpdir := ""
 
 	if wsID != "" {
 		wsAbs = wsPath(o.Root, wsID)
+		tmpdir = filepath.Join(wsAbs, ".tmp")
+		Throw(os.MkdirAll(tmpdir, 0755))
 	}
 
 	home := os.Getenv("HOME")
@@ -259,13 +216,14 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 		ThrowFmt("HOME env var is empty")
 	}
 
-	rwArgs := []string{
-		"--rw=" + sessionDir,
-		"--rw=" + tmpdir,
-	}
+	rwArgs := []string{}
 
 	if wsAbs != "" {
 		rwArgs = append(rwArgs, "--rw="+wsAbs)
+	}
+
+	if tmpdir != "" {
+		rwArgs = append(rwArgs, "--rw="+tmpdir)
 	}
 
 	hm := o.harnessModelForRole(role)
@@ -277,11 +235,15 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 
 	model := hm.resolveModel(role)
 
-	bin, args := wrapJail(o.JailBin, rwArgs, harness.Bin(), harness.Args(model, wsAbs, sessionID))
+	bin, args := wrapJail(o.JailBin, rwArgs, harness.Bin(), harness.Args(model, wsAbs))
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(stdin)
-	cmd.Dir = sessionDir
+
+	if wsAbs != "" {
+		cmd.Dir = wsAbs
+	}
+
 	cmd.Env = append(os.Environ(), "TMPDIR="+tmpdir)
 
 	for k, v := range env {

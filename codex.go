@@ -24,7 +24,7 @@ func (c *Codex) Bin() string  { return c.bin }
 // via stdin (codex exec reads it when no positional prompt is given). --cd pins
 // the working dir; --skip-git-repo-check tolerates the workspace being a fresh
 // clone with no commits yet.
-func (c *Codex) Args(model, wsAbs, _ string) []string {
+func (c *Codex) Args(model, wsAbs string) []string {
 	args := []string{
 		"exec",
 		"--json",
@@ -40,12 +40,6 @@ func (c *Codex) Args(model, wsAbs, _ string) []string {
 		args = append(args, "--cd", wsAbs)
 	}
 
-	// TODO: codex generates its own session UUID per `codex exec` and prints it
-	// on stdout (`session id: <uuid>`); resumption is via a separate subcommand
-	// `codex exec resume <uuid>`. To support cross-run memory: capture the UUID
-	// from the stream on first run, store at <orch-root>/sessions/codex/<sessionID>.id,
-	// switch the subcommand to `exec resume <uuid>` on subsequent runs. Not
-	// implemented yet — every run is fresh.
 	return args
 }
 

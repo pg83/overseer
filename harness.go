@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha1"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -18,15 +17,10 @@ type Harness interface {
 	// Bin is the absolute path to the harness binary.
 	Bin() string
 
-	// Args builds the harness CLI args (sans the binary path itself).
-	//
-	// model="" means "harness picks its own default". wsAbs is the workspace path;
-	// harnesses that need an explicit --dir flag use it. sessionID is the
-	// orchestrator-issued name for cross-run memory — replanner/overseer get a
-	// stable per-root ID, work roles get a per-ticket ID. Each harness translates
-	// it to whatever its CLI supports (e.g. UUID for claude, mapping file for
-	// codex/opencode/gemini); empty sessionID means "no resumption, fresh run".
-	Args(model, wsAbs, sessionID string) []string
+	// Args builds the harness CLI args (sans the binary path itself). model=""
+	// means "harness picks its own default". wsAbs is the workspace path;
+	// harnesses that need an explicit --dir flag use it.
+	Args(model, wsAbs string) []string
 
 	// JailRWPaths is the set of filesystem paths (config dirs, caches, ...) the
 	// harness needs read-write inside the jail to function. The workspace and tmpdir
@@ -104,25 +98,3 @@ func faultUnknown(f *agentFault) (bool, string) {
 	return false, fmt.Sprintf("exit=%d stderr=%q", f.exitCode, f.stderr)
 }
 
-// orchestratorSessionNS is the UUID5 namespace for orchestrator-issued session names.
-// Any 16 bytes work; this is arbitrary but stable so deterministic UUIDs from session
-// names don't drift across orchestrator versions. Bytes spell "OverseerSessionN".
-var orchestratorSessionNS = []byte{
-	0x4f, 0x76, 0x65, 0x72, 0x73, 0x65, 0x65, 0x72,
-	0x53, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x4e,
-}
-
-// sessionUUID5 hashes an orchestrator-side session name into a deterministic RFC 4122
-// version-5 UUID. Used by harnesses (currently just claude) whose CLI accepts a
-// custom UUID at create-time so the same ID resumes the same session across runs.
-func sessionUUID5(name string) string {
-	h := sha1.New()
-	h.Write(orchestratorSessionNS)
-	h.Write([]byte(name))
-	sum := h.Sum(nil)[:16]
-	sum[6] = (sum[6] & 0x0f) | 0x50
-	sum[8] = (sum[8] & 0x3f) | 0x80
-
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
-}

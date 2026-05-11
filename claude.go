@@ -19,7 +19,7 @@ func NewClaude(bin string) *Claude {
 func (c *Claude) Name() string { return "claude" }
 func (c *Claude) Bin() string  { return c.bin }
 
-func (c *Claude) Args(model, _, sessionID string) []string {
+func (c *Claude) Args(model, _ string) []string {
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -29,16 +29,6 @@ func (c *Claude) Args(model, _, sessionID string) []string {
 
 	if model != "" {
 		args = append(args, "--model", model)
-	}
-
-	// Claude is the only backend whose CLI accepts a custom UUID at create-time
-	// (--session-id in -p mode). Subsequent runs with the same UUID append to the
-	// same .jsonl transcript, giving us cross-run memory. Sessions are stored
-	// per-cwd under ~/.claude/projects/<encoded-cwd>/<UUID>.jsonl — the orchestrator
-	// pins cwd to a stable per-session dir (sessionDirFor) so resumption finds the
-	// prior transcript regardless of which volatile workspace the agent operates on.
-	if sessionID != "" {
-		args = append(args, "--session-id", sessionUUID5(sessionID))
 	}
 
 	return args
