@@ -790,6 +790,12 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 			ThrowFmt("op=new ticket %d: N already exists", n)
 		}
 
+		for _, t := range tickets {
+			if n <= t.N {
+				ThrowFmt("op=new ticket %d: N must be greater than all existing tickets (max=%d)", n, t.N)
+			}
+		}
+
 		descr, _ := ev["descr"].(string)
 		prio := jsonInt(ev["prio"])
 		deps := jsonIntArray(ev["deps"])

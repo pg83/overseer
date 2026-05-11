@@ -319,7 +319,15 @@ func SerializeTasks(tickets []Ticket) string {
 		}
 	}
 
+	maxN := 0
+	for _, t := range sorted {
+		if t.N > maxN {
+			maxN = t.N
+		}
+	}
+
 	var sb strings.Builder
+	fmt.Fprintf(&sb, "MAX_TICKET_N: %d\n\n", maxN)
 	sb.WriteString("OPEN_TICKETS (replanner may cancel/update these):\n")
 
 	if open.Len() == 0 {
