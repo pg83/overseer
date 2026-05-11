@@ -298,12 +298,7 @@ func (o *Orchestrator) runAgentTasker(ticketN int, wsID, stdin string, env map[s
 			return res
 		}
 
-		if hasJSONInUnparsed(res.Events) {
-			uiTicket("🔄", RoleTasker, ticketN, "RESPAWN", "unparsed JSON, no plan — retrying")
-			continue
-		}
-
-		return res
+		uiTicket("🔄", RoleTasker, ticketN, "RESPAWN", "no plan event — retrying")
 	}
 }
 
