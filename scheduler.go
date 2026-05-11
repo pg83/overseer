@@ -281,11 +281,56 @@ func (o *Orchestrator) runAgentArbiter(ticketN int, ws, stdin string, env map[st
 	}
 }
 
+// runAgentTasker drives a tasker invocation, retrying until the agent either
+// writes a plan file and emits {"type":"plan","path":"..."} or emits a replan
+// event signalling the ticket needs re-scoping. If the model produced malformed
+// JSON (detectable via the unparsed bucket) without a plan or replan, respawn —
+// it tried but failed to emit structured output.
+func (o *Orchestrator) runAgentTasker(ticketN int, wsID, stdin string, env map[string]string) AgentResult {
+	for {
+		res := o.runAgent(RoleTasker, ticketN, wsID, stdin, env)
+
+		if taskerPlanContent(res.Events) != "" {
+			return res
+		}
+
+		if hasReplanEvent(res.Events) {
+			return res
+		}
+
+		if hasJSONInUnparsed(res.Events) {
+			uiTicket("🔄", RoleTasker, ticketN, "RESPAWN", "unparsed JSON, no plan — retrying")
+			continue
+		}
+
+		return res
+	}
+}
+
+// runAgentReplanner drives a replanner invocation, retrying when the model
+// produced malformed JSON without emitting any task ops. If there are ops (or
+// genuinely none needed), return immediately — the caller decides what to do.
+func (o *Orchestrator) runAgentReplanner(ticketN int, wsID, stdin string, env map[string]string) AgentResult {
+	for {
+		res := o.runAgent(RoleReplanner, ticketN, wsID, stdin, env)
+
+		if len(replannerTaskOps(res.Events)) > 0 {
+			return res
+		}
+
+		if hasJSONInUnparsed(res.Events) {
+			uiTicket("🔄", RoleReplanner, ticketN, "RESPAWN", "unparsed JSON, no task ops — retrying")
+			continue
+		}
+
+		return res
+	}
+}
+
 // runAgentOverseer drives an overseer invocation, retrying until the agent
 // either certifies goals are met (GOALS_ACHIEVED verdict) or emits at least
-// one replan event. Anything else — invented "NO_ACTION" verdicts, empty
-// output, prose-only responses — is a protocol violation that stalls the
-// system; respawn until the overseer commits to a real decision.
+// one replan event. Malformed JSON output (JSON-in-unparsed with no useful
+// events) also triggers a retry.
 func (o *Orchestrator) runAgentOverseer(wsID, stdin string, env map[string]string) AgentResult {
 	for {
 		res := o.runAgent(RoleOverseer, 0, wsID, stdin, env)
@@ -296,9 +341,38 @@ func (o *Orchestrator) runAgentOverseer(wsID, stdin string, env map[string]strin
 			return res
 		}
 
+		if hasJSONInUnparsed(res.Events) {
+			uiSys("🔄", "OVERSEER_RESPAWN", "unparsed JSON, no decision — retrying")
+			continue
+		}
+
 		uiSys("🔄", "OVERSEER_RESPAWN",
 			fmt.Sprintf("verdict=%q replans=0 — neither GOALS_ACHIEVED nor replan emitted", v))
 	}
+}
+
+// hasJSONInUnparsed reports whether the synthetic unparsed event (if any)
+// contains JSON fragments — a signal the model tried to emit structured output
+// but produced malformed lines.
+func hasJSONInUnparsed(events []map[string]any) bool {
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t == "unparsed" {
+			if text, _ := ev["text"].(string); strings.Contains(text, `{"`) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasReplanEvent reports whether any replan event was emitted.
+func hasReplanEvent(events []map[string]any) bool {
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t == "replan" {
+			return true
+		}
+	}
+	return false
 }
 
 // ticketEnv returns the common environment-variable map every ticket-bound role
@@ -330,9 +404,8 @@ func (o *Orchestrator) spawnTaskerLocked(ticketN int) {
 	stdin := concatPromptInput(prompt, input)
 	env := o.ticketEnv(ticketN, wsAbs)
 
-	// Tasker signals via plan event, not verdict — single-shot, no retry loop.
 	go func() {
-		res := o.runAgent(RoleTasker, ticketN, wsID, stdin, env)
+		res := o.runAgentTasker(ticketN, wsID, stdin, env)
 		o.AgentDone <- res
 	}()
 }
@@ -664,7 +737,7 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 		"TASKS_DB":          tasksDBPath(o.Root),
 	}
 
-	res := o.runAgent(RoleReplanner, req.Ticket, wsID, stdin, env)
+	res := o.runAgentReplanner(req.Ticket, wsID, stdin, env)
 
 	ops := replannerTaskOps(res.Events)
 
