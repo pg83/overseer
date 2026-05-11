@@ -279,14 +279,12 @@ func (o *Orchestrator) appendLogEventLocked(ev LogEvent) {
 }
 
 // SerializeTasks renders the in-memory tickets for the replanner's CURRENT_TASKS
-// input. Splits into two clearly labelled sections so the model can't confuse
-// OPEN and CLOSED tickets even under a large REJECTED_OUTPUT context:
+// input. Two sections:
 //
-//   OPEN_TICKETS (replanner may cancel/update these):
-//   <full JSONL, one per line>
+//   OPEN_TICKETS: full JSONL for all OPEN tickets (replanner may operate on these).
 //
-//   CLOSED_TICKETS (immutable — for reference only, do not cancel/update):
-//   <compact one-liner: n + descr + close_reason>
+//   CLOSED_DEPS: compact one-liner only for closed tickets that are direct deps
+//   of at least one OPEN ticket. The full history is in TASKS_DB (passed separately).
 //
 // Sorted by N within each section.
 func SerializeTasks(tickets []Ticket) string {
@@ -296,15 +294,25 @@ func SerializeTasks(tickets []Ticket) string {
 		return sorted[a].N < sorted[b].N
 	})
 
-	var open, closed strings.Builder
+	// Collect N values directly referenced by OPEN tickets.
+	directDeps := map[int]bool{}
+	for _, t := range sorted {
+		if t.State == "OPEN" {
+			for _, dep := range t.Deps {
+				directDeps[dep] = true
+			}
+		}
+	}
+
+	var open, closedDeps strings.Builder
 
 	for _, t := range sorted {
 		if t.State == "OPEN" {
 			b := Throw2(json.Marshal(t))
 			open.Write(b)
 			open.WriteByte('\n')
-		} else {
-			fmt.Fprintf(&closed, "{\"n\":%d,\"state\":%q,\"descr\":%s,\"close_reason\":%s}\n",
+		} else if directDeps[t.N] {
+			fmt.Fprintf(&closedDeps, "{\"n\":%d,\"state\":%q,\"descr\":%s,\"close_reason\":%s}\n",
 				t.N, t.State,
 				Throw2(json.Marshal(t.Descr)),
 				Throw2(json.Marshal(t.CloseReason)))
@@ -320,13 +328,15 @@ func SerializeTasks(tickets []Ticket) string {
 		sb.WriteString(open.String())
 	}
 
-	sb.WriteString("\nCLOSED_TICKETS (immutable — do not cancel/update):\n")
+	sb.WriteString("\nCLOSED_DEPS (direct deps of open tickets — immutable, do not cancel/update):\n")
 
-	if closed.Len() == 0 {
+	if closedDeps.Len() == 0 {
 		sb.WriteString("(none)\n")
 	} else {
-		sb.WriteString(closed.String())
+		sb.WriteString(closedDeps.String())
 	}
+
+	sb.WriteString("\nFull ticket history: see TASKS_DB path in input header.\n")
 
 	return sb.String()
 }
