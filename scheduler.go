@@ -643,7 +643,7 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	o.Mu.Unlock()
 
 	input := o.agentSelfBlock(RoleReplanner, 0) +
-		fmt.Sprintf("REASON_FOR_REPLAN: %s\nSOURCE_AGENT: %s\nSOURCE_TICKET: %d\nRUNS_DIR: %s\nTASKS_DB: %s\n\nCURRENT_TASKS:\n%s\n",
+		fmt.Sprintf("REASON_FOR_REPLAN: %s\nSOURCE_AGENT: %s\nSOURCE_TICKET: %d\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
 			req.Reason, req.Source, req.Ticket, runsDir(o.Root), tasksDBPath(o.Root), currentTasks)
 
 	prompt := loadPrompt(RoleReplanner)

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -277,9 +278,17 @@ func (o *Orchestrator) appendLogEventLocked(ev LogEvent) {
 	o.Tickets = applyLogEvent(o.Tickets, ev)
 }
 
-// SerializeTasks renders the in-memory tickets as JSONL — replanner's CURRENT_TASKS
-// view. Same format as the legacy tasks.jsonl snapshot; one ticket per line, sorted
-// by N. The events log is the source of truth, this is just a projection.
+// SerializeTasks renders the in-memory tickets for the replanner's CURRENT_TASKS
+// input. Splits into two clearly labelled sections so the model can't confuse
+// OPEN and CLOSED tickets even under a large REJECTED_OUTPUT context:
+//
+//   OPEN_TICKETS (replanner may cancel/update these):
+//   <full JSONL, one per line>
+//
+//   CLOSED_TICKETS (immutable — for reference only, do not cancel/update):
+//   <compact one-liner: n + descr + close_reason>
+//
+// Sorted by N within each section.
 func SerializeTasks(tickets []Ticket) string {
 	sorted := make([]Ticket, len(tickets))
 	copy(sorted, tickets)
@@ -287,12 +296,36 @@ func SerializeTasks(tickets []Ticket) string {
 		return sorted[a].N < sorted[b].N
 	})
 
-	var sb strings.Builder
+	var open, closed strings.Builder
 
 	for _, t := range sorted {
-		b := Throw2(json.Marshal(t))
-		sb.Write(b)
-		sb.WriteByte('\n')
+		if t.State == "OPEN" {
+			b := Throw2(json.Marshal(t))
+			open.Write(b)
+			open.WriteByte('\n')
+		} else {
+			fmt.Fprintf(&closed, "{\"n\":%d,\"state\":%q,\"descr\":%s,\"close_reason\":%s}\n",
+				t.N, t.State,
+				Throw2(json.Marshal(t.Descr)),
+				Throw2(json.Marshal(t.CloseReason)))
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("OPEN_TICKETS (replanner may cancel/update these):\n")
+
+	if open.Len() == 0 {
+		sb.WriteString("(none)\n")
+	} else {
+		sb.WriteString(open.String())
+	}
+
+	sb.WriteString("\nCLOSED_TICKETS (immutable — do not cancel/update):\n")
+
+	if closed.Len() == 0 {
+		sb.WriteString("(none)\n")
+	} else {
+		sb.WriteString(closed.String())
 	}
 
 	return sb.String()
