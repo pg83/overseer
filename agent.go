@@ -290,7 +290,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, sessionID,
 
 	argsCopy := append([]string{}, cmd.Args...)
 
-	uiTicket("🔧", role, ticket, "EXEC", fmt.Sprintf("%s stdin=%db", strings.Join(argsCopy, " "), len(stdin)))
+	uiTicket("🔧", role, ticket, "EXEC", fmt.Sprintf("%s prompt_len=%d", strings.Join(argsCopy, " "), len(stdin)))
 
 	// Single jsonl writer for the whole run; no other persistence path. All readers
 	// (priorRunsForTicket, replanner mining, operator) consume only this file.
