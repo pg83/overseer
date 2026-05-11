@@ -450,25 +450,36 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 	o.signalWake()
 }
 
-// taskerPlanBody scans for the tasker's `plan` event and returns its `body` field.
-// Tasker-specific — only this handler cares about plan events.
-func taskerPlanBody(events []map[string]any) string {
-	body := ""
+// taskerPlanContent scans for the tasker's `plan` event and returns the plan
+// body. The event carries a `path` field pointing to a file the tasker wrote
+// (avoids embedding multi-line markdown inside a JSON string, which breaks
+// weak models). Falls back to `body` for backwards compat with old runs.
+func taskerPlanContent(events []map[string]any) string {
+	content := ""
 
 	for _, ev := range events {
 		if t, _ := ev["type"].(string); t != "plan" {
 			continue
 		}
 
-		b, _ := ev["body"].(string)
-		body = b
+		if p, _ := ev["path"].(string); p != "" {
+			if data, err := os.ReadFile(p); err == nil {
+				content = string(data)
+			}
+
+			continue
+		}
+
+		if b, _ := ev["body"].(string); b != "" {
+			content = b
+		}
 	}
 
-	return body
+	return content
 }
 
 func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
-	plan := strings.TrimSpace(taskerPlanBody(res.Events))
+	plan := strings.TrimSpace(taskerPlanContent(res.Events))
 
 	if plan == "" {
 		reason := "tasker produced no plan"

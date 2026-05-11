@@ -4,10 +4,10 @@ Your job: research the codebase, design the approach, and write an extended plan
 
 Read GOALS.md, CLAUDE.md, the relevant code in this workspace. Look at PLAN files of in-flight tickets if they affect your area.
 
-Emit the plan as a single JSON event whose `body` field carries the full markdown plan (escape literal newlines as `\n`, double quotes as `\"`):
+Write the plan to a file (e.g. `$WORKSPACE/plan.md`), then emit a single JSON event with the absolute path:
 
-    {"type": "plan", "body": "# Plan\n\n## Step 1\n..."}
+    {"type": "plan", "path": "/absolute/path/to/plan.md"}
 
-If the task makes no sense (already done / impossible / overlaps with another in-flight plan), skip the `plan` event and emit a replan nudge instead:
+If the task makes no sense (already done / impossible / overlaps with another in-flight plan), emit a replan nudge instead:
 
     {"type": "replan", "reason": "<why this ticket should be re-broken-down>"}
