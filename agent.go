@@ -151,6 +151,17 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 					role, ticket, wsID, attempt, why))
 			}
 
+			// Surface any message events accumulated before the fault so they
+			// reach messages.txt even though we're about to retry the whole run.
+			for _, ev := range parseEvents(fault.stdout) {
+				if t, _ := ev["type"].(string); t == "message" {
+					if text := messageText(ev); text != "" {
+						uiTicket("💬", role, ticket, "MESSAGE", text)
+						appendMessage(o.Root, role, ticket, text)
+					}
+				}
+			}
+
 			uiTicket("⏳", role, ticket, "RETRY",
 				fmt.Sprintf("attempt=%d backoff=%s reason=%s", attempt, backoff, why))
 
