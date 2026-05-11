@@ -58,8 +58,9 @@ func priorRunsForTicket(orchRoot string, ticketN int) string {
 	return sb.String()
 }
 
-// summarizeRunJsonl scans a run's jsonl and returns the assistant's accumulated text plus
-// the final verdict line. Replanner/operator can grep the file directly for richer detail.
+// summarizeRunJsonl returns only the final verdict from a run. Content is
+// omitted — message events are already in TICKET_CHAT via messages.txt;
+// full reasoning is available by reading LOG_FILE directly.
 func summarizeRunJsonl(path string) string {
 	f, err := os.Open(path)
 
@@ -69,7 +70,7 @@ func summarizeRunJsonl(path string) string {
 
 	defer f.Close()
 
-	var sb strings.Builder
+	var verdict, detail string
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
@@ -81,70 +82,15 @@ func summarizeRunJsonl(path string) string {
 			continue
 		}
 
-		t, _ := line["t"].(string)
-
-		switch t {
-		case "harness":
-			ev, _ := line["ev"].(map[string]any)
-
-			if ev == nil {
-				continue
-			}
-
-			if txt := assistantTextFromHarnessEv(ev); txt != "" {
-				sb.WriteString(txt)
-
-				if !strings.HasSuffix(txt, "\n") {
-					sb.WriteByte('\n')
-				}
-			}
-		case "finish":
-			verdict, _ := line["verdict"].(string)
-			detail, _ := line["detail"].(string)
-			fmt.Fprintf(&sb, "VERDICT: %s: %s\n", verdict, detail)
+		if t, _ := line["t"].(string); t == "finish" {
+			verdict, _ = line["verdict"].(string)
+			detail, _ = line["detail"].(string)
 		}
 	}
 
-	return sb.String()
+	return fmt.Sprintf("VERDICT: %s: %s\n", verdict, detail)
 }
 
-// assistantTextFromHarnessEv pulls assistant text out of a harness event regardless of
-// which backend produced it — past runs of one ticket may span multiple harnesses
-// (per-role config). Each backend's shape:
-//
-//   claude    {"type":"result", "result":"<full text>"}
-//   opencode  {"type":"text", "part":{"text":"<chunk>"}}
-//   codex     {"msg":{"type":"agent_message", "message":"<turn text>"}}
-//   gemini    {"type":"text"|"content", "text":"<chunk>"}
-func assistantTextFromHarnessEv(ev map[string]any) string {
-	switch t, _ := ev["type"].(string); t {
-	case "result":
-		txt, _ := ev["result"].(string)
-
-		return txt
-	case "text", "content":
-		// Opencode wraps text in {part:{text}}; gemini puts it at top level.
-		if part, _ := ev["part"].(map[string]any); part != nil {
-			if txt, _ := part["text"].(string); txt != "" {
-				return txt
-			}
-		}
-
-		txt, _ := ev["text"].(string)
-
-		return txt
-	}
-
-	if msg, _ := ev["msg"].(map[string]any); msg != nil {
-		if t, _ := msg["type"].(string); t == "agent_message" {
-			txt, _ := msg["message"].(string)
-
-			return txt
-		}
-	}
-
-	return ""
-}
 
 // outputPriming is appended at the very end of every agent stdin. Research on
 // weak models (glm-4 family etc.) shows the last instruction before the
