@@ -161,6 +161,13 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 
 		res.Events = parseEvents(res.Stdout)
 
+		// If the unparsed bucket contains `{"` the agent was trying to emit
+		// JSON but produced malformed output. Surface it and respawn — the
+		// role-specific verdict retry (runAgentDigger etc.) would catch a
+		// missing verdict anyway, but respawning here is earlier and applies
+		// to every role uniformly.
+		respawn := false
+
 		for _, ev := range res.Events {
 			t, _ := ev["type"].(string)
 
@@ -183,7 +190,17 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 				}
 
 				uiTicket("⚠️", role, ticket, "UNPARSED", text)
+
+				if strings.Contains(text, `{"`) {
+					respawn = true
+				}
 			}
+		}
+
+		if respawn {
+			uiTicket("🔄", role, ticket, "RESPAWN", "unparsed output contains JSON — retrying")
+			bumpBackoff()
+			continue
 		}
 
 		return res
