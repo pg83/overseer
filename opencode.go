@@ -101,7 +101,13 @@ func (o *Opencode) ClassifyFault(f *agentFault) (bool, string) {
 	}
 
 	if strings.HasPrefix(f.stderr, "stream error: ") {
-		return true, "opencode stream error: " + strings.TrimPrefix(f.stderr, "stream error: ")
+		msg := strings.TrimPrefix(f.stderr, "stream error: ")
+
+		if strings.Contains(strings.ToLower(msg), "model not found") {
+			return false, "opencode: " + msg
+		}
+
+		return true, "opencode stream error: " + msg
 	}
 
 	haystack := strings.ToLower(f.stderr + "\n" + f.stdout)
