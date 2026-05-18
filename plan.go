@@ -43,7 +43,7 @@ func planMain(args []string) {
 	pupaSpec := fs.String("pupa-harness", "", "harness:model for PUPA (solver). Required.")
 	lupaSpec := fs.String("lupa-harness", "", "harness:model for LUPA (critic). Required.")
 	jailBin := fs.String("jail-bin", "", "jail binary (PATH-resolved or absolute); empty = run harness directly")
-	outPath := fs.String("out", "", "optional path: write the accepted final PUPA text (no marker line) here")
+	outPath := fs.String("out", "", "optional path: write the accepted final PUPA result (no marker line) here")
 	maxRounds := fs.Int("max-rounds", 0, "stop after N rounds (one round = PUPA turn + LUPA turn); 0 = no cap")
 
 	Throw(fs.Parse(args))
@@ -100,9 +100,9 @@ func planMain(args []string) {
 	pupaInput := pupaPrompt + "\n\nQUESTION:\n" + question
 	lupaFirst := true
 
-	pupaPlans := map[int]string{}
+	pupaResults := map[int]string{}
 	lastPupaText := ""
-	lastPlanNum := 0
+	lastResultNum := 0
 
 	rounds := 0
 
@@ -117,10 +117,10 @@ func planMain(args []string) {
 		pupaText, pupaStreamed := pupa.turn(pupaInput)
 		printTurnFooter(pupaText, pupaStreamed)
 
-		if n := extractMarker(pupaText, "plan_num"); n > 0 {
-			pupaPlans[n] = pupaText
+		if n := extractMarker(pupaText, "result_num"); n > 0 {
+			pupaResults[n] = pupaText
 			lastPupaText = pupaText
-			lastPlanNum = n
+			lastResultNum = n
 		} else if lastPupaText == "" {
 			lastPupaText = pupaText
 		}
@@ -138,20 +138,20 @@ func planMain(args []string) {
 		lupaText, lupaStreamed := lupa.turn(lupaInput)
 		printTurnFooter(lupaText, lupaStreamed)
 
-		if n := extractMarker(lupaText, "accept_plan"); n > 0 {
-			accepted, ok := pupaPlans[n]
+		if n := extractMarker(lupaText, "accept_result"); n > 0 {
+			accepted, ok := pupaResults[n]
 
 			if !ok {
-				fmt.Fprintf(os.Stderr, "\n⚠️  plan: LUPA accepted plan_num=%d but PUPA never emitted that N; falling back to last PUPA text (plan_num=%d)\n", n, lastPlanNum)
+				fmt.Fprintf(os.Stderr, "\n⚠️  plan: LUPA accepted result_num=%d but PUPA never emitted that N; falling back to last PUPA text (result_num=%d)\n", n, lastResultNum)
 				accepted = lastPupaText
 			}
 
-			fmt.Fprintf(os.Stderr, "\n🎯 plan: accepted plan_num=%d after %d rounds\n", n, rounds)
+			fmt.Fprintf(os.Stderr, "\n🎯 plan: accepted result_num=%d after %d rounds\n", n, rounds)
 
 			if *outPath != "" {
-				body := stripMarker(accepted, "plan_num")
+				body := stripMarker(accepted, "result_num")
 				Throw(os.WriteFile(*outPath, []byte(body+"\n"), 0644))
-				fmt.Fprintf(os.Stderr, "📝 plan: wrote final PUPA text to %s\n", *outPath)
+				fmt.Fprintf(os.Stderr, "📝 plan: wrote final PUPA result to %s\n", *outPath)
 			}
 
 			return
