@@ -124,6 +124,8 @@ func (g *Gemini) SessionArgs(model, wsAbs, _ string) []string {
 
 func (g *Gemini) ParseSessionID(_ map[string]any) string { return "" }
 
+func (g *Gemini) LiveTextChunk(_ map[string]any) string { return "" }
+
 func (g *Gemini) traceToolCall(role AgentRole, ticket int, ev map[string]any) {
 	name, _ := ev["name"].(string)
 

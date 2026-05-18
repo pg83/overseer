@@ -132,6 +132,43 @@ func (c *Claude) ParseSessionID(ev map[string]any) string {
 	return ""
 }
 
+// LiveTextChunk pulls visible text out of an `assistant` event — claude-code
+// emits these incrementally with content[]={text|tool_use|...} blocks; we
+// concat the text blocks for live display. The final `result` event carries
+// the same prose concatenated, so plan does NOT also surface it here (would
+// duplicate everything).
+func (c *Claude) LiveTextChunk(ev map[string]any) string {
+	if t, _ := ev["type"].(string); t != "assistant" {
+		return ""
+	}
+
+	msg, _ := ev["message"].(map[string]any)
+
+	if msg == nil {
+		return ""
+	}
+
+	content, _ := msg["content"].([]any)
+
+	var sb strings.Builder
+
+	for _, c := range content {
+		block, _ := c.(map[string]any)
+
+		if block == nil {
+			continue
+		}
+
+		if btyp, _ := block["type"].(string); btyp == "text" {
+			if txt, _ := block["text"].(string); txt != "" {
+				sb.WriteString(txt)
+			}
+		}
+	}
+
+	return sb.String()
+}
+
 // traceAssistant pulls tool_use blocks out of a stream-json `assistant` event
 // for UI traces. Text blocks are intentionally NOT accumulated into finalText —
 // the final `result` event already carries the full concatenated text, and

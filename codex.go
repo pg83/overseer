@@ -168,6 +168,28 @@ func (c *Codex) ParseSessionID(ev map[string]any) string {
 	return ""
 }
 
+// LiveTextChunk surfaces delta-style fragments for live display. codex emits
+// agent_reasoning_delta / agent_message_delta as the model is generating, then
+// a final agent_reasoning / agent_message with the whole accumulated text; we
+// stream only the deltas to avoid duplicating the prose at end-of-turn. The
+// `delta` field carries the new fragment.
+func (c *Codex) LiveTextChunk(ev map[string]any) string {
+	msg, _ := ev["msg"].(map[string]any)
+
+	if msg == nil {
+		return ""
+	}
+
+	switch t, _ := msg["type"].(string); t {
+	case "agent_message_delta", "agent_reasoning_delta":
+		if d, _ := msg["delta"].(string); d != "" {
+			return d
+		}
+	}
+
+	return ""
+}
+
 // extractErrorMsg pulls a human-readable error message out of a codex `error`
 // event. Codex's error shape isn't fully stable across versions; check the
 // common fields and fall back to a generic marker.

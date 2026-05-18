@@ -100,8 +100,8 @@ func planMain(args []string) {
 		}
 
 		printTurnHeader("PUPA", rounds, pupa.binding)
-		pupaText := pupa.turn(pupaInput)
-		printTurnBody(pupaText)
+		pupaText, pupaStreamed := pupa.turn(pupaInput)
+		printTurnFooter(pupaText, pupaStreamed)
 
 		if n := extractMarker(pupaText, "plan_num"); n > 0 {
 			pupaPlans[n] = pupaText
@@ -121,8 +121,8 @@ func planMain(args []string) {
 		}
 
 		printTurnHeader("LUPA", rounds, lupa.binding)
-		lupaText := lupa.turn(lupaInput)
-		printTurnBody(lupaText)
+		lupaText, lupaStreamed := lupa.turn(lupaInput)
+		printTurnFooter(lupaText, lupaStreamed)
 
 		if n := extractMarker(lupaText, "accept_plan"); n > 0 {
 			accepted, ok := pupaPlans[n]
@@ -147,17 +147,21 @@ func planMain(args []string) {
 	}
 }
 
-func (a *planAgent) turn(prompt string) string {
+// turn drives the harness until it produces output without a retryable fault.
+// Returns the assistant's finalText plus a flag indicating whether anything
+// was already streamed live to stderr via LiveTextChunk (if true, the caller
+// must NOT re-print finalText — that would duplicate the prose).
+func (a *planAgent) turn(prompt string) (string, bool) {
 	harness := a.binding.Harness
 
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
 
 	for attempt := 1; ; attempt++ {
-		text, fault := a.turnOnce(prompt)
+		text, streamed, fault := a.turnOnce(prompt)
 
 		if fault == nil {
-			return text
+			return text, streamed
 		}
 
 		retryable, why := harness.ClassifyFault(fault)
@@ -179,7 +183,7 @@ func (a *planAgent) turn(prompt string) string {
 	}
 }
 
-func (a *planAgent) turnOnce(prompt string) (string, *agentFault) {
+func (a *planAgent) turnOnce(prompt string) (string, bool, *agentFault) {
 	harness := a.binding.Harness
 	model := a.binding.Model
 
@@ -209,6 +213,7 @@ func (a *planAgent) turnOnce(prompt string) (string, *agentFault) {
 
 	var finalText strings.Builder
 	var streamFault streamErr
+	streamed := false
 
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
@@ -228,6 +233,11 @@ func (a *planAgent) turnOnce(prompt string) (string, *agentFault) {
 			}
 		}
 
+		if chunk := harness.LiveTextChunk(ev); chunk != "" {
+			fmt.Fprint(os.Stderr, chunk)
+			streamed = true
+		}
+
 		harness.ParseStreamLine(ev, &finalText, &streamFault, a.role, 0)
 	}
 
@@ -244,17 +254,17 @@ func (a *planAgent) turnOnce(prompt string) (string, *agentFault) {
 			fault.stderr = fmt.Sprintf("%s\nwait error: %v", fault.stderr, err)
 		}
 
-		return finalText.String(), fault
+		return finalText.String(), streamed, fault
 	}
 
 	if streamFault.set {
-		return finalText.String(), &agentFault{
+		return finalText.String(), streamed, &agentFault{
 			stderr: "stream error: " + streamFault.msg,
 			stdout: finalText.String(),
 		}
 	}
 
-	return finalText.String(), nil
+	return finalText.String(), streamed, nil
 }
 
 func planBindingDescr(hm HarnessModel) string {
@@ -276,7 +286,17 @@ func printTurnHeader(name string, n int, hm HarnessModel) {
 		name, n, planBindingDescr(hm))
 }
 
-func printTurnBody(text string) {
+// printTurnFooter closes a turn block. If `streamed` is true, the prose is
+// already on screen via LiveTextChunk; print only a trailing newline as
+// separator. Otherwise (harness emitted no live chunks — e.g. opencode/gemini
+// or a claude turn that only produced a `result` event) dump finalText.
+func printTurnFooter(text string, streamed bool) {
+	if streamed {
+		fmt.Fprintln(os.Stderr)
+
+		return
+	}
+
 	fmt.Fprintf(os.Stderr, "%s\n", strings.TrimRight(text, "\n"))
 }
 

@@ -131,6 +131,8 @@ func (o *Opencode) SessionArgs(model, wsAbs, _ string) []string {
 
 func (o *Opencode) ParseSessionID(_ map[string]any) string { return "" }
 
+func (o *Opencode) LiveTextChunk(_ map[string]any) string { return "" }
+
 func (o *Opencode) traceToolUse(role AgentRole, ticket int, ev map[string]any) {
 	part, _ := ev["part"].(map[string]any)
 

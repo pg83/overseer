@@ -58,6 +58,13 @@ type Harness interface {
 	// doesn't carry one. Called on every event of the first turn until a non-empty
 	// id is found; subsequent turns reuse it for resume.
 	ParseSessionID(ev map[string]any) string
+
+	// LiveTextChunk returns the human-readable text fragment carried by this stream
+	// event — assistant text deltas, reasoning deltas — or "" if the event has no
+	// text content (control events, tool calls, etc.). Used by `overseer plan` to
+	// stream Pupa/Lupa output to stderr while the harness is still running, so cold
+	// thinking phases don't look like a hang. Orchestrator main loop ignores it.
+	LiveTextChunk(ev map[string]any) string
 }
 
 // SelectHarness picks the implementation by basename of the harness path —
