@@ -14,6 +14,20 @@ import (
 	"time"
 )
 
+// stderrTee is os.Stderr with a passive copy into a buffer — the live tee
+// surfaces wirez/jail/harness diagnostics in real time (a silent stderrBuf
+// makes auth failures and tunnel-down errors look like a hang), and the
+// captured copy is what Harness.ClassifyFault sees on fault.
+type stderrTee struct {
+	buf *bytes.Buffer
+}
+
+func (t *stderrTee) Write(p []byte) (int, error) {
+	t.buf.Write(p)
+
+	return os.Stderr.Write(p)
+}
+
 type planAgent struct {
 	name      string
 	role      AgentRole
@@ -199,6 +213,9 @@ func (a *planAgent) turnOnce(prompt string) (string, bool, *agentFault) {
 
 	bin, fullArgs := wrapJail(a.jailAbs, rwArgs, harness.Bin(), args)
 
+	fmt.Fprintf(os.Stderr, "🔧 %s exec: %s %s (prompt %d bytes, session=%q)\n",
+		a.name, bin, strings.Join(fullArgs, " "), len(prompt), a.sessionID)
+
 	cmd := exec.Command(bin, fullArgs...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Dir = a.cwd
@@ -207,7 +224,7 @@ func (a *planAgent) turnOnce(prompt string) (string, bool, *agentFault) {
 	stdoutPipe := Throw2(cmd.StdoutPipe())
 
 	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	cmd.Stderr = &stderrTee{buf: &stderrBuf}
 
 	Throw(cmd.Start())
 
