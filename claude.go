@@ -94,6 +94,44 @@ func (c *Claude) ClassifyFault(f *agentFault) (bool, string) {
 	return faultUnknown(f)
 }
 
+// SupportsSession: claude-code resumes a conversation via --resume <session-id>.
+// The session id is emitted on the very first stream event (system/init).
+func (c *Claude) SupportsSession() bool { return true }
+
+// SessionArgs is the Args() shape with --resume <id> appended when continuing.
+// On the first turn (sessionID==""), the call is plain — claude assigns and
+// emits the id we then capture via ParseSessionID for subsequent turns.
+func (c *Claude) SessionArgs(model, _, sessionID string) []string {
+	args := []string{
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--dangerously-skip-permissions",
+	}
+
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+
+	if sessionID != "" {
+		args = append(args, "--resume", sessionID)
+	}
+
+	return args
+}
+
+// ParseSessionID looks for a top-level session_id on any event. claude-code
+// emits {"type":"system","subtype":"init","session_id":"...",...} as the first
+// stream line and also includes it on the final `result` event — first non-empty
+// hit wins.
+func (c *Claude) ParseSessionID(ev map[string]any) string {
+	if sid, _ := ev["session_id"].(string); sid != "" {
+		return sid
+	}
+
+	return ""
+}
+
 // traceAssistant pulls tool_use blocks out of a stream-json `assistant` event
 // for UI traces. Text blocks are intentionally NOT accumulated into finalText —
 // the final `result` event already carries the full concatenated text, and

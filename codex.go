@@ -121,6 +121,53 @@ func (c *Codex) ClassifyFault(f *agentFault) (bool, string) {
 	return faultUnknown(f)
 }
 
+// SupportsSession: codex exec resumes via `codex exec resume <session-id>` —
+// note the positional, not a flag. On a fresh turn we use plain `codex exec`
+// and capture the session id emitted in the stream's `session_configured`
+// event (top-level `session_id`) for the next turn.
+func (c *Codex) SupportsSession() bool { return true }
+
+func (c *Codex) SessionArgs(model, wsAbs, sessionID string) []string {
+	if sessionID == "" {
+		return c.Args(model, wsAbs)
+	}
+
+	args := []string{
+		"exec",
+		"resume", sessionID,
+		"--json",
+		"--skip-git-repo-check",
+		"--dangerously-bypass-approvals-and-sandbox",
+	}
+
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+
+	if wsAbs != "" {
+		args = append(args, "--cd", wsAbs)
+	}
+
+	return args
+}
+
+// ParseSessionID accepts the id from either top level (`session_id`) or nested
+// inside `msg` (`msg.session_id`). codex emits a `session_configured` event at
+// the start of the run that carries it; later events may or may not.
+func (c *Codex) ParseSessionID(ev map[string]any) string {
+	if sid, _ := ev["session_id"].(string); sid != "" {
+		return sid
+	}
+
+	if msg, _ := ev["msg"].(map[string]any); msg != nil {
+		if sid, _ := msg["session_id"].(string); sid != "" {
+			return sid
+		}
+	}
+
+	return ""
+}
+
 // extractErrorMsg pulls a human-readable error message out of a codex `error`
 // event. Codex's error shape isn't fully stable across versions; check the
 // common fields and fall back to a generic marker.

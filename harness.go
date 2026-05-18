@@ -41,6 +41,23 @@ type Harness interface {
 	// (HTTP codes vs cloud-provider words vs Russian quasi-opencode messages); the
 	// classifier owns that knowledge.
 	ClassifyFault(f *agentFault) (retryable bool, reason string)
+
+	// SupportsSession reports whether this harness can resume a multi-turn dialog.
+	// The `overseer plan` handler refuses to bind a non-supporting harness as PUPA
+	// or LUPA. Orchestrator main loop ignores this — each agent run there is its
+	// own fresh context, no resume needed.
+	SupportsSession() bool
+
+	// SessionArgs returns CLI args for either a fresh session (sessionID="") or a
+	// resumed one (sessionID!=""). Only called when SupportsSession() returns true.
+	// Each harness encapsulates whether it uses --session-id, --resume, or other
+	// flag conventions.
+	SessionArgs(model, wsAbs, sessionID string) []string
+
+	// ParseSessionID extracts the session id from one stream event, "" if this event
+	// doesn't carry one. Called on every event of the first turn until a non-empty
+	// id is found; subsequent turns reuse it for resume.
+	ParseSessionID(ev map[string]any) string
 }
 
 // SelectHarness picks the implementation by basename of the harness path —

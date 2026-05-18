@@ -121,6 +121,16 @@ func (o *Opencode) ClassifyFault(f *agentFault) (bool, string) {
 	return faultUnknown(f)
 }
 
+// SupportsSession: opencode's session-resume flag set is not yet wired here —
+// stub for now. plan handler refuses to use opencode as PUPA/LUPA today.
+func (o *Opencode) SupportsSession() bool { return false }
+
+func (o *Opencode) SessionArgs(model, wsAbs, _ string) []string {
+	return o.Args(model, wsAbs)
+}
+
+func (o *Opencode) ParseSessionID(_ map[string]any) string { return "" }
+
 func (o *Opencode) traceToolUse(role AgentRole, ticket int, ev map[string]any) {
 	part, _ := ev["part"].(map[string]any)
 

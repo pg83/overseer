@@ -113,6 +113,17 @@ func (g *Gemini) ClassifyFault(f *agentFault) (bool, string) {
 	return faultUnknown(f)
 }
 
+// SupportsSession: gemini-cli's non-interactive mode does not yet have a
+// well-known resume flag in this codebase — stub for now. plan handler refuses
+// to use gemini as PUPA/LUPA today.
+func (g *Gemini) SupportsSession() bool { return false }
+
+func (g *Gemini) SessionArgs(model, wsAbs, _ string) []string {
+	return g.Args(model, wsAbs)
+}
+
+func (g *Gemini) ParseSessionID(_ map[string]any) string { return "" }
+
 func (g *Gemini) traceToolCall(role AgentRole, ticket int, ev map[string]any) {
 	name, _ := ev["name"].(string)
 

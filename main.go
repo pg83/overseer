@@ -12,7 +12,21 @@ import (
 
 func main() {
 	exc := Try(func() {
-		mainBody()
+		if len(os.Args) < 2 {
+			ThrowFmt("usage: overseer {run|plan} [args...]")
+		}
+
+		sub := os.Args[1]
+		args := os.Args[2:]
+
+		switch sub {
+		case "run":
+			runMain(args)
+		case "plan":
+			planMain(args)
+		default:
+			ThrowFmt("unknown subcommand %q (expected: run, plan)", sub)
+		}
 	})
 
 	exc.Catch(func(e *Exception) {
@@ -21,23 +35,25 @@ func main() {
 	})
 }
 
-func mainBody() {
-	root := flag.String("root", "", "orchestrator root (where tasks.jsonl, tickets/, workspaces/ live)")
-	trunk := flag.String("trunk", "", "path to git working tree being modified")
+func runMain(argv []string) {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
 
-	defaultHarness := flag.String("harness", "", "default harness:model spec — '<bin>' or '<bin>:<model>'. Required.")
-	thinkHarness := flag.String("think-harness", "", "harness:model for tasker / replanner / overseer (overrides --harness)")
-	workHarness := flag.String("work-harness", "", "harness:model for digger / reviewer (overrides --harness)")
-	taskerHarness := flag.String("tasker-harness", "", "harness:model for tasker (overrides --think-harness)")
-	diggerHarness := flag.String("digger-harness", "", "harness:model for digger (overrides --work-harness)")
-	reviewerHarness := flag.String("reviewer-harness", "", "harness:model for reviewer (overrides --work-harness)")
-	mergerHarness := flag.String("merger-harness", "", "harness:model for merger (overrides --harness)")
-	replannerHarness := flag.String("replanner-harness", "", "harness:model for replanner (overrides --think-harness)")
-	overseerHarness := flag.String("overseer-harness", "", "harness:model for overseer (overrides --think-harness)")
-	arbiterHarness := flag.String("arbiter-harness", "", "harness:model for arbiter (overrides --think-harness)")
+	root := fs.String("root", "", "orchestrator root (where tasks.jsonl, tickets/, workspaces/ live)")
+	trunk := fs.String("trunk", "", "path to git working tree being modified")
 
-	jailBin := flag.String("jail-bin", "", "jail binary (PATH-resolved or absolute); empty = run harness directly")
-	Throw(flag.CommandLine.Parse(os.Args[1:]))
+	defaultHarness := fs.String("harness", "", "default harness:model spec — '<bin>' or '<bin>:<model>'. Required.")
+	thinkHarness := fs.String("think-harness", "", "harness:model for tasker / replanner / overseer (overrides --harness)")
+	workHarness := fs.String("work-harness", "", "harness:model for digger / reviewer (overrides --harness)")
+	taskerHarness := fs.String("tasker-harness", "", "harness:model for tasker (overrides --think-harness)")
+	diggerHarness := fs.String("digger-harness", "", "harness:model for digger (overrides --work-harness)")
+	reviewerHarness := fs.String("reviewer-harness", "", "harness:model for reviewer (overrides --work-harness)")
+	mergerHarness := fs.String("merger-harness", "", "harness:model for merger (overrides --harness)")
+	replannerHarness := fs.String("replanner-harness", "", "harness:model for replanner (overrides --think-harness)")
+	overseerHarness := fs.String("overseer-harness", "", "harness:model for overseer (overrides --think-harness)")
+	arbiterHarness := fs.String("arbiter-harness", "", "harness:model for arbiter (overrides --think-harness)")
+
+	jailBin := fs.String("jail-bin", "", "jail binary (PATH-resolved or absolute); empty = run harness directly")
+	Throw(fs.Parse(argv))
 
 	if *root == "" {
 		ThrowFmt("--root is required")
