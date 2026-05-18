@@ -16,6 +16,7 @@ import (
 
 type planAgent struct {
 	name      string
+	role      AgentRole
 	binding   HarnessModel
 	sessionID string
 	jailAbs   string
@@ -76,8 +77,8 @@ func planMain(args []string) {
 	fmt.Fprintf(os.Stderr, "🟢 plan: pupa=%s lupa=%s cwd=%s max_rounds=%d\n",
 		planBindingDescr(pupaBinding), planBindingDescr(lupaBinding), cwd, *maxRounds)
 
-	pupa := &planAgent{name: "PUPA", binding: pupaBinding, jailAbs: jailAbs, cwd: cwd}
-	lupa := &planAgent{name: "LUPA", binding: lupaBinding, jailAbs: jailAbs, cwd: cwd}
+	pupa := &planAgent{name: "PUPA", role: AgentRole("pupa"), binding: pupaBinding, jailAbs: jailAbs, cwd: cwd}
+	lupa := &planAgent{name: "LUPA", role: AgentRole("lupa"), binding: lupaBinding, jailAbs: jailAbs, cwd: cwd}
 
 	pupaPrompt := strings.TrimRight(loadEmbedded("prompts/pupa.txt"), "\n")
 	lupaPrompt := strings.TrimRight(loadEmbedded("prompts/lupa.txt"), "\n")
@@ -98,8 +99,9 @@ func planMain(args []string) {
 			ThrowFmt("plan: --max-rounds %d exhausted without accept", *maxRounds)
 		}
 
+		printTurnHeader("PUPA", rounds, pupa.binding)
 		pupaText := pupa.turn(pupaInput)
-		printTurn("PUPA", rounds, pupaText)
+		printTurnBody(pupaText)
 
 		if n := extractMarker(pupaText, "plan_num"); n > 0 {
 			pupaPlans[n] = pupaText
@@ -118,8 +120,9 @@ func planMain(args []string) {
 			lupaInput = pupaText
 		}
 
+		printTurnHeader("LUPA", rounds, lupa.binding)
 		lupaText := lupa.turn(lupaInput)
-		printTurn("LUPA", rounds, lupaText)
+		printTurnBody(lupaText)
 
 		if n := extractMarker(lupaText, "accept_plan"); n > 0 {
 			accepted, ok := pupaPlans[n]
@@ -225,7 +228,7 @@ func (a *planAgent) turnOnce(prompt string) (string, *agentFault) {
 			}
 		}
 
-		harness.ParseStreamLine(ev, &finalText, &streamFault, AgentRole(""), 0)
+		harness.ParseStreamLine(ev, &finalText, &streamFault, a.role, 0)
 	}
 
 	err := cmd.Wait()
@@ -264,9 +267,17 @@ func planBindingDescr(hm HarnessModel) string {
 	return s
 }
 
-func printTurn(name string, n int, text string) {
-	fmt.Fprintf(os.Stderr, "\n============================ %s #%d ============================\n%s\n",
-		name, n, strings.TrimRight(text, "\n"))
+// printTurnHeader is emitted BEFORE the harness launches so the user sees the
+// turn boundary immediately — cold-start (jail + wirez + harness boot) can be
+// many seconds before any tool trace or text arrives, and a silent wait between
+// boot and the first event is hard to read.
+func printTurnHeader(name string, n int, hm HarnessModel) {
+	fmt.Fprintf(os.Stderr, "\n============================ %s #%d  (%s) ============================\n",
+		name, n, planBindingDescr(hm))
+}
+
+func printTurnBody(text string) {
+	fmt.Fprintf(os.Stderr, "%s\n", strings.TrimRight(text, "\n"))
 }
 
 // extractMarker scans `text` line by line for a JSON object literal containing
