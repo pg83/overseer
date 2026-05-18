@@ -37,7 +37,7 @@ func eventReplans(events []map[string]any) []string {
 	return out
 }
 
-func NewOrchestrator(root, trunk string, bindings map[string]HarnessModel, jail []string) *Orchestrator {
+func NewOrchestrator(root, trunk string, bindings map[string]HarnessModel, jail, extraRW []string) *Orchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	o := &Orchestrator{
@@ -45,6 +45,7 @@ func NewOrchestrator(root, trunk string, bindings map[string]HarnessModel, jail 
 		Trunk:      trunk,
 		Bindings:   bindings,
 		Jail:       jail,
+		ExtraRW:    extraRW,
 		AgentSem:   make(chan struct{}, 6),
 		QReplanner: make(chan ReplanRequest, 1000),
 		QMerger:    make(chan MergeRequest, 1000),

@@ -233,6 +233,10 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 		rwArgs = append(rwArgs, "--rw="+p)
 	}
 
+	for _, p := range o.ExtraRW {
+		rwArgs = append(rwArgs, "--rw="+p)
+	}
+
 	model := hm.resolveModel(role)
 
 	bin, args := wrapJail(o.Jail, rwArgs, harness.Bin(), harness.Args(model, wsAbs))

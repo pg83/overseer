@@ -56,6 +56,15 @@ func runMain(argv []string) {
 
 	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
 	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
+
+	var extraRW []string
+
+	fs.Func("rw", "extra path to bind read-write inside the jail (repeatable; stacks on top of workspace / harness defaults / per-task TMPDIR; no effect with --no-jail)", func(v string) error {
+		extraRW = append(extraRW, v)
+
+		return nil
+	})
+
 	Throw(fs.Parse(argv))
 
 	if *root == "" {
@@ -103,7 +112,7 @@ func runMain(argv []string) {
 	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s bindings=[%s] jail=%s",
 		*root, *trunk, formatBindings(bindings), jailDescr))
 
-	o := NewOrchestrator(*root, *trunk, bindings, jail)
+	o := NewOrchestrator(*root, *trunk, bindings, jail, extraRW)
 
 	go func() {
 		sigs := make(chan os.Signal, 1)

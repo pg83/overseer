@@ -149,7 +149,8 @@ type Orchestrator struct {
 	Root      string
 	Trunk     string
 	GoalsHash string
-	Jail []string
+	Jail    []string
+	ExtraRW []string
 
 	// Bindings is the role → (harness, model) resolution table. Lookup precedence
 	// (in harnessModelForRole):

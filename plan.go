@@ -34,6 +34,7 @@ type planAgent struct {
 	binding   HarnessModel
 	sessionID string
 	jail      []string
+	extraRW   []string
 	cwd       string
 }
 
@@ -46,6 +47,14 @@ func planMain(args []string) {
 	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
 	outPath := fs.String("out", "", "optional path: write the accepted final PUPA result (no marker line) here")
 	maxRounds := fs.Int("max-rounds", 0, "stop after N rounds (one round = PUPA turn + LUPA turn); 0 = no cap")
+
+	var extraRW []string
+
+	fs.Func("rw", "extra path to bind read-write inside the jail (repeatable; stacks on top of cwd / harness defaults / $TMPDIR; no effect with --no-jail)", func(v string) error {
+		extraRW = append(extraRW, v)
+
+		return nil
+	})
 
 	Throw(fs.Parse(args))
 
@@ -82,8 +91,8 @@ func planMain(args []string) {
 	fmt.Fprintf(os.Stderr, "🟢 plan: pupa=%s lupa=%s cwd=%s jail=%s max_rounds=%d\n",
 		planBindingDescr(pupaBinding), planBindingDescr(lupaBinding), cwd, jailDescr, *maxRounds)
 
-	pupa := &planAgent{name: "PUPA", role: AgentRole("pupa"), binding: pupaBinding, jail: jail, cwd: cwd}
-	lupa := &planAgent{name: "LUPA", role: AgentRole("lupa"), binding: lupaBinding, jail: jail, cwd: cwd}
+	pupa := &planAgent{name: "PUPA", role: AgentRole("pupa"), binding: pupaBinding, jail: jail, extraRW: extraRW, cwd: cwd}
+	lupa := &planAgent{name: "LUPA", role: AgentRole("lupa"), binding: lupaBinding, jail: jail, extraRW: extraRW, cwd: cwd}
 
 	pupaPrompt := strings.TrimRight(loadEmbedded("prompts/pupa.txt"), "\n")
 	lupaPrompt := strings.TrimRight(loadEmbedded("prompts/lupa.txt"), "\n")
@@ -200,6 +209,17 @@ func (a *planAgent) turnOnce(prompt string) (string, bool, *agentFault) {
 		for _, p := range harness.JailRWPaths(home) {
 			rwArgs = append(rwArgs, "--rw="+p)
 		}
+	}
+
+	// Auto-bind $TMPDIR — wrapper scripts (wirez, etc.) routinely mkdir
+	// scratch dirs there, and login shells / ssh sessions often set TMPDIR
+	// to a path outside /tmp (e.g. /var/run/dropbear/tmp under DropBear).
+	if tmpdir := os.Getenv("TMPDIR"); tmpdir != "" {
+		rwArgs = append(rwArgs, "--rw="+tmpdir)
+	}
+
+	for _, p := range a.extraRW {
+		rwArgs = append(rwArgs, "--rw="+p)
 	}
 
 	bin, fullArgs := wrapJail(a.jail, rwArgs, harness.Bin(), args)
