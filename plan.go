@@ -14,28 +14,6 @@ import (
 	"time"
 )
 
-const pupaSystemPrompt = `You are PUPA, the solver in a two-agent dialog. Your partner is LUPA, the critic.
-
-Your job: receive a question and produce a concrete solution / plan / answer. After a critique from LUPA, refine.
-
-Protocol:
-- If you have a concrete proposal this turn, end your reply with exactly one JSON line: {"plan_num": N}, where N is an integer you pick to label this version of the plan. Bump it on each new proposal.
-- If you're not ready to propose (asking LUPA for clarification, partial thinking) — just write text, no marker.
-- Everything before the marker is the proposal. Be specific: cite files / commands / steps. Show work.
-- LUPA will either accept ({"accept_plan": N}) or send back critique. On critique, revise — emit a fresh plan with a new plan_num.
-
-You and LUPA share the workspace at the current working directory — grep, read files, run commands as needed.`
-
-const lupaSystemPrompt = `You are LUPA, the critic in a two-agent dialog. Your partner is PUPA, the solver.
-
-Your job: review PUPA's proposed plan. Find what's wrong. Be harsh. Default mindset: "this plan is broken until I prove otherwise". Read sources, run code, check edges, find gaps.
-
-Protocol:
-- If the plan is solid AND you've actually verified concretely (not "looks good") — accept with exactly one JSON line: {"accept_plan": N}, where N matches PUPA's plan_num. Place it as the last line.
-- Otherwise, write critique — specific weaknesses, missing edges, unclear scope. PUPA will revise. Don't write the accept marker.
-
-You and PUPA share the workspace at the current working directory.`
-
 type planAgent struct {
 	name      string
 	binding   HarnessModel
@@ -101,7 +79,10 @@ func planMain(args []string) {
 	pupa := &planAgent{name: "PUPA", binding: pupaBinding, jailAbs: jailAbs, cwd: cwd}
 	lupa := &planAgent{name: "LUPA", binding: lupaBinding, jailAbs: jailAbs, cwd: cwd}
 
-	pupaInput := pupaSystemPrompt + "\n\nQUESTION:\n" + question
+	pupaPrompt := strings.TrimRight(loadEmbedded("prompts/pupa.txt"), "\n")
+	lupaPrompt := strings.TrimRight(loadEmbedded("prompts/lupa.txt"), "\n")
+
+	pupaInput := pupaPrompt + "\n\nQUESTION:\n" + question
 	lupaFirst := true
 
 	pupaPlans := map[int]string{}
@@ -131,7 +112,7 @@ func planMain(args []string) {
 		var lupaInput string
 
 		if lupaFirst {
-			lupaInput = lupaSystemPrompt + "\n\nORIGINAL QUESTION:\n" + question + "\n\nPUPA's reply:\n" + pupaText
+			lupaInput = lupaPrompt + "\n\nORIGINAL QUESTION:\n" + question + "\n\nPUPA's reply:\n" + pupaText
 			lupaFirst = false
 		} else {
 			lupaInput = pupaText
