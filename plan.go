@@ -281,6 +281,20 @@ func (a *planAgent) turnOnce(prompt string) (string, bool, *agentFault) {
 		}
 	}
 
+	// Empty-output guard: cmd.Wait was happy but neither finalText nor the
+	// live-stream got anything. Happens when the harness writes a CLI usage
+	// error to stderr and exits — depending on wrappers (subreaper / wirez /
+	// jail / shell), the exit code may not surface as a Go ExitError, so
+	// we'd otherwise loop forever feeding empty prompts back. Synthesize a
+	// fault with whatever stderr we captured so ClassifyFault sees it.
+	if strings.TrimSpace(finalText.String()) == "" && !streamed {
+		return finalText.String(), streamed, &agentFault{
+			stderr:   stderrBuf.String(),
+			stdout:   "",
+			exitCode: 0,
+		}
+	}
+
 	return finalText.String(), streamed, nil
 }
 

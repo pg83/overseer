@@ -167,22 +167,19 @@ func (c *Codex) SessionArgs(model, wsAbs, sessionID string) []string {
 		return c.Args(model, wsAbs)
 	}
 
-	args := []string{
+	// `codex exec resume` is a sub-subcommand with its OWN narrow flag set —
+	// the global flags flattened onto `exec` (--cd, --model, ...) are NOT
+	// propagated through. Runtime usage line is literally:
+	//   codex exec resume --json --skip-git-repo-check <SESSION_ID> [PROMPT]
+	// Anything else trips clap "unexpected argument" before stdin is even
+	// read. cwd is still pinned via cmd.Dir; model is locked to whatever was
+	// chosen on the first turn (sessions are model-bound).
+	return []string{
 		"exec",
 		"resume", sessionID,
 		"--json",
 		"--skip-git-repo-check",
 	}
-
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-
-	if wsAbs != "" {
-		args = append(args, "--cd", wsAbs)
-	}
-
-	return args
 }
 
 // ParseSessionID extracts thread_id from the `thread.started` event — codex's
