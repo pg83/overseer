@@ -235,7 +235,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 
 	model := hm.resolveModel(role)
 
-	bin, args := wrapJail(o.JailBin, rwArgs, harness.Bin(), harness.Args(model, wsAbs))
+	bin, args := wrapJail(o.Jail, rwArgs, harness.Bin(), harness.Args(model, wsAbs))
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(stdin)
@@ -369,20 +369,24 @@ func (s *streamErr) record(msg string) {
 	}
 }
 
-// wrapJail composes the final exec invocation: if a jail binary was configured, the
-// harness runs under it with --rw=<path> arguments before the `--` separator;
-// otherwise the harness runs directly. Generic to all backends — only the inner
-// (bin, args) pair varies per Harness.
-func wrapJail(jail string, rwArgs []string, harnessBin string, harnessArgs []string) (string, []string) {
-	if jail == "" {
+// wrapJail composes the final exec invocation. `jail` is the full jail-prefix
+// command picked by resolveJail; empty / nil means no wrapper. Three shapes
+// cover all modes:
+//   nil / []        → harness runs directly (--no-jail).
+//   ["X"]           → external jail binary X.
+//   ["/proc/self/exe", "jail"] → built-in `overseer jail` subcommand.
+// Generic over all backends — only the inner (bin, args) pair varies per Harness.
+func wrapJail(jail, rwArgs []string, harnessBin string, harnessArgs []string) (string, []string) {
+	if len(jail) == 0 {
 		return harnessBin, harnessArgs
 	}
 
-	args := append([]string{}, rwArgs...)
+	args := append([]string{}, jail[1:]...)
+	args = append(args, rwArgs...)
 	args = append(args, "--", harnessBin)
 	args = append(args, harnessArgs...)
 
-	return jail, args
+	return jail[0], args
 }
 
 // summarizeToolInput is the UI-trace helper shared by both backends — claude uses

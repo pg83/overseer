@@ -13,7 +13,7 @@ import (
 func main() {
 	exc := Try(func() {
 		if len(os.Args) < 2 {
-			ThrowFmt("usage: overseer {run|plan} [args...]")
+			ThrowFmt("usage: overseer {run|plan|jail} [args...]")
 		}
 
 		sub := os.Args[1]
@@ -24,8 +24,10 @@ func main() {
 			runMain(args)
 		case "plan":
 			planMain(args)
+		case "jail":
+			jailMain(args)
 		default:
-			ThrowFmt("unknown subcommand %q (expected: run, plan)", sub)
+			ThrowFmt("unknown subcommand %q (expected: run, plan, jail)", sub)
 		}
 	})
 
@@ -52,7 +54,8 @@ func runMain(argv []string) {
 	overseerHarness := fs.String("overseer-harness", "", "harness:model for overseer (overrides --think-harness)")
 	arbiterHarness := fs.String("arbiter-harness", "", "harness:model for arbiter (overrides --think-harness)")
 
-	jailBin := fs.String("jail-bin", "", "jail binary (PATH-resolved or absolute); empty = run harness directly")
+	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
+	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
 	Throw(fs.Parse(argv))
 
 	if *root == "" {
@@ -95,27 +98,12 @@ func runMain(argv []string) {
 		bindings[kv.key] = parseHarnessSpec(kv.flag, kv.val)
 	}
 
-	jailAbs := ""
-
-	if *jailBin != "" {
-		var err error
-		jailAbs, err = exec.LookPath(*jailBin)
-
-		if err != nil {
-			ThrowFmt("--jail-bin %q: %v", *jailBin, err)
-		}
-	}
-
-	jailDescr := jailAbs
-
-	if jailDescr == "" {
-		jailDescr = "(none)"
-	}
+	jail, jailDescr := resolveJail(*jailBin, *noJail)
 
 	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s bindings=[%s] jail=%s",
 		*root, *trunk, formatBindings(bindings), jailDescr))
 
-	o := NewOrchestrator(*root, *trunk, bindings, jailAbs)
+	o := NewOrchestrator(*root, *trunk, bindings, jail)
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
@@ -131,6 +119,35 @@ func runMain(argv []string) {
 	<-o.Stopped
 
 	uiSys("🔚", "STOP", "overseer halted")
+}
+
+// resolveJail returns the jail-prefix command (passed verbatim to wrapJail)
+// plus a human description for the BOOT log. Three modes:
+//   --no-jail            → nil           (insecure direct exec, trusted hosts).
+//   --jail-bin X         → ["X"]         (external jail binary, PATH-resolved).
+//   neither              → [self, "jail"] (built-in `overseer jail` subcommand).
+func resolveJail(jailBin string, noJail bool) (jail []string, descr string) {
+	if noJail {
+		return nil, "(direct, --no-jail)"
+	}
+
+	if jailBin != "" {
+		abs, err := exec.LookPath(jailBin)
+
+		if err != nil {
+			ThrowFmt("--jail-bin %q: %v", jailBin, err)
+		}
+
+		return []string{abs}, abs
+	}
+
+	self, err := os.Executable()
+
+	if err != nil {
+		ThrowFmt("resolve internal jail: os.Executable: %v", err)
+	}
+
+	return []string{self, "jail"}, self + " jail (built-in)"
 }
 
 // parseHarnessSpec splits a "<bin>" or "<bin>:<model>" CLI value into a (Harness,

@@ -33,7 +33,7 @@ type planAgent struct {
 	role      AgentRole
 	binding   HarnessModel
 	sessionID string
-	jailAbs   string
+	jail      []string
 	cwd       string
 }
 
@@ -42,7 +42,8 @@ func planMain(args []string) {
 
 	pupaSpec := fs.String("pupa-harness", "", "harness:model for PUPA (solver). Required.")
 	lupaSpec := fs.String("lupa-harness", "", "harness:model for LUPA (critic). Required.")
-	jailBin := fs.String("jail-bin", "", "jail binary (PATH-resolved or absolute); empty = run harness directly")
+	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
+	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
 	outPath := fs.String("out", "", "optional path: write the accepted final PUPA result (no marker line) here")
 	maxRounds := fs.Int("max-rounds", 0, "stop after N rounds (one round = PUPA turn + LUPA turn); 0 = no cap")
 
@@ -67,17 +68,7 @@ func planMain(args []string) {
 		ThrowFmt("plan: harness %q has no session support (required for LUPA)", lupaBinding.Harness.Name())
 	}
 
-	jailAbs := ""
-
-	if *jailBin != "" {
-		abs, err := exec.LookPath(*jailBin)
-
-		if err != nil {
-			ThrowFmt("--jail-bin %q: %v", *jailBin, err)
-		}
-
-		jailAbs = abs
-	}
+	jail, jailDescr := resolveJail(*jailBin, *noJail)
 
 	qBytes := Throw2(io.ReadAll(os.Stdin))
 	question := strings.TrimSpace(string(qBytes))
@@ -88,11 +79,11 @@ func planMain(args []string) {
 
 	cwd := Throw2(os.Getwd())
 
-	fmt.Fprintf(os.Stderr, "🟢 plan: pupa=%s lupa=%s cwd=%s max_rounds=%d\n",
-		planBindingDescr(pupaBinding), planBindingDescr(lupaBinding), cwd, *maxRounds)
+	fmt.Fprintf(os.Stderr, "🟢 plan: pupa=%s lupa=%s cwd=%s jail=%s max_rounds=%d\n",
+		planBindingDescr(pupaBinding), planBindingDescr(lupaBinding), cwd, jailDescr, *maxRounds)
 
-	pupa := &planAgent{name: "PUPA", role: AgentRole("pupa"), binding: pupaBinding, jailAbs: jailAbs, cwd: cwd}
-	lupa := &planAgent{name: "LUPA", role: AgentRole("lupa"), binding: lupaBinding, jailAbs: jailAbs, cwd: cwd}
+	pupa := &planAgent{name: "PUPA", role: AgentRole("pupa"), binding: pupaBinding, jail: jail, cwd: cwd}
+	lupa := &planAgent{name: "LUPA", role: AgentRole("lupa"), binding: lupaBinding, jail: jail, cwd: cwd}
 
 	pupaPrompt := strings.TrimRight(loadEmbedded("prompts/pupa.txt"), "\n")
 	lupaPrompt := strings.TrimRight(loadEmbedded("prompts/lupa.txt"), "\n")
@@ -211,7 +202,7 @@ func (a *planAgent) turnOnce(prompt string) (string, bool, *agentFault) {
 		}
 	}
 
-	bin, fullArgs := wrapJail(a.jailAbs, rwArgs, harness.Bin(), args)
+	bin, fullArgs := wrapJail(a.jail, rwArgs, harness.Bin(), args)
 
 	fmt.Fprintf(os.Stderr, "🔧 %s exec: %s %s (prompt %d bytes, session=%q)\n",
 		a.name, bin, strings.Join(fullArgs, " "), len(prompt), a.sessionID)
