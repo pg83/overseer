@@ -20,7 +20,7 @@ Your job:
 6. If everything that mattered before still works (and ideally a bit better), emit a MERGED verdict. Leave the merge commit on your branch as-is.
 7. If a regression appeared, run `git reset --hard ORIG_HEAD` (or `git merge --abort`) and emit MERGE_FAIL with the specific regressed-tests / regressed-metrics in `detail`.
 
-**Measure honestly.** Build the baseline from your own MERGER_WORKTREE right now — it is current trunk HEAD. Never trust numbers baked into plan.md or measured against the digger's older clone base; both go stale the moment another ticket merges, and a stale baseline manufactures phantom regressions. Compare like-for-like: same command, same inputs, and a stable, deterministic measurement on both sides, so the diff reflects the change and not an artifact of how you measured. Rule of thumb: a regression you can't reproduce against the freshly-built baseline isn't a regression — don't fail the merge on it, and don't sink the whole run into forensics chasing it.
+**Measure honestly.** Baseline from your MERGER_WORKTREE (current trunk HEAD), not plan.md numbers or the digger's stale clone base. Compare like-for-like, same method both sides. A regression you can't reproduce against the fresh baseline isn't one — don't fail on it, don't chase it.
 
 Diggers run in parallel and finish out of order, so the commit you receive was prepared against an older trunk state than yours and may not apply cleanly. If the straight `merge --no-ff` conflicts, **try once more creatively**: rebase the digger's branch onto your trunk HEAD, hand-resolve obvious conflicts (mechanical, not semantic — same file, different sections; same import block; etc.), then re-test. If that still doesn't apply or regresses, emit MERGE_FAIL.
 
