@@ -703,13 +703,39 @@ func (o *Orchestrator) replannerLoop() {
 		case <-o.StopCtx.Done():
 			return
 		case req := <-o.QReplanner:
-			o.safe("REPLANNER", func() { o.runReplanner(req) })
+			batch := o.drainReplanQueue(req)
+			o.safe("REPLANNER", func() { o.runReplanner(batch) })
 		}
 	}
 }
 
-func (o *Orchestrator) runReplanner(req ReplanRequest) {
-	uiTicket("🚀", RoleReplanner, req.Ticket, "START", "reason="+req.Reason)
+// drainReplanQueue returns the triggering request plus every other request
+// already waiting in QReplanner, so one replanner run addresses the whole
+// accumulated backlog at once instead of one nudge at a time. Many triggers
+// (post-merge fallout scans, re-fired escalations) resolve to "nothing to do"
+// individually but together hand the replanner the full picture in a single
+// expensive pass — collapsing the redundant runs that each used to conclude
+// "already resolved by a prior batch". Requests that arrive while the run is in
+// flight simply accumulate for the next drain.
+func (o *Orchestrator) drainReplanQueue(first ReplanRequest) []ReplanRequest {
+	batch := []ReplanRequest{first}
+
+	for {
+		select {
+		case req := <-o.QReplanner:
+			batch = append(batch, req)
+		default:
+			return batch
+		}
+	}
+}
+
+func (o *Orchestrator) runReplanner(batch []ReplanRequest) {
+	anchor := batch[0]
+	triggers := formatReplanTriggers(batch)
+
+	uiTicket("🚀", RoleReplanner, anchor.Ticket, "START",
+		fmt.Sprintf("%d trigger(s); first=%s", len(batch), anchor.Reason))
 
 	wsID := NewWorkspace(o.Root, o.Trunk)
 
@@ -718,31 +744,41 @@ func (o *Orchestrator) runReplanner(req ReplanRequest) {
 	o.Mu.Unlock()
 
 	input := o.agentSelfBlock(RoleReplanner, 0) +
-		fmt.Sprintf("REASON_FOR_REPLAN: %s\nSOURCE_AGENT: %s\nSOURCE_TICKET: %d\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
-			req.Reason, req.Source, req.Ticket, runsDir(o.Root), tasksDBPath(o.Root), currentTasks)
+		fmt.Sprintf("REPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
+			triggers, runsDir(o.Root), tasksDBPath(o.Root), currentTasks)
 
 	prompt := loadPrompt(RoleReplanner)
 	stdin := concatPromptInput(prompt, input)
 
 	env := map[string]string{
-		"REASON_FOR_REPLAN": req.Reason,
-		"SOURCE_AGENT":      string(req.Source),
-		"SOURCE_TICKET":     fmt.Sprintf("%d", req.Ticket),
-		"RUNS_DIR":          runsDir(o.Root),
-		"TASKS_DB":          tasksDBPath(o.Root),
+		"REPLAN_TRIGGERS": triggers,
+		"RUNS_DIR":        runsDir(o.Root),
+		"TASKS_DB":        tasksDBPath(o.Root),
 	}
 
-	res := o.runAgentReplanner(req.Ticket, wsID, stdin, env)
+	res := o.runAgentReplanner(anchor.Ticket, wsID, stdin, env)
 
 	ops := replannerTaskOps(res.Events)
 
 	if len(ops) == 0 {
-		uiTicket("💤", RoleReplanner, req.Ticket, "NO_OPS", "replanner emitted no task events")
+		uiTicket("💤", RoleReplanner, anchor.Ticket, "NO_OPS", "replanner emitted no task events")
 
 		return
 	}
 
-	o.applyReplannerOps(res, req, ops)
+	o.applyReplannerOps(res, anchor, ops)
+}
+
+// formatReplanTriggers renders the drained batch of nudges the replanner run is
+// about to address — one numbered line per trigger (source role, ticket, reason).
+func formatReplanTriggers(batch []ReplanRequest) string {
+	var sb strings.Builder
+
+	for i, r := range batch {
+		fmt.Fprintf(&sb, "%d. source=%s ticket=T-%d: %s\n", i+1, r.Source, r.Ticket, r.Reason)
+	}
+
+	return sb.String()
 }
 
 // replannerTaskOps pulls every `task` event out of the replanner's stream, in emission
