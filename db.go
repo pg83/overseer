@@ -208,6 +208,14 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 			tickets[idx].Deps = jsonIntArray(ev["deps"])
 		}
 
+		// A re-scope of an escalated ticket returns it to scheduling: drop the
+		// replanner-stage parking so scheduleReady picks it up with the new scope
+		// (and the replanner drain loop terminates). Only StageReplanner clears —
+		// a ticket being actively worked keeps its stage so it isn't double-spawned.
+		if tickets[idx].Stage == StageReplanner {
+			tickets[idx].Stage = StageIdle
+		}
+
 		return tickets
 	case "close":
 		if idx < 0 {

@@ -505,7 +505,10 @@ func (o *Orchestrator) setStage(n int, s TicketStage) {
 }
 
 // replannerStageNsLocked returns the N of every OPEN ticket parked in
-// StageReplanner — escalated tickets awaiting a replanner pass. Caller holds o.Mu.
+// StageReplanner — escalated tickets the replanner still owes a pass. Caller holds
+// o.Mu. drainReplanQueue turns these into synthesized batch entries so the replanner
+// loop keeps running until none remain; a re-scope (update) or cancel moves a ticket
+// out of the stage.
 func (o *Orchestrator) replannerStageNsLocked() []int {
 	var out []int
 
@@ -516,22 +519,6 @@ func (o *Orchestrator) replannerStageNsLocked() []int {
 	}
 
 	return out
-}
-
-// releaseReplannerStage returns the given tickets from StageReplanner back to
-// StageIdle so scheduleReady picks them up again — called after a replanner pass
-// has considered them (re-scoped, cancelled, or deliberately left as-is). Cancelled
-// tickets are already CLOSED and skipped. This is what closes the wedge the old
-// InProgress bool left open: an escalated ticket can no longer stay stuck forever.
-func (o *Orchestrator) releaseReplannerStage(ns []int) {
-	o.Mu.Lock()
-	defer o.Mu.Unlock()
-
-	for _, n := range ns {
-		if t, ok := o.findTicketLocked(n); ok && t.State == StateOpen && t.Stage == StageReplanner {
-			o.setStageLocked(n, StageIdle)
-		}
-	}
 }
 
 func (o *Orchestrator) handleAgentResult(res AgentResult) {
@@ -750,71 +737,57 @@ func (o *Orchestrator) replannerLoop() {
 		case <-o.StopCtx.Done():
 			return
 		case req := <-o.QReplanner:
-			batch := o.drainReplanQueue(req)
-			o.safe("REPLANNER", func() { o.runReplanner(batch) })
-		}
+			// Keep running while the batch is non-empty: drainReplanQueue mixes in
+			// synthesized entries for every ticket parked in StageReplanner, so the
+			// loop only stops once the queue is drained AND no escalated ticket is
+			// left awaiting the replanner. A re-scope (update) or cancel moves a
+			// ticket out of the stage — that's what lets the loop terminate.
+			for batch := o.drainReplanQueue([]ReplanRequest{req}); len(batch) > 0; batch = o.drainReplanQueue(nil) {
+				select {
+				case <-o.StopCtx.Done():
+					return
+				default:
+				}
 
-		// Liveness: an escalated ticket parks in StageReplanner. runReplanner releases
-		// the tickets a pass owned, but new escalations can arrive mid-pass — keep
-		// running until none remain, so an escalated ticket is never left stuck
-		// awaiting a replanner that never comes (the old InProgress wedge).
-		for o.drainReplannerStage() {
+				o.safe("REPLANNER", func() { o.runReplanner(batch) })
+			}
 		}
 	}
 }
 
-// drainReplannerStage runs one replanner pass over every ticket still parked in
-// StageReplanner, returning whether it found any (so the caller loops until the
-// stage is empty). Each request carries the ticket's N so the replanner sees which
-// escalated tickets it must resolve.
-func (o *Orchestrator) drainReplannerStage() bool {
-	select {
-	case <-o.StopCtx.Done():
-		return false
-	default:
-	}
+// drainReplanQueue returns `seed` plus every request still waiting in QReplanner
+// plus one synthesized request per ticket parked in StageReplanner (escalated,
+// awaiting the replanner). Batching the whole accumulated backlog into one pass
+// collapses the redundant runs that each used to conclude "already resolved";
+// folding in the StageReplanner tickets is what makes the replannerLoop keep going
+// until every escalated ticket has been handled.
+func (o *Orchestrator) drainReplanQueue(seed []ReplanRequest) []ReplanRequest {
+	batch := seed
 
-	o.Mu.Lock()
-	ns := o.replannerStageNsLocked()
-	o.Mu.Unlock()
+	drain := true
 
-	if len(ns) == 0 {
-		return false
-	}
-
-	var batch []ReplanRequest
-
-	for _, n := range ns {
-		batch = append(batch, ReplanRequest{
-			Source: RoleArbiter, Ticket: n,
-			Reason: "ticket parked in replanner stage (escalated) — re-scope or cancel it",
-		})
-	}
-
-	o.safe("REPLANNER", func() { o.runReplanner(batch) })
-
-	return true
-}
-
-// drainReplanQueue returns the triggering request plus every other request
-// already waiting in QReplanner, so one replanner run addresses the whole
-// accumulated backlog at once instead of one nudge at a time. Many triggers
-// (post-merge fallout scans, re-fired escalations) resolve to "nothing to do"
-// individually but together hand the replanner the full picture in a single
-// expensive pass — collapsing the redundant runs that each used to conclude
-// "already resolved by a prior batch". Requests that arrive while the run is in
-// flight simply accumulate for the next drain.
-func (o *Orchestrator) drainReplanQueue(first ReplanRequest) []ReplanRequest {
-	batch := []ReplanRequest{first}
-
-	for {
+	for drain {
 		select {
 		case req := <-o.QReplanner:
 			batch = append(batch, req)
 		default:
-			return batch
+			drain = false
 		}
 	}
+
+	o.Mu.Lock()
+
+	for _, n := range o.replannerStageNsLocked() {
+		batch = append(batch, ReplanRequest{
+			Source: RoleArbiter,
+			Ticket: n,
+			Reason: "escalated ticket parked in replanner stage — re-scope it or cancel it",
+		})
+	}
+
+	o.Mu.Unlock()
+
+	return batch
 }
 
 func (o *Orchestrator) runReplanner(batch []ReplanRequest) {
@@ -827,15 +800,8 @@ func (o *Orchestrator) runReplanner(batch []ReplanRequest) {
 	wsID := NewWorkspace(o.Root, o.Trunk)
 
 	o.Mu.Lock()
-	owned := o.replannerStageNsLocked()
 	currentTasks := SerializeTasks(o.Tickets)
 	o.Mu.Unlock()
-
-	// Whatever this pass decides, the escalated tickets it owns must go back to
-	// StageIdle so scheduleReady picks them up again — otherwise a re-scope (or a
-	// no-op pass) would leave them parked forever. Captured before the run; released
-	// after, so escalations that arrive mid-pass stay parked for the next pass.
-	defer o.releaseReplannerStage(owned)
 
 	input := o.agentSelfBlock(RoleReplanner, 0) +
 		fmt.Sprintf("REPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",

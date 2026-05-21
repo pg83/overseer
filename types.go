@@ -30,8 +30,9 @@ const (
 // currently owns it. Ephemeral (never persisted); rebuilt as agents are spawned.
 // StageIdle is the zero value: not in flight, the only stage scheduleReady will
 // pick up. StageReplanner means "escalated, handed back to the replanner": the
-// replanner loop runs until no ticket sits in it, then returns the ticket to
-// StageIdle — closing the gap where the old InProgress bool stayed stuck.
+// replanner loop keeps running while any ticket sits in it, and a re-scope (update)
+// or cancel moves the ticket back out — closing the gap where the old InProgress
+// bool stayed stuck forever.
 type TicketStage string
 
 const (
