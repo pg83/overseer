@@ -1,0 +1,540 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+// Pools are the only place a harness is invoked. Each role gets a fixed number of
+// worker goroutines (poolSizes) that read Jobs the coordinator hands them, run the
+// harness to a recognized verdict, and reply with an AgentResult on o.Events. A
+// worker never touches ticket state — everything it needs is in the Job (a ticket
+// snapshot, the workspace, role-specific context). Total harness concurrency is the
+// sum of pool sizes; merger / replanner / overseer are size 1 (serial).
+
+func (o *Orchestrator) startPools() {
+	for role, size := range poolSizes {
+		for i := 0; i < size; i++ {
+			go o.poolWorker(role)
+		}
+	}
+}
+
+func (o *Orchestrator) poolWorker(role AgentRole) {
+	for {
+		select {
+		case <-o.StopCtx.Done():
+			return
+		case job := <-o.jobs[role]:
+			var res AgentResult
+
+			exc := Try(func() { res = o.runJob(job) })
+
+			if exc != nil {
+				// A worker-side failure (e.g. git clone) must still report back, or
+				// the ticket would stay SCHEDULED forever. An empty result makes the
+				// coordinator reset the shadow and re-dispatch.
+				uiTicket("💥", role, job.Ticket.N, "WORKER_PANIC", exc.Error())
+				res = AgentResult{Role: role, Ticket: job.Ticket.N}
+			}
+
+			select {
+			case o.Events <- res:
+			case <-o.StopCtx.Done():
+				return
+			}
+		}
+	}
+}
+
+func (o *Orchestrator) runJob(job Job) AgentResult {
+	switch job.Role {
+	case RoleTasker:
+		return o.jobTasker(job)
+	case RoleDigger:
+		return o.jobDigger(job)
+	case RoleReviewer:
+		return o.jobReviewer(job)
+	case RoleMerger:
+		return o.jobMerger(job)
+	case RoleArbiter:
+		return o.jobArbiter(job)
+	case RoleReplanner:
+		return o.jobReplanner(job)
+	case RoleOverseer:
+		return o.jobOverseer(job)
+	}
+
+	ThrowFmt("runJob: unknown role %q", job.Role)
+
+	return AgentResult{}
+}
+
+// workspaceFor resolves the workspace a Job runs in: a fresh git clone when NewWS is
+// set, otherwise the workspace the coordinator picked (the digger branch).
+func (o *Orchestrator) workspaceFor(job Job) string {
+	if job.NewWS {
+		return NewWorkspace(o.Root, o.Trunk)
+	}
+
+	return job.WS
+}
+
+func (o *Orchestrator) jobTasker(job Job) AgentResult {
+	ws := o.workspaceFor(job)
+	wsAbs := wsPath(o.Root, ws)
+	env := o.ticketEnv(job.Ticket.N, wsAbs)
+	stdin := concatPromptInput(loadPrompt(RoleTasker), o.buildAgentInput(RoleTasker, job.Ticket, wsAbs))
+
+	for {
+		res := o.runAgent(RoleTasker, job.Ticket.N, ws, stdin, env)
+
+		if taskerPlanContent(res.Events) != "" || hasReplanEvent(res.Events) {
+			res.Workspace = ws
+
+			return res
+		}
+
+		uiTicket("🔄", RoleTasker, job.Ticket.N, "RESPAWN", "no plan event")
+	}
+}
+
+func (o *Orchestrator) jobDigger(job Job) AgentResult {
+	ws := o.workspaceFor(job)
+	wsAbs := wsPath(o.Root, ws)
+	prompt := loadPrompt(RoleDigger)
+
+	env := o.ticketEnv(job.Ticket.N, wsAbs)
+	env["PREV_WORKSPACE"] = wsAbs
+
+	extra := fmt.Sprintf("PREV_WORKSPACE: %s\n", wsAbs)
+
+	if job.MergeOut != "" {
+		extra += "\nMERGE_FAIL_OUTPUT:\n" + job.MergeOut + "\nREBASE_TARGET: " + job.RebaseTarget + "\n"
+		env["REBASE_TARGET"] = job.RebaseTarget
+	}
+
+	// Rebuilt per attempt so PRIOR_RUNS includes the just-failed try.
+	build := func() string {
+		return concatPromptInput(prompt, o.buildAgentInput(RoleDigger, job.Ticket, wsAbs)+extra)
+	}
+
+	for {
+		res := o.runAgent(RoleDigger, job.Ticket.N, ws, build(), env)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictReady || v == VerdictCantDo {
+			res.Workspace = ws
+
+			return res
+		}
+
+		uiTicket("🔄", RoleDigger, job.Ticket.N, "RESPAWN", fmt.Sprintf("verdict=%q", v))
+	}
+}
+
+func (o *Orchestrator) jobReviewer(job Job) AgentResult {
+	ws := job.WS
+	wsAbs := wsPath(o.Root, ws)
+	env := o.ticketEnv(job.Ticket.N, wsAbs)
+	stdin := concatPromptInput(loadPrompt(RoleReviewer), o.buildAgentInput(RoleReviewer, job.Ticket, wsAbs))
+
+	for {
+		res := o.runAgent(RoleReviewer, job.Ticket.N, ws, stdin, env)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictApprove || v == VerdictRework || v == VerdictDiscard {
+			res.Workspace = ws
+
+			return res
+		}
+
+		uiTicket("🔄", RoleReviewer, job.Ticket.N, "RESPAWN", fmt.Sprintf("verdict=%q", v))
+	}
+}
+
+func (o *Orchestrator) jobArbiter(job Job) AgentResult {
+	ws := job.WS
+	wsAbs := wsPath(o.Root, ws)
+
+	env := o.ticketEnv(job.Ticket.N, wsAbs)
+	env["TRIGGER_ROLE"] = string(sourceForTrigger(job.Trigger))
+	env["TRIGGER_VERDICT"] = string(job.Trigger)
+	env["TRIGGER_DETAIL"] = job.Detail
+
+	input := o.buildAgentInput(RoleArbiter, job.Ticket, wsAbs) +
+		fmt.Sprintf("\nTRIGGER_ROLE: %s\nTRIGGER_VERDICT: %s\nTRIGGER_DETAIL: %s\n",
+			sourceForTrigger(job.Trigger), job.Trigger, job.Detail)
+	stdin := concatPromptInput(loadPrompt(RoleArbiter), input)
+
+	for {
+		res := o.runAgent(RoleArbiter, job.Ticket.N, ws, stdin, env)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictContinue || v == VerdictEscalate {
+			res.Workspace = ws
+
+			return res
+		}
+
+		uiTicket("🔄", RoleArbiter, job.Ticket.N, "RESPAWN", fmt.Sprintf("verdict=%q", v))
+	}
+}
+
+func (o *Orchestrator) jobMerger(job Job) AgentResult {
+	diggerWS := job.WS
+	mergerWS := NewWorkspace(o.Root, o.Trunk)
+	mergerWSAbs := wsPath(o.Root, mergerWS)
+	diggerWSAbs := wsPath(o.Root, diggerWS)
+	diggerBranch := "ovs/" + diggerWS
+	trunkHead := CurrentTrunkHash(o.Trunk)
+
+	env := map[string]string{
+		"TICKET":          fmt.Sprintf("%d", job.Ticket.N),
+		"DIGGER_BRANCH":   diggerBranch,
+		"DIGGER_WORKTREE": diggerWSAbs,
+		"MERGER_WORKTREE": mergerWSAbs,
+		"TRUNK_HEAD":      trunkHead,
+	}
+
+	input := o.buildAgentInput(RoleMerger, job.Ticket, mergerWSAbs) +
+		fmt.Sprintf("\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
+			diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
+	stdin := concatPromptInput(loadPrompt(RoleMerger), input)
+
+	for {
+		res := o.runAgent(RoleMerger, job.Ticket.N, mergerWS, stdin, env)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictMerged || v == VerdictMergeFail {
+			// Report the merger workspace — the coordinator ff-merges its branch into
+			// trunk (the single place trunk is written).
+			res.Workspace = mergerWS
+
+			return res
+		}
+
+		uiTicket("🔄", RoleMerger, job.Ticket.N, "RESPAWN", fmt.Sprintf("verdict=%q", v))
+	}
+}
+
+func (o *Orchestrator) jobReplanner(job Job) AgentResult {
+	ws := o.workspaceFor(job)
+	triggers := formatReplanTriggers(job.Reasons)
+
+	input := o.agentSelfBlock(RoleReplanner, 0) +
+		fmt.Sprintf("REPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
+			triggers, runsDir(o.Root), tasksDBPath(o.Root), job.Snapshot)
+	stdin := concatPromptInput(loadPrompt(RoleReplanner), input)
+
+	env := map[string]string{
+		"REPLAN_TRIGGERS": triggers,
+		"RUNS_DIR":        runsDir(o.Root),
+		"TASKS_DB":        tasksDBPath(o.Root),
+	}
+
+	for {
+		res := o.runAgent(RoleReplanner, 0, ws, stdin, env)
+
+		if !hasJSONInUnparsed(res.Events) {
+			res.Workspace = ws
+
+			return res
+		}
+
+		uiSys("🔄", "REPLANNER_RESPAWN", "unparsed JSON — retrying for clean output")
+	}
+}
+
+func (o *Orchestrator) jobOverseer(job Job) AgentResult {
+	ws := o.workspaceFor(job)
+
+	input := o.agentSelfBlock(RoleOverseer, 0) +
+		fmt.Sprintf("REASON: %s\n\nCURRENT_TASKS:\n%s\n", job.OverseerReason, job.Snapshot)
+	stdin := concatPromptInput(loadPrompt(RoleOverseer), input)
+
+	env := map[string]string{
+		"REASON":     job.OverseerReason,
+		"TRUNK_PATH": o.Trunk,
+		"TRUNK_HASH": CurrentTrunkHash(o.Trunk),
+		"TASKS_DB":   tasksDBPath(o.Root),
+		"RUNS_DIR":   runsDir(o.Root),
+	}
+
+	for {
+		res := o.runAgent(RoleOverseer, 0, ws, stdin, env)
+		v, _ := lastVerdict(res.Events)
+
+		if v == VerdictGoalsAchieved || len(eventReplans(res.Events)) > 0 {
+			res.Workspace = ws
+
+			return res
+		}
+
+		if hasJSONInUnparsed(res.Events) {
+			uiSys("🔄", "OVERSEER_RESPAWN", "unparsed JSON — retrying")
+
+			continue
+		}
+
+		uiSys("🔄", "OVERSEER_RESPAWN", fmt.Sprintf("verdict=%q no replans", v))
+	}
+}
+
+// sourceForTrigger maps an arbiter trigger verdict back to the role that raised it,
+// for the TRIGGER_ROLE field the arbiter prompt expects.
+func sourceForTrigger(t AgentVerdict) AgentRole {
+	switch t {
+	case VerdictNoPlan:
+		return RoleTasker
+	case VerdictCantDo:
+		return RoleDigger
+	case VerdictRework, VerdictDiscard:
+		return RoleReviewer
+	case VerdictMergeFail:
+		return RoleMerger
+	}
+
+	return ""
+}
+
+// agentSelfBlock identifies the agent to itself: role, harness, model, chat-log path.
+// Reads only immutable bindings, so it is safe to call from a pool worker.
+func (o *Orchestrator) agentSelfBlock(role AgentRole, ticket int) string {
+	hm := o.harnessModelForRole(role)
+	model := hm.resolveModel(role)
+
+	if model == "" {
+		model = "(harness default)"
+	}
+
+	return fmt.Sprintf("ROLE: %s\nMODEL: %s\nHARNESS: %s\nMESSAGES_LOG: %s\n",
+		role, model, hm.Harness.Name(), messagesLogPath(o.Root))
+}
+
+// ticketEnv is the common env every ticket-bound role gets — prompts reference these
+// as $WORKSPACE / $TRUNK_PATH etc. in bash tool calls.
+func (o *Orchestrator) ticketEnv(ticketN int, wsAbs string) map[string]string {
+	return map[string]string{
+		"WORKSPACE":  wsAbs,
+		"TICKET":     fmt.Sprintf("%d", ticketN),
+		"TRUNK_PATH": o.Trunk,
+		"TRUNK_HASH": CurrentTrunkHash(o.Trunk),
+	}
+}
+
+// buildAgentInput renders the prose input header for a ticket-bound role from the
+// Job's ticket snapshot plus on-disk context (plan / log / chat / prior runs). Reads
+// no coordinator state — keyed only by the snapshot and files.
+func (o *Orchestrator) buildAgentInput(role AgentRole, t Ticket, wsAbs string) string {
+	var sb strings.Builder
+
+	sb.WriteString(o.agentSelfBlock(role, t.N))
+	fmt.Fprintf(&sb, "TICKET: %d\nDESCR: %s\nPRIO: %d\nDEPS: %v\n", t.N, t.Descr, t.Prio, t.Deps)
+	fmt.Fprintf(&sb, "WORKSPACE: %s\n", wsAbs)
+	fmt.Fprintf(&sb, "TRUNK_PATH: %s\n", o.Trunk)
+	fmt.Fprintf(&sb, "TRUNK_HASH: %s\n", CurrentTrunkHash(o.Trunk))
+
+	if planExists(o.Root, t.N) {
+		if data, err := os.ReadFile(ticketPlanPath(o.Root, t.N)); err == nil {
+			fmt.Fprintf(&sb, "\nPLAN:\n%s\n", string(data))
+		}
+	}
+
+	if data, err := os.ReadFile(ticketLogPath(o.Root, t.N)); err == nil {
+		fmt.Fprintf(&sb, "\nLOG (phase transitions for this ticket, append-only):\n%s\n", string(data))
+	}
+
+	if msgs := ticketMessages(o.Root, t.N); msgs != "" {
+		fmt.Fprintf(&sb, "\nTICKET_CHAT (lines from MESSAGES_LOG mentioning this ticket):\n%s\n", msgs)
+	}
+
+	if prior := priorRunsForTicket(o.Root, t.N); prior != "" {
+		fmt.Fprintf(&sb, "\nPRIOR_RUNS (compact summaries — Read each LOG_FILE for the full reasoning stream):\n%s\n", prior)
+	}
+
+	return sb.String()
+}
+
+// formatReplanTriggers renders the batch of nudges a replanner Job carries — one
+// numbered line per trigger (source role, ticket, reason).
+func formatReplanTriggers(reasons []ReplanReason) string {
+	var sb strings.Builder
+
+	for i, r := range reasons {
+		fmt.Fprintf(&sb, "%d. source=%s ticket=T-%d: %s\n", i+1, r.Source, r.Ticket, r.Reason)
+	}
+
+	return sb.String()
+}
+
+// eventReplans pulls every `replan` event's reason out of an agent's event stream,
+// in emission order.
+func eventReplans(events []map[string]any) []string {
+	var out []string
+
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t != "replan" {
+			continue
+		}
+
+		r, _ := ev["reason"].(string)
+		r = strings.TrimSpace(r)
+
+		if r != "" {
+			out = append(out, r)
+		}
+	}
+
+	return out
+}
+
+// taskerPlanContent scans for the tasker's `plan` event and returns the plan body.
+// The event carries a `path` to a file the tasker wrote (avoids embedding multi-line
+// markdown in a JSON string); falls back to `body`.
+func taskerPlanContent(events []map[string]any) string {
+	content := ""
+
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t != "plan" {
+			continue
+		}
+
+		if p, _ := ev["path"].(string); p != "" {
+			if data, err := os.ReadFile(p); err == nil {
+				content = string(data)
+			}
+
+			continue
+		}
+
+		if b, _ := ev["body"].(string); b != "" {
+			content = b
+		}
+	}
+
+	return content
+}
+
+// replannerTaskOps pulls every `task` event out of the replanner's stream, in
+// emission order. No other role emits task events.
+func replannerTaskOps(events []map[string]any) []map[string]any {
+	var out []map[string]any
+
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t == "task" {
+			out = append(out, ev)
+		}
+	}
+
+	return out
+}
+
+// hasReplanEvent reports whether any replan event was emitted.
+func hasReplanEvent(events []map[string]any) bool {
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t == "replan" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasJSONInUnparsed reports whether the synthetic unparsed event contains JSON
+// fragments — a signal the model tried to emit structured output but malformed it.
+func hasJSONInUnparsed(events []map[string]any) bool {
+	for _, ev := range events {
+		if t, _ := ev["type"].(string); t == "unparsed" {
+			if text, _ := ev["text"].(string); strings.Contains(text, `{"`) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// applyTaskOp applies one replanner `task` event to a ticket-list sandbox, throwing
+// on any schema violation. Ops apply in emission order; the caller validates the
+// cumulative result before committing.
+func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
+	op, _ := ev["op"].(string)
+	n := jsonInt(ev["n"])
+
+	if n <= 0 {
+		ThrowFmt("task op %q: missing or invalid n", op)
+	}
+
+	idx := -1
+
+	for i, t := range tickets {
+		if t.N == n {
+			idx = i
+
+			break
+		}
+	}
+
+	switch op {
+	case "new":
+		if idx >= 0 {
+			ThrowFmt("op=new ticket %d: N already exists", n)
+		}
+
+		for _, t := range tickets {
+			if n <= t.N {
+				ThrowFmt("op=new ticket %d: N must be greater than all existing tickets (max=%d)", n, t.N)
+			}
+		}
+
+		descr, _ := ev["descr"].(string)
+
+		return append(tickets, Ticket{
+			N:     n,
+			Phase: PhasePlan,
+			Descr: descr,
+			Prio:  jsonInt(ev["prio"]),
+			Deps:  jsonIntArray(ev["deps"]),
+		})
+	case "update":
+		if idx < 0 {
+			ThrowFmt("op=update ticket %d: not found", n)
+		}
+
+		if tickets[idx].Phase.Terminal() {
+			ThrowFmt("op=update ticket %d: terminal (%s)", n, tickets[idx].Phase)
+		}
+
+		if d, ok := ev["descr"].(string); ok {
+			tickets[idx].Descr = d
+		}
+
+		if _, ok := ev["prio"]; ok {
+			tickets[idx].Prio = jsonInt(ev["prio"])
+		}
+
+		if _, ok := ev["deps"]; ok {
+			tickets[idx].Deps = jsonIntArray(ev["deps"])
+		}
+
+		return tickets
+	case "cancel":
+		if idx < 0 {
+			ThrowFmt("op=cancel ticket %d: not found", n)
+		}
+
+		if tickets[idx].Phase.Terminal() {
+			ThrowFmt("op=cancel ticket %d: terminal (%s)", n, tickets[idx].Phase)
+		}
+
+		tickets[idx].Phase = PhaseDiscarded
+
+		return tickets
+	}
+
+	ThrowFmt("unknown task op %q (expected new/update/cancel)", op)
+
+	return tickets
+}

@@ -1,48 +1,59 @@
 package main
 
-import (
-	"context"
-	"sync"
-)
+import "context"
 
-type State string
-
-const (
-	StateOpen   State = "OPEN"
-	StateClosed State = "CLOSED"
-)
-
-type CloseReason string
+// Phase is the persisted pipeline position of a ticket — the work it needs next.
+// It is the single source of truth for ticket state (written to the event log),
+// replacing the old OPEN/CLOSED + ephemeral Stage. The coordinator advances it on
+// every agent verdict. PhaseMerged / PhaseDiscarded are terminal.
+type Phase string
 
 const (
-	// CloseMerged means the ticket's work landed in trunk via fast-forward.
-	// Dependents of a MERGED ticket can rely on its work being present.
-	CloseMerged CloseReason = "MERGED"
-
-	// CloseDiscarded means the ticket won't ship — replanner cancelled it,
-	// reviewer rejected it, digger gave up, tasker couldn't plan, or any
-	// similar abandonment. Single state for "closed without merging" since
-	// every consumer treats them identically (history-only, not a "todo").
-	CloseDiscarded CloseReason = "DISCARDED"
+	PhasePlan      Phase = "PLAN"      // needs a tasker (no plan yet)
+	PhaseImplement Phase = "IMPLEMENT" // needs a digger
+	PhaseReview    Phase = "REVIEW"    // needs a reviewer
+	PhaseMerge     Phase = "MERGE"     // needs the merger
+	PhaseArbitrate Phase = "ARBITRATE" // needs the arbiter (a disagreement surfaced)
+	PhaseEscalate  Phase = "ESCALATE"  // needs the replanner (arbiter escalated)
+	PhaseMerged    Phase = "MERGED"    // terminal: work landed in trunk
+	PhaseDiscarded Phase = "DISCARDED" // terminal: dropped
 )
 
-// TicketStage is the in-memory pipeline position of a ticket — which role
-// currently owns it. Ephemeral (never persisted); rebuilt as agents are spawned.
-// StageIdle is the zero value: not in flight, the only stage scheduleReady will
-// pick up. StageReplanner means "escalated, handed back to the replanner": the
-// replanner loop keeps running while any ticket sits in it, and a re-scope (update)
-// or cancel moves the ticket back out — closing the gap where the old InProgress
-// bool stayed stuck forever.
-type TicketStage string
+func (p Phase) Terminal() bool {
+	return p == PhaseMerged || p == PhaseDiscarded
+}
+
+// roleForPhase maps a non-terminal phase to the agent role that advances it. The
+// coordinator's dispatch loop routes every STOPPED ticket to roleForPhase(phase).
+func roleForPhase(p Phase) AgentRole {
+	switch p {
+	case PhasePlan:
+		return RoleTasker
+	case PhaseImplement:
+		return RoleDigger
+	case PhaseReview:
+		return RoleReviewer
+	case PhaseMerge:
+		return RoleMerger
+	case PhaseArbitrate:
+		return RoleArbiter
+	case PhaseEscalate:
+		return RoleReplanner
+	}
+
+	return ""
+}
+
+// Shadow is the coordinator's in-memory scheduling state for a ticket — orthogonal
+// to Phase. Only the coordinate goroutine touches it, so there is no lock.
+// ShadowStopped = not in flight, eligible for dispatch; ShadowScheduled = handed to
+// a role pool, an agent is (or will be) working it. A ticket goes Scheduled on
+// dispatch and back to Stopped when its result returns.
+type Shadow string
 
 const (
-	StageIdle      TicketStage = ""
-	StageTasker    TicketStage = "tasker"
-	StageDigger    TicketStage = "digger"
-	StageReviewer  TicketStage = "reviewer"
-	StageMerger    TicketStage = "merger"
-	StageArbiter   TicketStage = "arbiter"
-	StageReplanner TicketStage = "replanner"
+	ShadowStopped   Shadow = "STOPPED"
+	ShadowScheduled Shadow = "SCHEDULED"
 )
 
 type TicketEvent struct {
@@ -52,21 +63,13 @@ type TicketEvent struct {
 }
 
 type Ticket struct {
-	N           int           `json:"n"`
-	State       State         `json:"state"`
-	Descr       string        `json:"descr"`
-	Prio        int           `json:"prio"`
-	Deps        []int         `json:"deps,omitempty"`
-	Workspaces  []string      `json:"workspaces,omitempty"`
-	CloseReason CloseReason   `json:"close_reason,omitempty"`
-	Events      []TicketEvent `json:"events,omitempty"`
-
-	// In-memory only; never persisted. Which role currently owns the ticket in the
-	// work pipeline (StageIdle = not in flight). Source of truth for scheduleReady's
-	// "is this ticket busy". Set on every handoff; returned to StageIdle when the
-	// ticket leaves the pipeline (terminal close, stale drop, or once the replanner
-	// has dealt with an escalated StageReplanner ticket).
-	Stage TicketStage `json:"-"`
+	N          int           `json:"n"`
+	Phase      Phase         `json:"phase"`
+	Descr      string        `json:"descr"`
+	Prio       int           `json:"prio"`
+	Deps       []int         `json:"deps,omitempty"`
+	Workspaces []string      `json:"workspaces,omitempty"`
+	Events     []TicketEvent `json:"events,omitempty"`
 }
 
 type AgentRole string
@@ -82,28 +85,25 @@ const (
 	// Arbiter is the cycle-internal escalation gate. When a digger →
 	// reviewer / merger cycle hits a disagreement (REWORK / DISCARD /
 	// MERGE_FAIL), the arbiter decides: keep iterating in the cycle, or
-	// escalate to the full replanner. Replanner-lite, called on every
-	// disagreement instead of bouncing the full replanner only every N.
+	// escalate to the full replanner.
 	RoleArbiter AgentRole = "arbiter"
 )
-
 
 type AgentVerdict string
 
 const (
-	VerdictReady           AgentVerdict = "READY"
-	VerdictCantDo          AgentVerdict = "CANT_DO"
-	VerdictApprove         AgentVerdict = "APPROVE"
-	VerdictRework          AgentVerdict = "REWORK"
-	VerdictDiscard         AgentVerdict = "DISCARD"
+	VerdictReady         AgentVerdict = "READY"
+	VerdictCantDo        AgentVerdict = "CANT_DO"
+	VerdictApprove       AgentVerdict = "APPROVE"
+	VerdictRework        AgentVerdict = "REWORK"
+	VerdictDiscard       AgentVerdict = "DISCARD"
 	VerdictMerged        AgentVerdict = "MERGED"
 	VerdictMergeFail     AgentVerdict = "MERGE_FAIL"
 	VerdictGoalsAchieved AgentVerdict = "GOALS_ACHIEVED"
 
-	// VerdictNoPlan is a synthetic trigger sent to the arbiter when a tasker
-	// fails to produce a plan. The tasker doesn't emit it itself (it just emits
-	// no `plan` event); the orchestrator categorizes that absence as NO_PLAN
-	// for the arbiter's input.
+	// VerdictNoPlan is a synthetic trigger raised when a tasker fails to produce a
+	// plan. The tasker doesn't emit it (it just emits no `plan` event); the
+	// coordinator categorizes that absence as NO_PLAN for the arbiter's input.
 	VerdictNoPlan AgentVerdict = "NO_PLAN"
 
 	// Arbiter verdicts.
@@ -113,9 +113,9 @@ const (
 
 // AgentResult is pure transport: routing identity (Role/Ticket/Workspace), raw I/O
 // (Args/Stdin/Stdout/RawStream), and the parsed JSON events the agent emitted on
-// stdout. No role-specific fields — consumers walk Events and pull what they care
-// about (verdict, plan body, set_tasks, cancel, ...) themselves. See scheduler.go
-// for the per-role extractors and agent.go for parseEvents / lastVerdict helpers.
+// stdout. A pool worker fills it and sends it to the coordinator, which walks
+// Events and pulls what it cares about (verdict, plan body, task ops, ...) via the
+// extractors in agent.go / coordinator.go. Workers never touch ticket state.
 type AgentResult struct {
 	Role      AgentRole
 	Ticket    int
@@ -129,34 +129,44 @@ type AgentResult struct {
 	Events []map[string]any
 }
 
-type ReplanRequest struct {
+// ReplanReason is one nudge to the replanner — either an escalated ticket or a
+// global signal (overseer guidance, post-merge fallout, GOALS.md change). The
+// coordinator accumulates these and batches them into a single replanner Job.
+type ReplanReason struct {
 	Source AgentRole
 	Ticket int
 	Reason string
 }
 
-type MergeRequest struct {
-	Ticket    int
-	Workspace string
-	History   string
-}
+// Job is a unit of work the coordinator hands to a role pool. The coordinator is
+// the only writer; a pool worker reads it, runs the harness, and replies with an
+// AgentResult on Orchestrator.Events. One struct for all roles — each reads the
+// fields it needs. Ticket is a snapshot; the coordinator owns the live copy.
+type Job struct {
+	Role   AgentRole
+	Ticket Ticket
 
-// ArbiterRequest is what the cycle hands to the arbiter when a disagreement
-// surfaces (reviewer REWORK / DISCARD, merger MERGE_FAIL / FF_FAIL). The arbiter
-// reads ticket history + workspace state + the trigger detail and decides
-// CONTINUE (spawn next digger iteration) or ESCALATE (queue full replanner).
-type ArbiterRequest struct {
-	Ticket       int
-	Workspace    string       // digger's branch workspace to continue on
-	Source       AgentRole    // who triggered: reviewer or merger
-	Trigger      AgentVerdict // REWORK / DISCARD / MERGE_FAIL
-	Detail       string       // what the trigger source said
-	RebaseTarget string       // for MERGE_FAIL: trunk head to rebase onto
-	MergeOut     string       // for MERGE_FAIL: merge command output to surface in digger input
-}
+	// WS is the workspace the worker must use; if NewWS is set the worker creates a
+	// fresh clone instead and reports it back in the result.
+	WS    string
+	NewWS bool
 
-type OverseerRequest struct {
-	Reason string
+	// Arbiter context (PhaseArbitrate).
+	Trigger      AgentVerdict
+	Detail       string
+	RebaseTarget string
+	MergeOut     string
+
+	// Replanner context (PhaseEscalate tickets + global nudges, batched).
+	Reasons []ReplanReason
+
+	// Overseer context.
+	OverseerReason string
+
+	// Snapshot is CURRENT_TASKS, rendered by the coordinator (which owns o.Tickets)
+	// at dispatch time, for the replanner / overseer — so a worker never reads
+	// coordinator state.
+	Snapshot string
 }
 
 // HarnessModel pairs a Harness implementation with the model name to drive it. Empty
@@ -166,37 +176,59 @@ type HarnessModel struct {
 	Model   string
 }
 
+// arbCtx is the trigger context the coordinator remembers for a ticket parked in
+// PhaseArbitrate / PhaseImplement-after-merge-fail, so it can build the right Job.
+// Reconstructed from the phase event on replay (rebaseTarget / mergeOut are live
+// only — a restart loses them and the digger simply rebases without the diff text).
+type arbCtx struct {
+	trigger      AgentVerdict
+	detail       string
+	rebaseTarget string
+	mergeOut     string
+}
+
+// Orchestrator is the coordinator: a single goroutine owns all of the fields below
+// (Tickets, shadow, branchWS, arb, nudges, the busy flags) — no mutex, because
+// nothing else touches them. Role pools read Jobs from o.jobs[role] and reply on
+// o.Events; that is the only cross-goroutine communication.
 type Orchestrator struct {
 	Root      string
 	Trunk     string
 	GoalsHash string
-	Jail    []string
-	ExtraRW []string
+	Jail      []string
+	ExtraRW   []string
 
-	// Bindings is the role → (harness, model) resolution table. Lookup precedence
-	// (in harnessModelForRole):
-	//   1. Bindings[<role-name>]   e.g. "tasker", "digger", "reviewer", ...
-	//   2. Bindings["think"]       for tasker / replanner / overseer
-	//   3. Bindings["work"]        for digger / reviewer
-	//   4. Bindings["default"]     from --harness
-	// "default" is required; the rest are optional overrides.
+	// Bindings is the role → (harness, model) resolution table — see
+	// harnessModelForRole. "default" required; the rest optional overrides.
 	Bindings map[string]HarnessModel
 
-	Mu      sync.Mutex
-	Tickets []Ticket
+	// Coordinator-owned state (no lock).
+	Tickets       []Ticket
+	shadow        map[int]Shadow
+	branchWS      map[int]string
+	arb           map[int]arbCtx
+	nudges        []ReplanReason
+	replanOwned   []int
+	replannerBusy bool
+	overseerBusy  bool
 
-	AgentSem chan struct{}
-
-	QReplanner chan ReplanRequest
-	QMerger    chan MergeRequest
-	QOverseer  chan OverseerRequest
-	QArbiter   chan ArbiterRequest
-
-	AgentDone chan AgentResult
-
-	Wakeup chan struct{}
+	jobs   map[AgentRole]chan Job
+	Events chan AgentResult
 
 	StopCtx    context.Context
 	StopCancel context.CancelFunc
 	Stopped    chan struct{}
+}
+
+// poolSizes is the fixed number of workers per role — total harness concurrency is
+// their sum (no shared semaphore). merger / replanner / overseer are serial; tune
+// digger to control implementation parallelism.
+var poolSizes = map[AgentRole]int{
+	RoleTasker:    2,
+	RoleDigger:    4,
+	RoleReviewer:  2,
+	RoleArbiter:   2,
+	RoleMerger:    1,
+	RoleReplanner: 1,
+	RoleOverseer:  1,
 }

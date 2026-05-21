@@ -198,9 +198,6 @@ func (o *Orchestrator) fatal(reason string) {
 // process. Never returns a synthesized "crashed" verdict event. The harness is never
 // killed from outside — it always runs to completion, on the user's invariant.
 func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin string, env map[string]string) AgentResult {
-	o.AgentSem <- struct{}{}
-	defer func() { <-o.AgentSem }()
-
 	wsAbs := ""
 	tmpdir := ""
 

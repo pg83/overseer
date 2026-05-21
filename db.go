@@ -19,7 +19,7 @@ func eventsLogPath(orchRoot string) string {
 }
 
 // tasksDBPath retains the legacy name (some prompts and replanner inputs reference
-// it as `TASKS_DB`). It now points at the events log, which IS the database.
+// it as `TASKS_DB`). It points at the events log, which IS the database.
 func tasksDBPath(orchRoot string) string {
 	return eventsLogPath(orchRoot)
 }
@@ -28,21 +28,23 @@ func tasksDBPath(orchRoot string) string {
 // one JSON object per line in tasks.events.jsonl. Required fields:
 //
 //	ts: RFC3339Nano timestamp
-//	k:  kind discriminator — "create" | "update" | "close" | "event" | "ws"
+//	k:  kind discriminator — "create" | "phase" | "update" | "event" | "ws"
 //	n:  ticket number
 //
 // Kind-specific fields:
 //
-//	create: descr (string), prio (int), deps ([]int)
+//	create: descr (string), prio (int), deps ([]int) — ticket starts at PhasePlan
+//	phase:  phase (Phase) — the new pipeline position; terminal phases close the ticket
 //	update: descr? (string), prio? (int), deps? ([]int) — only present fields change
-//	close:  reason ("MERGED" | "DISCARDED")
-//	event:  kind (string), detail (string) — append to ticket.Events
-//	ws:     ws (string) — appends to ticket.Workspaces
+//	event:  kind (string), detail (string) — appended to ticket.Events (history)
+//	ws:     ws (string) — appended to ticket.Workspaces
+//
+// Legacy logs may carry "close" (reason MERGED/DISCARDED) — replayed into a phase.
 type LogEvent = map[string]any
 
 // LoadTasks rebuilds the in-memory ticket list by replaying tasks.events.jsonl.
-// Missing log = fresh orchestrator (returns nil). On legacy tasks.jsonl we migrate:
-// convert each ticket to a series of events, write the new log, return the result.
+// Missing log = fresh orchestrator (returns nil). A legacy tasks.jsonl snapshot is
+// migrated on first run.
 func LoadTasks(root string) []Ticket {
 	path := eventsLogPath(root)
 
@@ -93,6 +95,9 @@ func migrateLegacyFormat(root string) []Ticket {
 	Throw(err)
 	defer f.Close()
 
+	out := Throw2(os.Create(eventsLogPath(root)))
+	defer out.Close()
+
 	var tickets []Ticket
 
 	scanner := bufio.NewScanner(f)
@@ -105,31 +110,42 @@ func migrateLegacyFormat(root string) []Ticket {
 			continue
 		}
 
-		var t Ticket
-		Throw(json.Unmarshal(line, &t))
+		var legacy struct {
+			N           int           `json:"n"`
+			State       string        `json:"state"`
+			Descr       string        `json:"descr"`
+			Prio        int           `json:"prio"`
+			Deps        []int         `json:"deps"`
+			Workspaces  []string      `json:"workspaces"`
+			CloseReason string        `json:"close_reason"`
+			Events      []TicketEvent `json:"events"`
+		}
+		Throw(json.Unmarshal(line, &legacy))
 
-		if t.CloseReason == "CANCELLED" {
-			t.CloseReason = CloseDiscarded
+		phase := PhasePlan
+
+		if legacy.State == "CLOSED" {
+			phase = PhaseDiscarded
+
+			if legacy.CloseReason == "MERGED" {
+				phase = PhaseMerged
+			}
 		}
 
-		tickets = append(tickets, t)
+		emitLegacyTicketAsEvents(out, legacy.N, legacy.Descr, legacy.Prio, legacy.Deps, legacy.Workspaces, legacy.Events, phase)
+
+		tickets = applyLogEvent(tickets, LogEvent{"k": "create", "n": legacy.N, "descr": legacy.Descr, "prio": legacy.Prio, "deps": legacy.Deps})
+		tickets = applyLogEvent(tickets, LogEvent{"k": "phase", "n": legacy.N, "phase": string(phase)})
 	}
 
 	Throw(scanner.Err())
-
-	out := Throw2(os.Create(eventsLogPath(root)))
-	defer out.Close()
-
-	for _, t := range tickets {
-		emitLegacyTicketAsEvents(out, t)
-	}
 
 	return tickets
 }
 
 // emitLegacyTicketAsEvents writes a synthetic event sequence reproducing one
 // legacy ticket's state. Used only at one-shot migration time.
-func emitLegacyTicketAsEvents(w io.Writer, t Ticket) {
+func emitLegacyTicketAsEvents(w io.Writer, n int, descr string, prio int, deps []int, workspaces []string, events []TicketEvent, phase Phase) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	write := func(ev LogEvent) {
@@ -141,24 +157,22 @@ func emitLegacyTicketAsEvents(w io.Writer, t Ticket) {
 		Throw2(w.Write(append(b, '\n')))
 	}
 
-	write(LogEvent{"k": "create", "n": t.N, "descr": t.Descr, "prio": t.Prio, "deps": t.Deps})
+	write(LogEvent{"k": "create", "n": n, "descr": descr, "prio": prio, "deps": deps})
 
-	for _, ws := range t.Workspaces {
-		write(LogEvent{"k": "ws", "n": t.N, "ws": ws})
+	for _, ws := range workspaces {
+		write(LogEvent{"k": "ws", "n": n, "ws": ws})
 	}
 
-	for _, e := range t.Events {
-		write(LogEvent{"ts": e.Ts, "k": "event", "n": t.N, "kind": e.Kind, "detail": e.Detail})
+	for _, e := range events {
+		write(LogEvent{"ts": e.Ts, "k": "event", "n": n, "kind": e.Kind, "detail": e.Detail})
 	}
 
-	if t.State == StateClosed {
-		write(LogEvent{"k": "close", "n": t.N, "reason": string(t.CloseReason)})
-	}
+	write(LogEvent{"k": "phase", "n": n, "phase": string(phase)})
 }
 
 // applyLogEvent applies one event to a ticket list, returning the updated list.
-// Tolerant: unknown ticket N or unknown kind is a no-op (allows safe replay even
-// of partially-written or future-format logs). Closes are idempotent.
+// Tolerant: unknown ticket N or unknown kind is a no-op (safe replay of partial or
+// future-format logs).
 func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 	n := jsonInt(ev["n"])
 
@@ -186,11 +200,37 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 
 		return append(tickets, Ticket{
 			N:     n,
-			State: StateOpen,
+			Phase: PhasePlan,
 			Descr: descr,
 			Prio:  jsonInt(ev["prio"]),
 			Deps:  jsonIntArray(ev["deps"]),
 		})
+	case "phase":
+		if idx < 0 {
+			return tickets
+		}
+
+		p, _ := ev["phase"].(string)
+
+		if p != "" {
+			tickets[idx].Phase = Phase(p)
+		}
+
+		return tickets
+	case "close":
+		// Legacy: map an old close record onto a terminal phase.
+		if idx < 0 {
+			return tickets
+		}
+
+		reason, _ := ev["reason"].(string)
+		tickets[idx].Phase = PhaseDiscarded
+
+		if reason == "MERGED" {
+			tickets[idx].Phase = PhaseMerged
+		}
+
+		return tickets
 	case "update":
 		if idx < 0 {
 			return tickets
@@ -207,36 +247,6 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 		if _, ok := ev["deps"]; ok {
 			tickets[idx].Deps = jsonIntArray(ev["deps"])
 		}
-
-		// A re-scope of an escalated ticket returns it to scheduling: drop the
-		// replanner-stage parking so scheduleReady picks it up with the new scope
-		// (and the replanner drain loop terminates). Only StageReplanner clears —
-		// a ticket being actively worked keeps its stage so it isn't double-spawned.
-		if tickets[idx].Stage == StageReplanner {
-			tickets[idx].Stage = StageIdle
-		}
-
-		return tickets
-	case "close":
-		if idx < 0 {
-			return tickets
-		}
-
-		if tickets[idx].State == StateClosed {
-			tickets[idx].Stage = StageIdle
-
-			return tickets
-		}
-
-		reason, _ := ev["reason"].(string)
-
-		if reason == "CANCELLED" {
-			reason = string(CloseDiscarded)
-		}
-
-		tickets[idx].State = StateClosed
-		tickets[idx].CloseReason = CloseReason(reason)
-		tickets[idx].Stage = StageIdle
 
 		return tickets
 	case "event":
@@ -268,10 +278,10 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 	return tickets
 }
 
-// appendLogEventLocked persists one event to the log and applies it to o.Tickets.
-// Caller must hold o.Mu. Sets ts if not present. This is THE write path for state
-// — every mutation goes through here.
-func (o *Orchestrator) appendLogEventLocked(ev LogEvent) {
+// appendLog persists one event to the log and applies it to o.Tickets. Called only
+// by the coordinate goroutine (single-threaded — no lock). THE write path for
+// state: every mutation goes through here.
+func (o *Orchestrator) appendLog(ev LogEvent) {
 	if _, ok := ev["ts"]; !ok {
 		ev["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
 	}
@@ -286,15 +296,30 @@ func (o *Orchestrator) appendLogEventLocked(ev LogEvent) {
 	o.Tickets = applyLogEvent(o.Tickets, ev)
 }
 
+// setPhase persists a phase transition and mirrors a human-readable line into the
+// ticket's log.md. The single way the coordinator advances a ticket.
+func (o *Orchestrator) setPhase(n int, p Phase, detail string) {
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+
+	o.appendLog(LogEvent{"ts": ts, "k": "phase", "n": n, "phase": string(p)})
+
+	appendTicketLogTs(o.Root, n, ts, "PHASE:"+string(p), detail)
+}
+
+// recordEvent appends a history record to the events log and to log.md. Called only
+// by the coordinate goroutine.
+func (o *Orchestrator) recordEvent(n int, kind, detail string) {
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+
+	o.appendLog(LogEvent{"ts": ts, "k": "event", "n": n, "kind": kind, "detail": detail})
+
+	appendTicketLogTs(o.Root, n, ts, kind, detail)
+}
+
 // SerializeTasks renders the in-memory tickets for the replanner's CURRENT_TASKS
-// input. Two sections:
-//
-//   OPEN_TICKETS: full JSONL for all OPEN tickets (replanner may operate on these).
-//
-//   CLOSED_DEPS: compact one-liner only for closed tickets that are direct deps
-//   of at least one OPEN ticket. The full history is in TASKS_DB (passed separately).
-//
-// Sorted by N within each section.
+// input. OPEN_TICKETS = every non-terminal ticket (full JSONL incl. phase);
+// CLOSED_DEPS = compact one-liner for terminal tickets that are direct deps of a
+// non-terminal one. Sorted by N.
 func SerializeTasks(tickets []Ticket) string {
 	sorted := make([]Ticket, len(tickets))
 	copy(sorted, tickets)
@@ -302,10 +327,10 @@ func SerializeTasks(tickets []Ticket) string {
 		return sorted[a].N < sorted[b].N
 	})
 
-	// Collect N values directly referenced by OPEN tickets.
 	directDeps := map[int]bool{}
+
 	for _, t := range sorted {
-		if t.State == "OPEN" {
+		if !t.Phase.Terminal() {
 			for _, dep := range t.Deps {
 				directDeps[dep] = true
 			}
@@ -315,19 +340,18 @@ func SerializeTasks(tickets []Ticket) string {
 	var open, closedDeps strings.Builder
 
 	for _, t := range sorted {
-		if t.State == "OPEN" {
+		if !t.Phase.Terminal() {
 			b := Throw2(json.Marshal(t))
 			open.Write(b)
 			open.WriteByte('\n')
 		} else if directDeps[t.N] {
-			fmt.Fprintf(&closedDeps, "{\"n\":%d,\"state\":%q,\"descr\":%s,\"close_reason\":%s}\n",
-				t.N, t.State,
-				Throw2(json.Marshal(t.Descr)),
-				Throw2(json.Marshal(t.CloseReason)))
+			fmt.Fprintf(&closedDeps, "{\"n\":%d,\"phase\":%q,\"descr\":%s}\n",
+				t.N, t.Phase, Throw2(json.Marshal(t.Descr)))
 		}
 	}
 
 	maxN := 0
+
 	for _, t := range sorted {
 		if t.N > maxN {
 			maxN = t.N
@@ -336,7 +360,7 @@ func SerializeTasks(tickets []Ticket) string {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "MAX_TICKET_N: %d\n\n", maxN)
-	sb.WriteString("OPEN_TICKETS (replanner may cancel/update these):\n")
+	sb.WriteString("OPEN_TICKETS (non-terminal — replanner may cancel/update these):\n")
 
 	if open.Len() == 0 {
 		sb.WriteString("(none)\n")
@@ -344,7 +368,7 @@ func SerializeTasks(tickets []Ticket) string {
 		sb.WriteString(open.String())
 	}
 
-	sb.WriteString("\nCLOSED_DEPS (direct deps of open tickets — immutable, do not cancel/update):\n")
+	sb.WriteString("\nCLOSED_DEPS (terminal deps of open tickets — immutable, do not cancel/update):\n")
 
 	if closedDeps.Len() == 0 {
 		sb.WriteString("(none)\n")
@@ -357,10 +381,8 @@ func SerializeTasks(tickets []Ticket) string {
 	return sb.String()
 }
 
-// ValidateTasks checks structural invariants on a candidate ticket list. Run only
-// on replanner-batch sandboxes before committing — the events log is already-
-// applied state and trusted by construction. Other write paths (record-event,
-// bounce, ws, close-MERGED) can't violate these invariants.
+// ValidateTasks checks structural invariants on a candidate ticket list. Run on the
+// replanner-batch sandbox before committing.
 func ValidateTasks(tickets []Ticket) {
 	seen := map[int]bool{}
 	known := map[int]bool{}
@@ -376,8 +398,8 @@ func ValidateTasks(tickets []Ticket) {
 
 		seen[t.N] = true
 
-		if t.State != StateOpen && t.State != StateClosed {
-			ThrowFmt("ticket %d: invalid STATE %q", t.N, t.State)
+		if !validPhase(t.Phase) {
+			ThrowFmt("ticket %d: invalid PHASE %q", t.N, t.Phase)
 		}
 
 		if t.Prio < 1 || t.Prio > 10 {
@@ -392,16 +414,6 @@ func ValidateTasks(tickets []Ticket) {
 			ThrowFmt("ticket %d: DESCR has newline", t.N)
 		}
 
-		if t.State == StateClosed {
-			switch t.CloseReason {
-			case CloseMerged, CloseDiscarded:
-			default:
-				ThrowFmt("ticket %d: STATE=CLOSED requires valid CLOSE_REASON, got %q", t.N, t.CloseReason)
-			}
-		} else if t.CloseReason != "" {
-			ThrowFmt("ticket %d: STATE=OPEN must not have CLOSE_REASON", t.N)
-		}
-
 		for _, d := range t.Deps {
 			if !known[d] {
 				ThrowFmt("ticket %d: DEPS references missing ticket %d", t.N, d)
@@ -413,9 +425,8 @@ func ValidateTasks(tickets []Ticket) {
 		}
 	}
 
-	// An OPEN ticket cannot depend on a DISCARDED prerequisite — whoever cancels
-	// a ticket is responsible for cleaning up its dependents in the same batch
-	// (update their deps to remove the dropped N, or cascade-cancel them).
+	// A non-terminal ticket cannot depend on a DISCARDED prerequisite — whoever
+	// cancels a ticket cleans up its dependents in the same batch.
 	byN := map[int]Ticket{}
 
 	for _, t := range tickets {
@@ -423,21 +434,28 @@ func ValidateTasks(tickets []Ticket) {
 	}
 
 	for _, t := range tickets {
-		if t.State != StateOpen {
+		if t.Phase.Terminal() {
 			continue
 		}
 
 		for _, d := range t.Deps {
-			dep := byN[d]
-
-			if dep.State == StateClosed && dep.CloseReason == CloseDiscarded {
-				ThrowFmt("ticket %d (OPEN) depends on T-%d which is DISCARDED — drop the dep or cancel ticket %d too",
+			if byN[d].Phase == PhaseDiscarded {
+				ThrowFmt("ticket %d depends on T-%d which is DISCARDED — drop the dep or cancel ticket %d too",
 					t.N, d, t.N)
 			}
 		}
 	}
 
 	checkNoCycles(tickets)
+}
+
+func validPhase(p Phase) bool {
+	switch p {
+	case PhasePlan, PhaseImplement, PhaseReview, PhaseMerge, PhaseArbitrate, PhaseEscalate, PhaseMerged, PhaseDiscarded:
+		return true
+	}
+
+	return false
 }
 
 func checkNoCycles(tickets []Ticket) {
@@ -474,26 +492,35 @@ func checkNoCycles(tickets []Ticket) {
 	}
 }
 
-// recordEventLocked appends a state-transition record to the events log (and
-// mirrors it into the per-ticket human-readable log.md). Caller must hold o.Mu.
-func (o *Orchestrator) recordEventLocked(n int, kind, detail string) {
-	ts := time.Now().UTC().Format(time.RFC3339Nano)
+// jsonInt accepts JSON numbers (float64 after Unmarshal-into-any), bare ints, or
+// string forms ("42", "T-42") and returns the int. 0 on failure — callers check sign.
+func jsonInt(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case string:
+		s := strings.TrimPrefix(strings.TrimSpace(x), "T-")
 
-	o.appendLogEventLocked(LogEvent{
-		"ts":     ts,
-		"k":      "event",
-		"n":      n,
-		"kind":   kind,
-		"detail": detail,
-	})
+		var n int
 
-	appendTicketLogTs(o.Root, n, ts, kind, detail)
+		if _, err := fmt.Sscanf(s, "%d", &n); err == nil {
+			return n
+		}
+	}
+
+	return 0
 }
 
-func (o *Orchestrator) recordEvent(n int, kind, detail string) {
-	o.Mu.Lock()
-	defer o.Mu.Unlock()
+func jsonIntArray(v any) []int {
+	arr, _ := v.([]any)
 
-	o.recordEventLocked(n, kind, detail)
+	var out []int
+
+	for _, x := range arr {
+		out = append(out, jsonInt(x))
+	}
+
+	return out
 }
-
