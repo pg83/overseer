@@ -114,7 +114,7 @@ The loop is **continuous and parallel**, not sequential. Multiple tickets are in
                                                ▼
                                    ┌─ STOPPED tickets, deps satisfied ┐
                                    │   (dispatched by phase, sorted   │
-                                   │    by prio DESC then n ASC)      │
+                                   │    by ticket number n ASC)       │
                                    └────────────┬─────────────────────┘
                                                 │  coordinator dispatches by phase
                                                 ▼
@@ -166,7 +166,7 @@ Step by step, on one ticket:
 1. **Boot.** The coordinator loads `tasks.events.jsonl` (the ticket DB), marks every non-terminal ticket `STOPPED`, and triggers one overseer evaluation: «re-evaluate goals and seed plan if needed».
 2. **Overseer evaluates.** Reads `GOALS.md`, ticket DB, recent agent runs. If goals aren't met → emits one or more `replan` events with reasons (the coordinator accumulates them as nudges). If met → `GOALS_ACHIEVED`, the run writes `REPORT.md` and shuts down.
 3. **Replanner reshapes the DB.** The coordinator hands the (serial) replanner one batched job covering all `ESCALATE` tickets + pending nudges. It emits `task` events; the coordinator validates them (no non-terminal→DISCARDED deps, no cycles), appends to `tasks.events.jsonl`, updates in-memory tickets. New tickets start in phase `PLAN`.
-4. **Dispatch picks the ticket up.** Every `STOPPED` non-terminal ticket whose deps are all terminal is routed to `roleForPhase(phase)`, sorted by `prio DESC, n ASC`, and flipped to `SCHEDULED`. A fresh ticket is phase `PLAN` → tasker.
+4. **Dispatch picks the ticket up.** Every `STOPPED` non-terminal ticket whose deps are all terminal is routed to `roleForPhase(phase)`, sorted by ticket number `n ASC`, and flipped to `SCHEDULED`. A fresh ticket is phase `PLAN` → tasker.
 5. **Tasker writes the spec.** A tasker worker researches the codebase in a fresh workspace, writes `tickets/T-<N>/plan.md`, emits `{"type":"plan","path":"..."}`. The coordinator advances the ticket to phase `IMPLEMENT`.
 6. **Digger implements.** A digger worker works in `workspaces/<ws-id>/` (a clone of trunk on branch `ovs/<ws-id>`, recorded as the ticket's branch workspace). On `READY` (clean rebase-able branch ahead of trunk) → phase `REVIEW`. On `CANT_DO` → phase `ARBITRATE`.
 7. **Reviewer audits.** A reviewer worker independently audits the same branch workspace. `APPROVE` → phase `MERGE`. `REWORK` / `DISCARD` → phase `ARBITRATE`.
@@ -204,7 +204,7 @@ Every agent's stdout is parsed as a JSON-line event stream by `parseEvents` in `
 {"type": "replan", "reason": "why the task DB needs adjustment"}
 ```
 
-Role-specific events on top: tasker emits `{"type":"plan","path":"..."}`; replanner emits `{"type":"task","op":"new",...}` / `{"type":"task","op":"update","prio":...,"deps":[...]}` / `{"type":"task","op":"replace","from":...,"to":...}` / `{"type":"task","op":"cancel",...}`.
+Role-specific events on top: tasker emits `{"type":"plan","path":"..."}`; replanner emits `{"type":"task","op":"new",...}` / `{"type":"task","op":"update","deps":[...]}` / `{"type":"task","op":"replace","from":...,"to":...}` / `{"type":"task","op":"cancel",...}`.
 
 The **last** `verdict` event is authoritative — agents sometimes emit multiple. `message` events post to `messages.txt` and surface in the UI. `replan` events become coordinator nudges regardless of which role they came from.
 
@@ -217,11 +217,11 @@ The **last** `verdict` event is authoritative — agents sometimes emit multiple
 ### Tickets
 
 ```json
-{"n": 12, "phase": "REVIEW", "descr": "...", "prio": 7, "deps": [3, 8]}
+{"n": 12, "phase": "REVIEW", "descr": "...", "deps": [3, 8]}
 ```
 
 - **`Phase`** is the persisted state: `PLAN` / `IMPLEMENT` / `REVIEW` / `MERGE` / `ARBITRATE` / `ESCALATE`, plus terminal `MERGED` (work landed) and `DISCARDED` (every other terminal close — cancelled by replanner, repeatedly bounced, reviewer-killed, etc.). The in-memory `shadow` (`STOPPED` / `SCHEDULED`) is the only ephemeral state and never persisted.
-- `prio ∈ [1, 10]`. Dispatch order: `prio DESC, n ASC`.
+- Dispatch order: ticket number `n ASC`.
 - A non-terminal ticket may not depend on a `DISCARDED` prerequisite — `ValidateTasks` enforces this on every replanner batch. A dependency is "satisfied" once the dep reaches a terminal phase.
 
 ### Example invocation

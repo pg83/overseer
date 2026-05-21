@@ -71,8 +71,8 @@ Emit a `task` event for every change you decide on. See common.txt for the event
 
 Three ops, one event per change:
 
-    {"type": "task", "op": "new",    "n": <int>, "ticket_type": "plan"|"code", "descr": "<≤200ch single line>", "prio": 1..10, "deps": [<n>,...]}
-    {"type": "task", "op": "update", "n": <int>, "prio": 1..10, "deps": [<n>,...]}
+    {"type": "task", "op": "new",    "n": <int>, "ticket_type": "plan"|"code", "descr": "<≤200ch single line>", "deps": [<n>,...]}
+    {"type": "task", "op": "update", "n": <int>, "deps": [<n>,...]}
     {"type": "task", "op": "replace", "from": <int>, "to": <int>}
     {"type": "task", "op": "cancel", "n": <int>, "reason": "<short why>"}
 
@@ -80,8 +80,8 @@ If the triggers turned out to need no DB change (already handled, or no-op), emi
 
 Semantics:
 
-- `new` — create a new OPEN ticket. Use the next unused N (`max(prior_n) + 1`, +2, ...). `ticket_type`, `descr`, `prio`, and `deps` are required.
-- `update` — modify an existing OPEN ticket's `deps`, `prio`, or both. No other field may change.
+- `new` — create a new OPEN ticket. Use the next unused N (`max(prior_n) + 1`, +2, ...). `ticket_type`, `descr`, and `deps` are required.
+- `update` — modify an existing OPEN ticket's `deps`. No other field may change.
 - `replace` — replace dependency `from` with dependency `to` in the `deps` of every OPEN ticket that currently references `from`.
 - `cancel` — close an OPEN ticket as DISCARDED. Use this to drop a ticket (replaced by smaller ones, no longer needed, etc.).
 
@@ -94,7 +94,7 @@ Ops apply in emission order — sequence them so each op runs against the ticket
 ## Schema invariants
 
 - Use a fresh N for `new` (never one that already exists, OPEN or CLOSED).
-- `update` only on OPEN tickets, and only for `deps`, `prio`, or both.
+- `update` only on OPEN tickets, and only for `deps`.
 - `replace` only rewrites `deps` on OPEN tickets; `from` and `to` must both name existing tickets.
 - `cancel` only on OPEN tickets.
 - DEPS reference existing N, no cycles, no self-deps.

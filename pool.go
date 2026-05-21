@@ -335,7 +335,7 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, t Ticket, wsAbs string) s
 	var sb strings.Builder
 
 	sb.WriteString(o.agentSelfBlock(role, t.N))
-	fmt.Fprintf(&sb, "TICKET: %d\nDESCR: %s\nPRIO: %d\nDEPS: %v\n", t.N, t.Descr, t.Prio, t.Deps)
+	fmt.Fprintf(&sb, "TICKET: %d\nDESCR: %s\nDEPS: %v\n", t.N, t.Descr, t.Deps)
 	fmt.Fprintf(&sb, "WORKSPACE: %s\n", wsAbs)
 	fmt.Fprintf(&sb, "TRUNK_PATH: %s\n", o.Trunk)
 	fmt.Fprintf(&sb, "TRUNK_HASH: %s\n", CurrentTrunkHash(o.Trunk))
@@ -562,7 +562,6 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 			Type:  ticketType,
 			Phase: newTicketPhase(ticketType),
 			Descr: descr,
-			Prio:  jsonInt(ev["prio"]),
 			Deps:  jsonIntArray(ev["deps"]),
 		})
 	case "update":
@@ -579,22 +578,14 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 		}
 
 		if _, ok := ev["descr"]; ok {
-			ThrowFmt("op=update ticket %d: only deps and prio may be updated", n)
+			ThrowFmt("op=update ticket %d: only deps may be updated", n)
 		}
 
 		if _, ok := ev["deps"]; !ok {
-			if _, ok := ev["prio"]; !ok {
-				ThrowFmt("op=update ticket %d: update requires deps or prio", n)
-			}
+			ThrowFmt("op=update ticket %d: update requires deps", n)
 		}
 
-		if _, ok := ev["deps"]; ok {
-			tickets[idx].Deps = jsonIntArray(ev["deps"])
-		}
-
-		if _, ok := ev["prio"]; ok {
-			tickets[idx].Prio = jsonInt(ev["prio"])
-		}
+		tickets[idx].Deps = jsonIntArray(ev["deps"])
 
 		return tickets
 	case "cancel":

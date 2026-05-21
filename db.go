@@ -33,10 +33,10 @@ func tasksDBPath(orchRoot string) string {
 //
 // Kind-specific fields:
 //
-//	create: type (TicketType), descr (string), prio (int), deps ([]int) — plan
+//	create: type (TicketType), descr (string), deps ([]int) — plan
 //	        tickets start at PhasePlan, code tickets start at PhaseImplement
 //	phase:  phase (Phase) — the new pipeline position; terminal phases close the ticket
-//	update: descr? (string), prio? (int), deps? ([]int) — only present fields change
+//	update: descr? (string), deps? ([]int) — only present fields change
 //	event:  kind (string), detail (string) — appended to ticket.Events (history)
 //	ws:     ws (string) — appended to ticket.Workspaces
 //
@@ -115,7 +115,6 @@ func migrateLegacyFormat(root string) []Ticket {
 			N           int           `json:"n"`
 			State       string        `json:"state"`
 			Descr       string        `json:"descr"`
-			Prio        int           `json:"prio"`
 			Deps        []int         `json:"deps"`
 			Workspaces  []string      `json:"workspaces"`
 			CloseReason string        `json:"close_reason"`
@@ -133,9 +132,9 @@ func migrateLegacyFormat(root string) []Ticket {
 			}
 		}
 
-		emitLegacyTicketAsEvents(out, legacy.N, legacy.Descr, legacy.Prio, legacy.Deps, legacy.Workspaces, legacy.Events, phase)
+		emitLegacyTicketAsEvents(out, legacy.N, legacy.Descr, legacy.Deps, legacy.Workspaces, legacy.Events, phase)
 
-		tickets = applyLogEvent(tickets, LogEvent{"k": "create", "n": legacy.N, "descr": legacy.Descr, "prio": legacy.Prio, "deps": legacy.Deps})
+		tickets = applyLogEvent(tickets, LogEvent{"k": "create", "n": legacy.N, "descr": legacy.Descr, "deps": legacy.Deps})
 		tickets = applyLogEvent(tickets, LogEvent{"k": "phase", "n": legacy.N, "phase": string(phase)})
 	}
 
@@ -146,7 +145,7 @@ func migrateLegacyFormat(root string) []Ticket {
 
 // emitLegacyTicketAsEvents writes a synthetic event sequence reproducing one
 // legacy ticket's state. Used only at one-shot migration time.
-func emitLegacyTicketAsEvents(w io.Writer, n int, descr string, prio int, deps []int, workspaces []string, events []TicketEvent, phase Phase) {
+func emitLegacyTicketAsEvents(w io.Writer, n int, descr string, deps []int, workspaces []string, events []TicketEvent, phase Phase) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	write := func(ev LogEvent) {
@@ -158,7 +157,7 @@ func emitLegacyTicketAsEvents(w io.Writer, n int, descr string, prio int, deps [
 		Throw2(w.Write(append(b, '\n')))
 	}
 
-	write(LogEvent{"k": "create", "n": n, "type": string(TicketTypeCode), "descr": descr, "prio": prio, "deps": deps})
+	write(LogEvent{"k": "create", "n": n, "type": string(TicketTypeCode), "descr": descr, "deps": deps})
 
 	for _, ws := range workspaces {
 		write(LogEvent{"k": "ws", "n": n, "ws": ws})
@@ -206,7 +205,6 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 			Type:  ticketType,
 			Phase: phase,
 			Descr: descr,
-			Prio:  jsonInt(ev["prio"]),
 			Deps:  jsonIntArray(ev["deps"]),
 		})
 	case "phase":
@@ -248,10 +246,6 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 
 		if d, ok := ev["descr"].(string); ok {
 			tickets[idx].Descr = d
-		}
-
-		if _, ok := ev["prio"]; ok {
-			tickets[idx].Prio = jsonInt(ev["prio"])
 		}
 
 		if _, ok := ev["deps"]; ok {
@@ -432,10 +426,6 @@ func ValidateTasks(tickets []Ticket) {
 			if t.Phase == PhasePlanned {
 				ThrowFmt("ticket %d: code ticket cannot be in phase %q", t.N, t.Phase)
 			}
-		}
-
-		if t.Prio < 1 || t.Prio > 10 {
-			ThrowFmt("ticket %d: PRIO %d out of [1,10]", t.N, t.Prio)
 		}
 
 		if strings.TrimSpace(t.Descr) == "" {

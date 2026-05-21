@@ -76,10 +76,6 @@ func renderOpenTickets(root string, tickets []Ticket, w io.Writer) {
 	}
 
 	sort.Slice(open, func(i, j int) bool {
-		if open[i].Prio != open[j].Prio {
-			return open[i].Prio > open[j].Prio
-		}
-
 		return open[i].N < open[j].N
 	})
 
@@ -102,7 +98,6 @@ func renderTicketDump(root string, t Ticket, w io.Writer) {
 	fmt.Fprintf(w, "T-%d\n", t.N)
 	fmt.Fprintf(w, "  type: %s\n", ticketTypeLabel(t.Type))
 	fmt.Fprintf(w, "  phase: %s\n", t.Phase)
-	fmt.Fprintf(w, "  prio: %d\n", t.Prio)
 	fmt.Fprintf(w, "  deps: %v\n", t.Deps)
 	fmt.Fprintf(w, "  descr: %s\n", t.Descr)
 

@@ -103,7 +103,6 @@ type Ticket struct {
 	Type       TicketType    `json:"type,omitempty"`
 	Phase      Phase         `json:"phase"`
 	Descr      string        `json:"descr"`
-	Prio       int           `json:"prio"`
 	Deps       []int         `json:"deps,omitempty"`
 	Workspaces []string      `json:"workspaces,omitempty"`
 	Events     []TicketEvent `json:"events,omitempty"`

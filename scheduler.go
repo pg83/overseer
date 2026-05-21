@@ -189,15 +189,11 @@ func (o *Orchestrator) checkGoals() {
 }
 
 // dispatch routes every STOPPED non-terminal ticket to the pool its phase calls
-// for, in priority order, then batches the replanner. Pure function of the
+// for, in ticket-number order, then batches the replanner. Pure function of the
 // coordinator-owned state; pool sizes (not a shared semaphore) cap concurrency.
 func (o *Orchestrator) dispatch() {
 	ready := append([]Ticket{}, o.Tickets...)
 	sort.Slice(ready, func(a, b int) bool {
-		if ready[a].Prio != ready[b].Prio {
-			return ready[a].Prio > ready[b].Prio
-		}
-
 		return ready[a].N < ready[b].N
 	})
 
@@ -629,11 +625,10 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 		switch op {
 		case "new":
 			descr, _ := ev["descr"].(string)
-			prio := jsonInt(ev["prio"])
 			deps := jsonIntArray(ev["deps"])
 			ticketType := jsonTicketType(ev["ticket_type"])
 
-			o.appendLog(LogEvent{"k": "create", "n": n, "type": string(ticketType), "descr": descr, "prio": prio, "deps": deps})
+			o.appendLog(LogEvent{"k": "create", "n": n, "type": string(ticketType), "descr": descr, "deps": deps})
 			o.recordEvent(n, "TASK_NEW", "by=replanner descr="+descr)
 			uiTicket("🆕", RoleReplanner, n, "NEW", descr)
 		case "update":
@@ -644,12 +639,6 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 				deps := jsonIntArray(ev["deps"])
 				change["deps"] = deps
 				summaryParts = append(summaryParts, fmt.Sprintf("deps=%v", deps))
-			}
-
-			if _, ok := ev["prio"]; ok {
-				prio := jsonInt(ev["prio"])
-				change["prio"] = prio
-				summaryParts = append(summaryParts, fmt.Sprintf("prio=%d", prio))
 			}
 
 			summary := strings.Join(summaryParts, " ")
