@@ -342,6 +342,12 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, t Ticket, wsAbs string) s
 		}
 	}
 
+	if t.Type != TicketTypePlan {
+		if plans := dependencyPlans(o.Root, t.Deps); plans != "" {
+			fmt.Fprintf(&sb, "\nDEPENDENCY_PLANS (from deps with plan.md):\n%s\n", plans)
+		}
+	}
+
 	if data, err := os.ReadFile(ticketLogPath(o.Root, t.N)); err == nil {
 		fmt.Fprintf(&sb, "\nLOG (phase transitions for this ticket, append-only):\n%s\n", string(data))
 	}
@@ -355,6 +361,22 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, t Ticket, wsAbs string) s
 	}
 
 	return sb.String()
+}
+
+func dependencyPlans(orchRoot string, deps []int) string {
+	var sb strings.Builder
+
+	for _, dep := range deps {
+		data, err := os.ReadFile(ticketPlanPath(orchRoot, dep))
+
+		if err != nil {
+			continue
+		}
+
+		fmt.Fprintf(&sb, "T-%d:\n%s\n", dep, string(data))
+	}
+
+	return strings.TrimSpace(sb.String())
 }
 
 // formatReplanTriggers renders the batch of nudges a replanner Job carries — one
@@ -490,10 +512,16 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 		}
 
 		descr, _ := ev["descr"].(string)
+		ticketType := jsonTicketType(ev["ticket_type"])
+
+		if ticketType == "" {
+			ThrowFmt("op=new ticket %d: ticket_type must be one of %q or %q", n, TicketTypePlan, TicketTypeCode)
+		}
 
 		return append(tickets, Ticket{
 			N:     n,
-			Phase: PhasePlan,
+			Type:  ticketType,
+			Phase: newTicketPhase(ticketType),
 			Descr: descr,
 			Prio:  jsonInt(ev["prio"]),
 			Deps:  jsonIntArray(ev["deps"]),
@@ -505,6 +533,10 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 
 		if tickets[idx].Phase.Terminal() {
 			ThrowFmt("op=update ticket %d: terminal (%s)", n, tickets[idx].Phase)
+		}
+
+		if _, ok := ev["ticket_type"]; ok {
+			ThrowFmt("op=update ticket %d: ticket_type is immutable", n)
 		}
 
 		if d, ok := ev["descr"].(string); ok {

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestArbiterWorkspaceFromTaskerNoPlan(t *testing.T) {
 	o := testOrchestratorForArbiter(t, Ticket{N: 12, Phase: PhasePlan, Descr: "t", Prio: 1})
@@ -123,7 +126,7 @@ func TestApplyReplannerOpsCancelThenNewDoesNotTriggerOverseerMidBatch(t *testing
 
 	ops := []map[string]any{
 		{"type": "task", "op": "cancel", "n": 1, "reason": "replace"},
-		{"type": "task", "op": "new", "n": 2, "descr": "new", "prio": 1, "deps": []any{}},
+		{"type": "task", "op": "new", "n": 2, "ticket_type": string(TicketTypeCode), "descr": "new", "prio": 1, "deps": []any{}},
 	}
 
 	o.applyReplannerOps(AgentResult{}, ops)
@@ -162,12 +165,33 @@ func testOrchestratorForArbiter(t *testing.T, tickets ...Ticket) *Orchestrator {
 		branchWS:    map[int]string{},
 		arb:         map[int]arbCtx{},
 		jobs:        map[AgentRole]chan Job{},
-		Bindings:    map[string]HarnessModel{},
+		Bindings:    map[string]HarnessModel{"default": {Harness: testHarness{}}},
 		Events:      make(chan AgentResult, 1),
 		nudges:      nil,
 		replanOwned: nil,
 	}
 }
+
+type testHarness struct{}
+
+func (testHarness) Name() string { return "test" }
+func (testHarness) Bin() string  { return "/bin/true" }
+func (testHarness) Args(model, wsAbs string) []string {
+	return nil
+}
+func (testHarness) JailRWPaths(home string) []string { return nil }
+func (testHarness) DefaultModel(role AgentRole) string {
+	return ""
+}
+func (testHarness) ParseStreamLine(ev map[string]any, finalText *strings.Builder, fault *streamErr, role AgentRole, ticket int) {
+}
+func (testHarness) ClassifyFault(f *agentFault) (bool, string) { return false, "" }
+func (testHarness) SupportsSession() bool                      { return false }
+func (testHarness) SessionArgs(model, wsAbs, sessionID string) []string {
+	return nil
+}
+func (testHarness) ParseSessionID(ev map[string]any) string { return "" }
+func (testHarness) LiveTextChunk(ev map[string]any) string  { return "" }
 
 func assertArbiterJobWorkspace(t *testing.T, o *Orchestrator, ticketN int, want string) {
 	t.Helper()

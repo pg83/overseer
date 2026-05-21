@@ -327,10 +327,27 @@ func (o *Orchestrator) onTasker(res AgentResult) {
 		return
 	}
 
+	t, ok := o.findTicket(n)
+
+	if !ok {
+		ThrowFmt("onTasker: ticket %d not found", n)
+	}
+
 	writePlan(o.Root, n, plan)
 	o.recordEvent(n, "PLAN_WRITTEN", "ws="+res.Workspace)
-	o.setPhase(n, PhaseImplement, "plan written")
 	uiTicket("📝", RoleTasker, n, "PLAN_WRITTEN", "")
+
+	if t.Type == TicketTypePlan {
+		o.setPhase(n, PhasePlanned, "plan written")
+
+		if o.nonTerminalCount() == 0 {
+			o.triggerOverseer(fmt.Sprintf("zero-open after T-%d PLANNED", n))
+		}
+
+		return
+	}
+
+	o.setPhase(n, PhaseImplement, "plan written")
 }
 
 func (o *Orchestrator) onDigger(res AgentResult) {
@@ -480,11 +497,12 @@ func (o *Orchestrator) onReplanner(res AgentResult) {
 	}
 
 	// Release the escalated tickets this pass owned: a re-scope (update) leaves them
-	// in PhaseEscalate, so move those back to PLAN; cancelled ones are already
-	// terminal. Then clear their shadow so dispatch can pick them up.
+	// in PhaseEscalate, so move them back to the entry phase their type uses;
+	// cancelled ones are already terminal. Then clear their shadow so dispatch can
+	// pick them up.
 	for _, n := range o.replanOwned {
 		if t, ok := o.findTicket(n); ok && t.Phase == PhaseEscalate {
-			o.setPhase(n, PhasePlan, "replanner pass — back to planning")
+			o.setPhase(n, resumePhaseAfterReplan(t), "replanner pass — resume by ticket type")
 		}
 
 		o.shadow[n] = ShadowStopped
@@ -558,8 +576,9 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 			descr, _ := ev["descr"].(string)
 			prio := jsonInt(ev["prio"])
 			deps := jsonIntArray(ev["deps"])
+			ticketType := jsonTicketType(ev["ticket_type"])
 
-			o.appendLog(LogEvent{"k": "create", "n": n, "descr": descr, "prio": prio, "deps": deps})
+			o.appendLog(LogEvent{"k": "create", "n": n, "type": string(ticketType), "descr": descr, "prio": prio, "deps": deps})
 			o.recordEvent(n, "TASK_NEW", "by=replanner descr="+descr)
 			uiTicket("🆕", RoleReplanner, n, "NEW", descr)
 		case "update":

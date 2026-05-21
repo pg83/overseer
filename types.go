@@ -9,18 +9,19 @@ import "context"
 type Phase string
 
 const (
-	PhasePlan      Phase = "PLAN"      // needs a tasker (no plan yet)
+	PhasePlan      Phase = "PLAN"      // needs a tasker (plan tickets only)
 	PhaseImplement Phase = "IMPLEMENT" // needs a digger
 	PhaseReview    Phase = "REVIEW"    // needs a reviewer
 	PhaseMerge     Phase = "MERGE"     // needs the merger
 	PhaseArbitrate Phase = "ARBITRATE" // needs the arbiter (a disagreement surfaced)
 	PhaseEscalate  Phase = "ESCALATE"  // needs the replanner (arbiter escalated)
-	PhaseMerged    Phase = "MERGED"    // terminal: work landed in trunk
+	PhasePlanned   Phase = "PLANNED"   // terminal: plan ticket produced its plan
+	PhaseMerged    Phase = "MERGED"    // terminal: code landed in trunk
 	PhaseDiscarded Phase = "DISCARDED" // terminal: dropped
 )
 
 func (p Phase) Terminal() bool {
-	return p == PhaseMerged || p == PhaseDiscarded
+	return p == PhasePlanned || p == PhaseMerged || p == PhaseDiscarded
 }
 
 // roleForPhase maps a non-terminal phase to the agent role that advances it. The
@@ -62,8 +63,36 @@ type TicketEvent struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+type TicketType string
+
+const (
+	TicketTypePlan TicketType = "plan"
+	TicketTypeCode TicketType = "code"
+)
+
+func validTicketType(t TicketType) bool {
+	return t == TicketTypePlan || t == TicketTypeCode
+}
+
+func newTicketPhase(t TicketType) Phase {
+	if t == TicketTypeCode {
+		return PhaseImplement
+	}
+
+	return PhasePlan
+}
+
+func resumePhaseAfterReplan(t Ticket) Phase {
+	if t.Type == TicketTypeCode {
+		return PhaseImplement
+	}
+
+	return PhasePlan
+}
+
 type Ticket struct {
 	N          int           `json:"n"`
+	Type       TicketType    `json:"type,omitempty"`
 	Phase      Phase         `json:"phase"`
 	Descr      string        `json:"descr"`
 	Prio       int           `json:"prio"`

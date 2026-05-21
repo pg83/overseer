@@ -33,7 +33,8 @@ func tasksDBPath(orchRoot string) string {
 //
 // Kind-specific fields:
 //
-//	create: descr (string), prio (int), deps ([]int) — ticket starts at PhasePlan
+//	create: type (TicketType), descr (string), prio (int), deps ([]int) — plan
+//	        tickets start at PhasePlan, code tickets start at PhaseImplement
 //	phase:  phase (Phase) — the new pipeline position; terminal phases close the ticket
 //	update: descr? (string), prio? (int), deps? ([]int) — only present fields change
 //	event:  kind (string), detail (string) — appended to ticket.Events (history)
@@ -197,10 +198,17 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 		}
 
 		descr, _ := ev["descr"].(string)
+		ticketType := jsonTicketType(ev["type"])
+		phase := PhasePlan
+
+		if ticketType != "" {
+			phase = newTicketPhase(ticketType)
+		}
 
 		return append(tickets, Ticket{
 			N:     n,
-			Phase: PhasePlan,
+			Type:  ticketType,
+			Phase: phase,
 			Descr: descr,
 			Prio:  jsonInt(ev["prio"]),
 			Deps:  jsonIntArray(ev["deps"]),
@@ -402,6 +410,23 @@ func ValidateTasks(tickets []Ticket) {
 			ThrowFmt("ticket %d: invalid PHASE %q", t.N, t.Phase)
 		}
 
+		if t.Type != "" && !validTicketType(t.Type) {
+			ThrowFmt("ticket %d: invalid TYPE %q", t.N, t.Type)
+		}
+
+		switch t.Type {
+		case TicketTypePlan:
+			switch t.Phase {
+			case PhasePlan, PhaseArbitrate, PhaseEscalate, PhasePlanned, PhaseDiscarded:
+			default:
+				ThrowFmt("ticket %d: plan ticket cannot be in phase %q", t.N, t.Phase)
+			}
+		case TicketTypeCode:
+			if t.Phase == PhasePlanned {
+				ThrowFmt("ticket %d: code ticket cannot be in phase %q", t.N, t.Phase)
+			}
+		}
+
 		if t.Prio < 1 || t.Prio > 10 {
 			ThrowFmt("ticket %d: PRIO %d out of [1,10]", t.N, t.Prio)
 		}
@@ -451,11 +476,22 @@ func ValidateTasks(tickets []Ticket) {
 
 func validPhase(p Phase) bool {
 	switch p {
-	case PhasePlan, PhaseImplement, PhaseReview, PhaseMerge, PhaseArbitrate, PhaseEscalate, PhaseMerged, PhaseDiscarded:
+	case PhasePlan, PhaseImplement, PhaseReview, PhaseMerge, PhaseArbitrate, PhaseEscalate, PhasePlanned, PhaseMerged, PhaseDiscarded:
 		return true
 	}
 
 	return false
+}
+
+func jsonTicketType(v any) TicketType {
+	s, _ := v.(string)
+	t := TicketType(strings.TrimSpace(s))
+
+	if validTicketType(t) {
+		return t
+	}
+
+	return ""
 }
 
 func checkNoCycles(tickets []Ticket) {
