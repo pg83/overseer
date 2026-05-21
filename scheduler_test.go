@@ -225,7 +225,48 @@ func TestApplyLogEventUpdatePreservesDepsFromNativeIntSlice(t *testing.T) {
 	}
 }
 
-func TestApplyTaskOpUpdateRejected(t *testing.T) {
+func TestApplyTaskOpUpdateDepsAllowed(t *testing.T) {
+	got := applyTaskOp([]Ticket{{N: 1, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "x", Prio: 1}}, map[string]any{
+		"op":   "update",
+		"n":    1,
+		"deps": []any{3, 5},
+	})
+
+	if len(got[0].Deps) != 2 || got[0].Deps[0] != 3 || got[0].Deps[1] != 5 {
+		t.Fatalf("deps = %#v, want []int{3,5}", got[0].Deps)
+	}
+}
+
+func TestApplyTaskOpUpdatePrioAllowed(t *testing.T) {
+	got := applyTaskOp([]Ticket{{N: 1, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "x", Prio: 1}}, map[string]any{
+		"op":   "update",
+		"n":    1,
+		"prio": 7,
+	})
+
+	if got[0].Prio != 7 {
+		t.Fatalf("prio = %d, want 7", got[0].Prio)
+	}
+}
+
+func TestApplyTaskOpUpdateDepsAndPrioAllowed(t *testing.T) {
+	got := applyTaskOp([]Ticket{{N: 1, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "x", Prio: 1}}, map[string]any{
+		"op":   "update",
+		"n":    1,
+		"prio": 9,
+		"deps": []any{2},
+	})
+
+	if got[0].Prio != 9 {
+		t.Fatalf("prio = %d, want 9", got[0].Prio)
+	}
+
+	if len(got[0].Deps) != 1 || got[0].Deps[0] != 2 {
+		t.Fatalf("deps = %#v, want []int{2}", got[0].Deps)
+	}
+}
+
+func TestApplyTaskOpUpdateNonDepsRejected(t *testing.T) {
 	exc := Try(func() {
 		_ = applyTaskOp([]Ticket{{N: 1, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "x", Prio: 1}}, map[string]any{
 			"op":    "update",
@@ -236,6 +277,43 @@ func TestApplyTaskOpUpdateRejected(t *testing.T) {
 
 	if exc == nil {
 		t.Fatalf("expected op=update to be rejected")
+	}
+}
+
+func TestApplyTaskOpReplaceRewritesOpenTicketDeps(t *testing.T) {
+	got := applyTaskOp([]Ticket{
+		{N: 1, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "a", Prio: 1, Deps: []int{3, 7}},
+		{N: 2, Type: TicketTypeCode, Phase: PhaseMerged, Descr: "b", Prio: 1, Deps: []int{3, 8}},
+		{N: 3, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "c", Prio: 1},
+		{N: 9, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "d", Prio: 1},
+	}, map[string]any{
+		"op":   "replace",
+		"from": 3,
+		"to":   9,
+	})
+
+	if len(got[0].Deps) != 2 || got[0].Deps[0] != 9 || got[0].Deps[1] != 7 {
+		t.Fatalf("open deps = %#v, want []int{9,7}", got[0].Deps)
+	}
+
+	if len(got[1].Deps) != 2 || got[1].Deps[0] != 3 || got[1].Deps[1] != 8 {
+		t.Fatalf("terminal deps should stay unchanged, got %#v", got[1].Deps)
+	}
+}
+
+func TestApplyTaskOpReplaceDedupesDeps(t *testing.T) {
+	got := applyTaskOp([]Ticket{
+		{N: 1, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "a", Prio: 1, Deps: []int{3, 9}},
+		{N: 3, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "from", Prio: 1},
+		{N: 9, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "to", Prio: 1},
+	}, map[string]any{
+		"op":   "replace",
+		"from": 3,
+		"to":   9,
+	})
+
+	if len(got[0].Deps) != 1 || got[0].Deps[0] != 9 {
+		t.Fatalf("deps = %#v, want []int{9}", got[0].Deps)
 	}
 }
 

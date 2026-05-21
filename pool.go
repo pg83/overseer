@@ -379,6 +379,33 @@ func dependencyPlans(orchRoot string, deps []int) string {
 	return strings.TrimSpace(sb.String())
 }
 
+func replaceDepRefs(deps []int, from, to int) ([]int, bool) {
+	if from == to {
+		return deps, false
+	}
+
+	changed := false
+	seen := map[int]bool{}
+	var out []int
+
+	for _, dep := range deps {
+		if dep == from {
+			dep = to
+			changed = true
+		}
+
+		if seen[dep] {
+			changed = true
+			continue
+		}
+
+		seen[dep] = true
+		out = append(out, dep)
+	}
+
+	return out, changed
+}
+
 // formatReplanTriggers renders the batch of nudges a replanner Job carries — one
 // numbered line per trigger (source role, ticket, reason).
 func formatReplanTriggers(reasons []ReplanReason) string {
@@ -483,10 +510,14 @@ func hasJSONInUnparsed(events []map[string]any) bool {
 // cumulative result before committing.
 func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 	op, _ := ev["op"].(string)
-	n := jsonInt(ev["n"])
+	n := 0
 
-	if n <= 0 {
-		ThrowFmt("task op %q: missing or invalid n", op)
+	if op != "replace" {
+		n = jsonInt(ev["n"])
+
+		if n <= 0 {
+			ThrowFmt("task op %q: missing or invalid n", op)
+		}
 	}
 
 	idx := -1
@@ -526,6 +557,38 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 			Prio:  jsonInt(ev["prio"]),
 			Deps:  jsonIntArray(ev["deps"]),
 		})
+	case "update":
+		if idx < 0 {
+			ThrowFmt("op=update ticket %d: not found", n)
+		}
+
+		if tickets[idx].Phase.Terminal() {
+			ThrowFmt("op=update ticket %d: terminal (%s)", n, tickets[idx].Phase)
+		}
+
+		if _, ok := ev["ticket_type"]; ok {
+			ThrowFmt("op=update ticket %d: ticket_type is immutable", n)
+		}
+
+		if _, ok := ev["descr"]; ok {
+			ThrowFmt("op=update ticket %d: only deps and prio may be updated", n)
+		}
+
+		if _, ok := ev["deps"]; !ok {
+			if _, ok := ev["prio"]; !ok {
+				ThrowFmt("op=update ticket %d: update requires deps or prio", n)
+			}
+		}
+
+		if _, ok := ev["deps"]; ok {
+			tickets[idx].Deps = jsonIntArray(ev["deps"])
+		}
+
+		if _, ok := ev["prio"]; ok {
+			tickets[idx].Prio = jsonInt(ev["prio"])
+		}
+
+		return tickets
 	case "cancel":
 		if idx < 0 {
 			ThrowFmt("op=cancel ticket %d: not found", n)
@@ -538,9 +601,44 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 		tickets[idx].Phase = PhaseDiscarded
 
 		return tickets
+	case "replace":
+		from := jsonInt(ev["from"])
+		to := jsonInt(ev["to"])
+
+		if from <= 0 || to <= 0 {
+			ThrowFmt("op=replace: from/to must be valid ticket numbers")
+		}
+
+		known := map[int]bool{}
+
+		for _, t := range tickets {
+			known[t.N] = true
+		}
+
+		if !known[from] {
+			ThrowFmt("op=replace: from ticket %d not found", from)
+		}
+
+		if !known[to] {
+			ThrowFmt("op=replace: to ticket %d not found", to)
+		}
+
+		for i := range tickets {
+			if tickets[i].Phase.Terminal() {
+				continue
+			}
+
+			deps, changed := replaceDepRefs(tickets[i].Deps, from, to)
+
+			if changed {
+				tickets[i].Deps = deps
+			}
+		}
+
+		return tickets
 	}
 
-	ThrowFmt("unknown task op %q (expected new/cancel)", op)
+	ThrowFmt("unknown task op %q (expected new/update/cancel/replace)", op)
 
 	return tickets
 }

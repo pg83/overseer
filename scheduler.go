@@ -581,6 +581,26 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 			o.appendLog(LogEvent{"k": "create", "n": n, "type": string(ticketType), "descr": descr, "prio": prio, "deps": deps})
 			o.recordEvent(n, "TASK_NEW", "by=replanner descr="+descr)
 			uiTicket("🆕", RoleReplanner, n, "NEW", descr)
+		case "update":
+			change := LogEvent{"k": "update", "n": n}
+			summaryParts := []string{}
+
+			if _, ok := ev["deps"]; ok {
+				deps := jsonIntArray(ev["deps"])
+				change["deps"] = deps
+				summaryParts = append(summaryParts, fmt.Sprintf("deps=%v", deps))
+			}
+
+			if _, ok := ev["prio"]; ok {
+				prio := jsonInt(ev["prio"])
+				change["prio"] = prio
+				summaryParts = append(summaryParts, fmt.Sprintf("prio=%d", prio))
+			}
+
+			summary := strings.Join(summaryParts, " ")
+			o.appendLog(change)
+			o.recordEvent(n, "TASK_UPDATE", "by=replanner "+summary)
+			uiTicket("✏️", RoleReplanner, n, "UPDATE", summary)
 		case "cancel":
 			reason, _ := ev["reason"].(string)
 			o.setPhase(n, PhaseDiscarded, "by=replanner reason="+reason)
@@ -591,6 +611,25 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 				Reason: fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, "DISCARDED"),
 			})
 			canceledAny = true
+		case "replace":
+			from := jsonInt(ev["from"])
+			to := jsonInt(ev["to"])
+
+			for _, t := range o.Tickets {
+				if t.Phase.Terminal() {
+					continue
+				}
+
+				deps, changed := replaceDepRefs(t.Deps, from, to)
+
+				if !changed {
+					continue
+				}
+
+				o.appendLog(LogEvent{"k": "update", "n": t.N, "deps": deps})
+				o.recordEvent(t.N, "TASK_UPDATE", fmt.Sprintf("by=replanner replace=%d->%d deps=%v", from, to, deps))
+				uiTicket("✏️", RoleReplanner, t.N, "UPDATE", fmt.Sprintf("replace %d->%d deps=%v", from, to, deps))
+			}
 		}
 	}
 
