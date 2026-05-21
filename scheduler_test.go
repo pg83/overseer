@@ -96,19 +96,76 @@ func TestArbiterFallsBackToFreshWorkspaceWhenNoWorkspaceKnown(t *testing.T) {
 	}
 }
 
-func testOrchestratorForArbiter(t *testing.T, ticket Ticket) *Orchestrator {
+func TestAfterTerminalTriggersOverseerOnlyAtZeroOpen(t *testing.T) {
+	o := testOrchestratorForArbiter(t,
+		Ticket{N: 1, Phase: PhaseMerged, Descr: "done", Prio: 1},
+		Ticket{N: 2, Phase: PhasePlan, Descr: "open", Prio: 1},
+	)
+	o.jobs = map[AgentRole]chan Job{RoleOverseer: make(chan Job, 1)}
+
+	o.afterTerminal(1, "MERGED")
+
+	if o.overseerBusy {
+		t.Fatalf("overseer should not start while an open ticket remains")
+	}
+
+	o.Tickets[1].Phase = PhaseMerged
+	o.afterTerminal(2, "MERGED")
+
+	if !o.overseerBusy {
+		t.Fatalf("overseer should start when open tickets reach zero")
+	}
+}
+
+func TestApplyReplannerOpsCancelThenNewDoesNotTriggerOverseerMidBatch(t *testing.T) {
+	o := testOrchestratorForArbiter(t, Ticket{N: 1, Phase: PhasePlan, Descr: "old", Prio: 1})
+	o.jobs = map[AgentRole]chan Job{RoleOverseer: make(chan Job, 1)}
+
+	ops := []map[string]any{
+		{"type": "task", "op": "cancel", "n": 1, "reason": "replace"},
+		{"type": "task", "op": "new", "n": 2, "descr": "new", "prio": 1, "deps": []any{}},
+	}
+
+	o.applyReplannerOps(AgentResult{}, ops)
+
+	if o.overseerBusy {
+		t.Fatalf("overseer should not start when replanner batch leaves open tickets")
+	}
+}
+
+func TestApplyReplannerOpsCancelLastTicketTriggersOverseer(t *testing.T) {
+	o := testOrchestratorForArbiter(t, Ticket{N: 1, Phase: PhasePlan, Descr: "old", Prio: 1})
+	o.jobs = map[AgentRole]chan Job{RoleOverseer: make(chan Job, 1)}
+
+	ops := []map[string]any{
+		{"type": "task", "op": "cancel", "n": 1, "reason": "done"},
+	}
+
+	o.applyReplannerOps(AgentResult{}, ops)
+
+	if !o.overseerBusy {
+		t.Fatalf("overseer should start when replanner batch leaves zero open tickets")
+	}
+}
+
+func testOrchestratorForArbiter(t *testing.T, tickets ...Ticket) *Orchestrator {
 	t.Helper()
 
 	root := t.TempDir()
 	trunk := t.TempDir()
 
 	return &Orchestrator{
-		Root:     root,
-		Trunk:    trunk,
-		Tickets:  []Ticket{ticket},
-		shadow:   map[int]Shadow{},
-		branchWS: map[int]string{},
-		arb:      map[int]arbCtx{},
+		Root:        root,
+		Trunk:       trunk,
+		Tickets:     tickets,
+		shadow:      map[int]Shadow{},
+		branchWS:    map[int]string{},
+		arb:         map[int]arbCtx{},
+		jobs:        map[AgentRole]chan Job{},
+		Bindings:    map[string]HarnessModel{},
+		Events:      make(chan AgentResult, 1),
+		nudges:      nil,
+		replanOwned: nil,
 	}
 }
 

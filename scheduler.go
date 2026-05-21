@@ -64,7 +64,11 @@ func (o *Orchestrator) Run() {
 	defer close(o.Stopped)
 
 	o.startPools()
-	o.triggerOverseer("boot: re-evaluate goals and seed plan if needed")
+
+	if o.nonTerminalCount() == 0 {
+		o.triggerOverseer("boot: zero open tickets — evaluate goals and seed plan if needed")
+	}
+
 	o.dispatch()
 
 	tick := time.NewTicker(2 * time.Second)
@@ -256,7 +260,7 @@ func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
 }
 
 // triggerOverseer dispatches a (serial) overseer evaluation if one isn't already in
-// flight. Boot + every drop to a low open-count.
+// flight.
 func (o *Orchestrator) triggerOverseer(reason string) {
 	if o.overseerBusy {
 		return
@@ -506,15 +510,15 @@ func (o *Orchestrator) onOverseer(res AgentResult) {
 }
 
 // afterTerminal fires the post-terminal bookkeeping: a fallout replan nudge plus an
-// overseer re-evaluation when the open queue runs low.
+// overseer re-evaluation when the open queue reaches zero.
 func (o *Orchestrator) afterTerminal(n int, reason string) {
 	o.nudges = append(o.nudges, ReplanReason{
 		Source: RoleMerger, Ticket: n,
 		Reason: fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, reason),
 	})
 
-	if o.nonTerminalCount() <= 2 {
-		o.triggerOverseer(fmt.Sprintf("low-open after T-%d %s", n, reason))
+	if o.nonTerminalCount() == 0 {
+		o.triggerOverseer(fmt.Sprintf("zero-open after T-%d %s", n, reason))
 	}
 }
 
@@ -542,6 +546,8 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 
 		return
 	}
+
+	canceledAny := false
 
 	for _, ev := range ops {
 		op, _ := ev["op"].(string)
@@ -580,8 +586,16 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 			o.setPhase(n, PhaseDiscarded, "by=replanner reason="+reason)
 			o.recordEvent(n, "DISCARDED", "by=replanner reason="+reason)
 			uiTicket("🛑", RoleReplanner, n, "DISCARDED", reason)
-			o.afterTerminal(n, "DISCARDED")
+			o.nudges = append(o.nudges, ReplanReason{
+				Source: RoleMerger, Ticket: n,
+				Reason: fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, "DISCARDED"),
+			})
+			canceledAny = true
 		}
+	}
+
+	if canceledAny && o.nonTerminalCount() == 0 {
+		o.triggerOverseer("zero-open after replanner batch")
 	}
 }
 

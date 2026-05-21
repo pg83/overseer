@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -54,21 +53,45 @@ func messagesLogPath(orchRoot string) string {
 	return filepath.Join(orchRoot, "messages.txt")
 }
 
-var messagesLogMu sync.Mutex
+type messageLogEntry struct {
+	root string
+	line string
+}
 
 // appendMessage appends one MESSAGE line to <root>/messages.txt — the team's shared chat
 // across all roles and tickets. Format: "<ts>\t<role>\t<ticket>\t<msg>\n", no truncation.
-// Mutex-protected so concurrent agents don't interleave large messages.
+// A single writer goroutine serializes appends so concurrent agents don't interleave.
 func appendMessage(orchRoot string, role AgentRole, ticket int, msg string) {
-	messagesLogMu.Lock()
-	defer messagesLogMu.Unlock()
-
-	f := Throw2(os.OpenFile(messagesLogPath(orchRoot), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644))
-	defer f.Close()
-
 	line := fmt.Sprintf("%s\t%s\tT-%d\t%s\n",
 		time.Now().UTC().Format(time.RFC3339Nano), role, ticket, msg)
-	Throw2(f.WriteString(line))
+
+	messagesLogCh <- messageLogEntry{root: orchRoot, line: line}
+}
+
+var messagesLogCh = make(chan messageLogEntry, 1000)
+
+func init() {
+	go messagesLogWriter()
+}
+
+func messagesLogWriter() {
+	for entry := range messagesLogCh {
+		f, err := os.OpenFile(messagesLogPath(entry.root), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "messages log open: %v\n", err)
+
+			continue
+		}
+
+		if _, err := f.WriteString(entry.line); err != nil {
+			fmt.Fprintf(os.Stderr, "messages log write: %v\n", err)
+		}
+
+		if err := f.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "messages log close: %v\n", err)
+		}
+	}
 }
 
 // ticketMessages reads the team chat and returns the lines that mention the
