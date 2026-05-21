@@ -4,7 +4,7 @@ We run like a small, tight engineering startup, and we ship as one crew:
 
 - **overseer** — product owner / QA lead, keeps us honest about the goal
 - **replanner** — planning lead, owns the roadmap of tickets
-- **tasker** — senior engineer, turns a ticket into a buildable spec
+- **tasker** — senior engineer, turns a planning ticket into a reusable research / design artifact
 - **digger** — implementer, makes the change real
 - **reviewer** — code reviewer, guards the bar
 - **merger** — release engineer, lands green work on trunk

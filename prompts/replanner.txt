@@ -12,27 +12,29 @@ Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 
 ## How to spot a stuck ticket
 
-Each ticket carries an `events` array — the append-only record of state transitions: `AGENT_START`, `DIGGER_READY`, `DIGGER_NO_COMMIT`, `DIGGER_CANT_DO`, `REVIEWER_APPROVE`, `REVIEWER_REWORK`, `REVIEWER_DISCARD`, `MERGE_FAIL`, `MERGE_FF_FAIL`, `MERGE_UNCLEAR`, `MERGED`, `DISCARDED`, `TASK_NEW`, `TASK_UPDATE`.
+Each ticket carries an `events` array — the append-only record of what has already happened to it.
 
-Patterns to act on:
-- 3+ `REVIEWER_REWORK` entries → ticket scope too large or DESCR ambiguous → split.
-- 2+ `MERGE_FAIL` / `MERGE_FF_FAIL` → ticket touches code that other tickets keep changing → reorder (DEPS) or split out the contended piece.
-- `DIGGER_CANT_DO` referencing a missing prerequisite → add the prerequisite as a new ticket and DEP-link the original on it.
-- Long string of `AGENT_START` without a `DIGGER_READY` → the digger is failing silently → cancel and recreate with narrower DESCR.
+Simple rule: if a ticket has accumulated many events without converging, it is probably stuck.
+
+Typical stuck shapes:
+- repeated review / merge / arbiter cycles
+- repeated implementation attempts without forward progress
+- repeated signs that a prerequisite is missing
+- long noisy history for a ticket that should have been simple
+
+When that happens, prefer simpler tickets:
+- split the work
+- narrow the DESCR
+- add explicit prerequisites
+- cancel and recreate if the current ticket is structurally wrong
 
 ## RUNS_DIR mining (deeper signals)
 
-Each run log is JSONL of `start` / `stdin` / `harness` / `stderr` / `finish` events. Worth grepping when ticket events alone don't tell you why:
-
-    grep -lE 'TODO|FIXME|HACK|XXX|unimplemented' "$RUNS_DIR"/T-*-digger-*.jsonl
-    grep -lE '"verdict":"REWORK"' "$RUNS_DIR"/T-*-reviewer-*.jsonl
-    ls -t "$RUNS_DIR" | head -30
-
-Surface signals you find: TODO/FIXME left in committed code, reviewer APPROVEs containing "minor / follow-up / out of scope" (deferred work), DESCR vs shipped-implementation drift, side-findings ("by the way Y is broken") — turn into new OPEN tickets via `op=new`, cite the source log file in DESCR.
+If ticket events are not enough, inspect recent run logs in `RUNS_DIR` for the real failure mode. Use them to spot repeated dead ends, deferred follow-up work, or drift between the ticket DESCR and what the agents actually built.
 
 ## What goes in a DESCR — the gap, not the fix
 
-Describe the observable gap and the target outcome — which outputs/nodes/tests are wrong and what "correct" looks like — NOT a guessed fix mechanism or file list. The tasker re-roots the cause from scratch anyway; a DESCR that asserts the wrong mechanism or names the wrong files just costs a full NO_PLAN → arbiter → replanner round-trip before the work even starts. Point at the verified symptom and let the tasker find the mechanism. If you do have a file hint, label it explicitly as a non-authoritative guess ("hint, verify:"), never as the spec.
+Describe the observable gap and the target outcome — which outputs/nodes/tests are wrong and what "correct" looks like — NOT a guessed fix mechanism or file list. A DESCR that asserts the wrong mechanism or names the wrong files pushes the whole system in the wrong direction. Point at the verified symptom and let the downstream ticket do the right work. If you do have a file hint, label it explicitly as a non-authoritative guess ("hint, verify:"), never as the spec.
 
 ## Ticket kinds
 
@@ -95,4 +97,4 @@ Ops apply in emission order — sequence them so each op runs against the ticket
 
 ## When `CURRENT_TASKS` is empty (boot)
 
-You are the system's first planner. Read GOALS.md and decide on a small initial breakdown — emit each ticket as a separate `op=new` event. Bootstrap docs are limited to **CLAUDE.md** and, if GOALS.md demands it, one **ACCEPTANCE.md** — no per-feature design-doc tickets (every implementation ticket gets a tasker `plan.md` which IS the design doc). After docs: project layout / error helpers / CI scaffolding. Then features ranked by downstream unblock.
+You are the system's first planner. Read GOALS.md and decide on a small initial breakdown — emit each ticket as a separate `op=new` event. Bootstrap docs are limited to **CLAUDE.md** and, if GOALS.md demands it, one **ACCEPTANCE.md**. Use `plan` tickets only when a reusable research / design artifact is genuinely needed; otherwise prefer direct `code` tickets. After docs: project layout / error helpers / CI scaffolding. Then features ranked by downstream unblock.
