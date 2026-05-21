@@ -51,7 +51,7 @@ Work through three phases — but keep phases one and two as your own private re
 
 2. **Critique** (private reasoning). As a skeptical reviewer, tear your own draft apart, addressing every one of:
    - Did any cancel orphan a dep on an OPEN ticket? Did you handle every dependent in the same batch?
-   - Are op orderings sane (update before cancel; new before update on same N)?
+   - Are op orderings sane (for example, canceling a prerequisite only after you have added any replacement tickets that dependents should point at)?
    - Is each new ticket scoped tight enough that a single digger pass can finish it?
    - Are there alternative approaches you didn't consider — splitting differently, just updating descr instead of cancelling, etc.?
    - Will GOALS.md actually advance from this batch? Or is this just rearranging?
@@ -66,7 +66,6 @@ Emit a `task` event for every change you decide on. See common.txt for the event
 Three ops, one event per change:
 
     {"type": "task", "op": "new",    "n": <int>, "ticket_type": "plan"|"code", "descr": "<≤200ch single line>", "prio": 1..10, "deps": [<n>,...]}
-    {"type": "task", "op": "update", "n": <int>, "descr": "...", "prio": ..., "deps": [...]}
     {"type": "task", "op": "cancel", "n": <int>, "reason": "<short why>"}
 
 Concrete example — say T-12 is stuck at "validate node count" because the underlying graph generator only produces 50 nodes when 3730 are expected. You diagnose: the real fix is splitting compilation into per-source nodes. You'd literally type these lines as part of your reply:
@@ -80,19 +79,18 @@ If the triggers turned out to need no DB change (already handled, or no-op), emi
 Semantics:
 
 - `new` — create a new OPEN ticket. Use the next unused N (`max(prior_n) + 1`, +2, ...). `ticket_type`, `descr`, `prio`, and `deps` are required.
-- `update` — modify an existing OPEN ticket. `descr` / `prio` / `deps` are optional — only the fields you include change. Operate only on OPEN tickets; CLOSED history is immutable.
 - `cancel` — close an OPEN ticket as DISCARDED. Use this to drop a ticket (replaced by smaller ones, no longer needed, etc.).
 
-  Don't cancel a ticket whose work is already landing. Check its events first: a `DIGGER_READY` or `REVIEWER_APPROVE` means a finished, possibly-approved change is in flight — cancelling now closes the ticket, the in-flight result arrives to a CLOSED ticket and is dropped as stale, and that done work is thrown away (you'd then have to recreate it). Prefer `update` to re-scope in place, or let it merge and act after, unless the work is genuinely wrong.
+  Don't cancel a ticket whose work is already landing. Check its events first: a `DIGGER_READY` or `REVIEWER_APPROVE` means a finished, possibly-approved change is in flight — cancelling now closes the ticket, the in-flight result arrives to a CLOSED ticket and is dropped as stale, and that done work is thrown away (you'd then have to recreate it). Prefer replacing it with new tickets or letting it merge and acting after, unless the work is genuinely wrong.
 
-  When you cancel T-5, in the same batch also handle every OPEN ticket that has 5 in its deps: either `update` it to remove 5, or `cancel` it too. No OPEN ticket may depend on a DISCARDED one.
+  When you cancel T-5, in the same batch also handle every OPEN ticket that has 5 in its deps: either cancel that dependent too, or create replacement tickets and point future work at those instead. No OPEN ticket may depend on a DISCARDED one.
 
-Ops apply in emission order — sequence them so each op runs against the ticket's expected state at that point (e.g. `update` a ticket BEFORE `cancel`'ing it, not after).
+Ops apply in emission order — sequence them so each op runs against the ticket's expected state at that point.
 
 ## Schema invariants
 
 - Use a fresh N for `new` (never one that already exists, OPEN or CLOSED).
-- `update` / `cancel` only on OPEN tickets.
+- `cancel` only on OPEN tickets.
 - DEPS reference existing N, no cycles, no self-deps.
 
 ## When `CURRENT_TASKS` is empty (boot)

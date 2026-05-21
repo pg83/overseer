@@ -526,32 +526,6 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 			Prio:  jsonInt(ev["prio"]),
 			Deps:  jsonIntArray(ev["deps"]),
 		})
-	case "update":
-		if idx < 0 {
-			ThrowFmt("op=update ticket %d: not found", n)
-		}
-
-		if tickets[idx].Phase.Terminal() {
-			ThrowFmt("op=update ticket %d: terminal (%s)", n, tickets[idx].Phase)
-		}
-
-		if _, ok := ev["ticket_type"]; ok {
-			ThrowFmt("op=update ticket %d: ticket_type is immutable", n)
-		}
-
-		if d, ok := ev["descr"].(string); ok {
-			tickets[idx].Descr = d
-		}
-
-		if _, ok := ev["prio"]; ok {
-			tickets[idx].Prio = jsonInt(ev["prio"])
-		}
-
-		if _, ok := ev["deps"]; ok {
-			tickets[idx].Deps = jsonIntArray(ev["deps"])
-		}
-
-		return tickets
 	case "cancel":
 		if idx < 0 {
 			ThrowFmt("op=cancel ticket %d: not found", n)
@@ -566,7 +540,7 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 		return tickets
 	}
 
-	ThrowFmt("unknown task op %q (expected new/update/cancel)", op)
+	ThrowFmt("unknown task op %q (expected new/cancel)", op)
 
 	return tickets
 }

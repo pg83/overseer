@@ -225,6 +225,20 @@ func TestApplyLogEventUpdatePreservesDepsFromNativeIntSlice(t *testing.T) {
 	}
 }
 
+func TestApplyTaskOpUpdateRejected(t *testing.T) {
+	exc := Try(func() {
+		_ = applyTaskOp([]Ticket{{N: 1, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "x", Prio: 1}}, map[string]any{
+			"op":    "update",
+			"n":     1,
+			"descr": "y",
+		})
+	})
+
+	if exc == nil {
+		t.Fatalf("expected op=update to be rejected")
+	}
+}
+
 func testOrchestratorForArbiter(t *testing.T, tickets ...Ticket) *Orchestrator {
 	t.Helper()
 

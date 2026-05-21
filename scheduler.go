@@ -581,25 +581,6 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 			o.appendLog(LogEvent{"k": "create", "n": n, "type": string(ticketType), "descr": descr, "prio": prio, "deps": deps})
 			o.recordEvent(n, "TASK_NEW", "by=replanner descr="+descr)
 			uiTicket("🆕", RoleReplanner, n, "NEW", descr)
-		case "update":
-			change := LogEvent{"k": "update", "n": n}
-
-			if d, ok := ev["descr"].(string); ok {
-				change["descr"] = d
-			}
-
-			if _, ok := ev["prio"]; ok {
-				change["prio"] = jsonInt(ev["prio"])
-			}
-
-			if _, ok := ev["deps"]; ok {
-				change["deps"] = jsonIntArray(ev["deps"])
-			}
-
-			summary := summarizeTaskUpdate(ev)
-			o.appendLog(change)
-			o.recordEvent(n, "TASK_UPDATE", "by=replanner "+summary)
-			uiTicket("✏️", RoleReplanner, n, "UPDATE", summary)
 		case "cancel":
 			reason, _ := ev["reason"].(string)
 			o.setPhase(n, PhaseDiscarded, "by=replanner reason="+reason)
@@ -616,28 +597,6 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 	if canceledAny && o.nonTerminalCount() == 0 {
 		o.triggerOverseer("zero-open after replanner batch")
 	}
-}
-
-func summarizeTaskUpdate(ev map[string]any) string {
-	var parts []string
-
-	if d, ok := ev["descr"].(string); ok {
-		parts = append(parts, "descr="+d)
-	}
-
-	if _, ok := ev["prio"]; ok {
-		parts = append(parts, fmt.Sprintf("prio=%d", jsonInt(ev["prio"])))
-	}
-
-	if _, ok := ev["deps"]; ok {
-		parts = append(parts, fmt.Sprintf("deps=%v", jsonIntArray(ev["deps"])))
-	}
-
-	if len(parts) == 0 {
-		return "(no fields)"
-	}
-
-	return strings.Join(parts, " ")
 }
 
 func (o *Orchestrator) writeReport() {

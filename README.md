@@ -76,7 +76,7 @@ The mental model is a stripped-down engineering team:
 | Agent role | Human analogue | What it does |
 |------------|----------------|--------------|
 | **overseer** | product owner / QA lead | Reads `GOALS.md`, decides whether the project is done. When done → emits `GOALS_ACHIEVED`, run terminates and writes `REPORT.md`. Otherwise nudges the replanner. |
-| **replanner** | planning lead | Owns the ticket database. Reads goals + ticket history + recent agent runs, emits `task` operations (`new` / `update` / `cancel`) that the orchestrator validates and applies. Invoked on every `replan` nudge from any role. |
+| **replanner** | planning lead | Owns the ticket database. Reads goals + ticket history + recent agent runs, emits `task` operations (`new` / `cancel`) that the orchestrator validates and applies. Invoked on every `replan` nudge from any role. |
 | **tasker** | senior engineer writing specs | Gets a ticket in phase `PLAN`, researches the codebase, writes `plan.md` for it — the work order for the digger. |
 | **digger** | implementer | Reads `plan.md`, makes the changes in a per-ticket workspace, squashes + rebases onto trunk. Reports `READY` (work done) or `CANT_DO` (can't, here's why). |
 | **reviewer** | code reviewer | Independently audits the digger's branch. Reports `APPROVE`, `REWORK` (needs revision), or `DISCARD` (kill the ticket). |
@@ -108,7 +108,7 @@ The loop is **continuous and parallel**, not sequential. Multiple tickets are in
                                                ▼
                                             replanner
                                        (rewrites ticket DB
-                                        with new/update/cancel
+                                        with new/cancel
                                         operations)
                                                │
                                                ▼
@@ -204,7 +204,7 @@ Every agent's stdout is parsed as a JSON-line event stream by `parseEvents` in `
 {"type": "replan", "reason": "why the task DB needs adjustment"}
 ```
 
-Role-specific events on top: tasker emits `{"type":"plan","path":"..."}`; replanner emits `{"type":"task","op":"new","ticket":{...}}` / `op:update` / `op:cancel`.
+Role-specific events on top: tasker emits `{"type":"plan","path":"..."}`; replanner emits `{"type":"task","op":"new",...}` / `{"type":"task","op":"cancel",...}`.
 
 The **last** `verdict` event is authoritative — agents sometimes emit multiple. `message` events post to `messages.txt` and surface in the UI. `replan` events become coordinator nudges regardless of which role they came from.
 
