@@ -56,6 +56,9 @@ func runMain(argv []string) {
 	overseerHarness := fs.String("overseer-harness", "", "harness:model for overseer (overrides --think-harness)")
 	arbiterHarness := fs.String("arbiter-harness", "", "harness:model for arbiter (overrides --think-harness)")
 
+	overseerDirective := fs.String("overseer", "", "operator directive: force one overseer pass at boot, injected as a mandatory instruction")
+	replanDirective := fs.String("replan", "", "operator directive: force one replanner pass at boot, injected as a mandatory instruction")
+
 	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
 	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
 
@@ -115,6 +118,8 @@ func runMain(argv []string) {
 		*root, *trunk, formatBindings(bindings), jailDescr))
 
 	o := NewOrchestrator(*root, *trunk, bindings, jail, extraRW)
+	o.bootOverseer = strings.TrimSpace(*overseerDirective)
+	o.bootReplan = strings.TrimSpace(*replanDirective)
 
 	go func() {
 		sigs := make(chan os.Signal, 1)

@@ -124,6 +124,11 @@ const (
 	// MERGE_FAIL), the arbiter decides: keep iterating in the cycle, or
 	// escalate to the full replanner.
 	RoleArbiter AgentRole = "arbiter"
+
+	// Operator is a synthetic source for nudges the human injects via the
+	// --overseer / --replan boot flags. Never dispatched (it has no pool); used
+	// only to label the directive in the replanner's trigger list.
+	RoleOperator AgentRole = "operator"
 )
 
 type AgentVerdict string
@@ -246,6 +251,12 @@ type Orchestrator struct {
 	GoalsHash string
 	Jail      []string
 	ExtraRW   []string
+
+	// Boot directives from the operator (--overseer / --replan): when non-empty the
+	// coordinator force-runs that cycle once at startup with the text injected as a
+	// mandatory operator instruction in the agent's prompt.
+	bootOverseer string
+	bootReplan   string
 
 	// Bindings is the role → (harness, model) resolution table — see
 	// harnessModelForRole. "default" required; the rest optional overrides.

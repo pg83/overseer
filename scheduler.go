@@ -65,9 +65,7 @@ func (o *Orchestrator) Run() {
 
 	o.startPools()
 
-	if o.nonTerminalCount() == 0 {
-		o.triggerOverseer("boot: zero open tickets — evaluate goals and seed plan if needed")
-	}
+	o.bootDirectives()
 
 	o.dispatch()
 
@@ -86,6 +84,35 @@ func (o *Orchestrator) Run() {
 			o.safe("DISPATCH", o.dispatch)
 		}
 	}
+}
+
+// bootDirectives applies the operator's --overseer / --replan flags once at startup.
+// --replan queues a mandatory operator nudge for the next replanner batch; --overseer
+// force-runs an overseer pass with the same mandatory framing. Operator intent takes
+// precedence over the auto-seed overseer that fires on an empty DB.
+func (o *Orchestrator) bootDirectives() {
+	if o.bootReplan != "" {
+		o.nudges = append(o.nudges, ReplanReason{
+			Source: RoleOperator,
+			Reason: operatorDirective(o.bootReplan),
+		})
+		uiSys("📥", "OPERATOR_REPLAN", o.bootReplan)
+	}
+
+	switch {
+	case o.bootOverseer != "":
+		o.triggerOverseer(operatorDirective(o.bootOverseer))
+	case o.bootReplan != "":
+		// operator drives the replanner directly — skip the auto-seed overseer.
+	case o.nonTerminalCount() == 0:
+		o.triggerOverseer("boot: zero open tickets — evaluate goals and seed plan if needed")
+	}
+}
+
+// operatorDirective wraps a human-supplied directive so the agent's prompt marks it as
+// a mandatory, non-stale instruction from the operator.
+func operatorDirective(text string) string {
+	return "OPERATOR DIRECTIVE (mandatory — a direct instruction from the human operator; act on it this pass, never dismiss it as stale or already-handled): " + text
 }
 
 // safe runs a coordinator step so a Throw inside it surfaces to the UI instead of
