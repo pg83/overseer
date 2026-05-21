@@ -550,9 +550,10 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 				change["deps"] = jsonIntArray(ev["deps"])
 			}
 
+			summary := summarizeTaskUpdate(ev)
 			o.appendLog(change)
-			o.recordEvent(n, "TASK_UPDATE", "by=replanner")
-			uiTicket("✏️", RoleReplanner, n, "UPDATE", "")
+			o.recordEvent(n, "TASK_UPDATE", "by=replanner "+summary)
+			uiTicket("✏️", RoleReplanner, n, "UPDATE", summary)
 		case "cancel":
 			reason, _ := ev["reason"].(string)
 			o.setPhase(n, PhaseDiscarded, "by=replanner reason="+reason)
@@ -561,6 +562,28 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 			o.afterTerminal(n, "DISCARDED")
 		}
 	}
+}
+
+func summarizeTaskUpdate(ev map[string]any) string {
+	var parts []string
+
+	if d, ok := ev["descr"].(string); ok {
+		parts = append(parts, "descr="+d)
+	}
+
+	if _, ok := ev["prio"]; ok {
+		parts = append(parts, fmt.Sprintf("prio=%d", jsonInt(ev["prio"])))
+	}
+
+	if _, ok := ev["deps"]; ok {
+		parts = append(parts, fmt.Sprintf("deps=%v", jsonIntArray(ev["deps"])))
+	}
+
+	if len(parts) == 0 {
+		return "(no fields)"
+	}
+
+	return strings.Join(parts, " ")
 }
 
 func (o *Orchestrator) writeReport() {
