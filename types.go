@@ -74,6 +74,14 @@ func validTicketType(t TicketType) bool {
 	return t == TicketTypePlan || t == TicketTypeCode
 }
 
+func replayTicketType(t TicketType) TicketType {
+	if t == "" {
+		return TicketTypeCode
+	}
+
+	return t
+}
+
 func newTicketPhase(t TicketType) Phase {
 	if t == TicketTypeCode {
 		return PhaseImplement
@@ -83,7 +91,7 @@ func newTicketPhase(t TicketType) Phase {
 }
 
 func resumePhaseAfterReplan(t Ticket) Phase {
-	if t.Type == TicketTypeCode {
+	if replayTicketType(t.Type) == TicketTypeCode {
 		return PhaseImplement
 	}
 

@@ -130,6 +130,44 @@ func TestApplyLogEventCreateCodeStartsAtImplement(t *testing.T) {
 	}
 }
 
+func TestApplyLogEventLegacyCreateDefaultsToCodeImplement(t *testing.T) {
+	got := applyLogEvent(nil, LogEvent{
+		"k":     "create",
+		"n":     1,
+		"descr": "legacy",
+		"prio":  1,
+		"deps":  []any{},
+	})
+
+	if got[0].Type != TicketTypeCode {
+		t.Fatalf("type = %q, want %q", got[0].Type, TicketTypeCode)
+	}
+
+	if got[0].Phase != PhaseImplement {
+		t.Fatalf("phase = %s, want %s", got[0].Phase, PhaseImplement)
+	}
+}
+
+func TestApplyLogEventLegacyPlanPhaseNormalizesToImplementForCode(t *testing.T) {
+	tickets := applyLogEvent(nil, LogEvent{
+		"k":     "create",
+		"n":     1,
+		"descr": "legacy",
+		"prio":  1,
+		"deps":  []any{},
+	})
+
+	got := applyLogEvent(tickets, LogEvent{
+		"k":     "phase",
+		"n":     1,
+		"phase": string(PhasePlan),
+	})
+
+	if got[0].Phase != PhaseImplement {
+		t.Fatalf("phase = %s, want %s", got[0].Phase, PhaseImplement)
+	}
+}
+
 func TestBuildAgentInputIncludesDependencyPlansForCodeTicket(t *testing.T) {
 	o := testOrchestratorForArbiter(t, Ticket{N: 9, Type: TicketTypeCode, Phase: PhaseImplement, Descr: "code", Prio: 1, Deps: []int{7}})
 	writePlan(o.Root, 7, "dep plan")

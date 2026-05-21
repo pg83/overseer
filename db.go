@@ -158,7 +158,7 @@ func emitLegacyTicketAsEvents(w io.Writer, n int, descr string, prio int, deps [
 		Throw2(w.Write(append(b, '\n')))
 	}
 
-	write(LogEvent{"k": "create", "n": n, "descr": descr, "prio": prio, "deps": deps})
+	write(LogEvent{"k": "create", "n": n, "type": string(TicketTypeCode), "descr": descr, "prio": prio, "deps": deps})
 
 	for _, ws := range workspaces {
 		write(LogEvent{"k": "ws", "n": n, "ws": ws})
@@ -198,12 +198,8 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 		}
 
 		descr, _ := ev["descr"].(string)
-		ticketType := jsonTicketType(ev["type"])
-		phase := PhasePlan
-
-		if ticketType != "" {
-			phase = newTicketPhase(ticketType)
-		}
+		ticketType := replayTicketType(jsonTicketType(ev["type"]))
+		phase := newTicketPhase(ticketType)
 
 		return append(tickets, Ticket{
 			N:     n,
@@ -221,7 +217,13 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 		p, _ := ev["phase"].(string)
 
 		if p != "" {
-			tickets[idx].Phase = Phase(p)
+			phase := Phase(p)
+
+			if tickets[idx].Type == TicketTypeCode && phase == PhasePlan {
+				phase = PhaseImplement
+			}
+
+			tickets[idx].Phase = phase
 		}
 
 		return tickets
