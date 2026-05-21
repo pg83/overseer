@@ -211,10 +211,7 @@ func (a *planAgent) turnOnce(prompt string) (string, bool, *agentFault) {
 		}
 	}
 
-	// Auto-bind $TMPDIR — wrapper scripts (wirez, etc.) routinely mkdir
-	// scratch dirs there, and login shells / ssh sessions often set TMPDIR
-	// to a path outside /tmp (e.g. /var/run/dropbear/tmp under DropBear).
-	if tmpdir := os.Getenv("TMPDIR"); tmpdir != "" {
+	if tmpdir := strings.TrimSpace(os.Getenv("TMPDIR")); tmpdir != "" {
 		rwArgs = append(rwArgs, "--rw="+tmpdir)
 	}
 

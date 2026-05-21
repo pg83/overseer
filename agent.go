@@ -18,9 +18,9 @@ import (
 var embeddedPrompts embed.FS
 
 // harnessModelForRole resolves the (harness, model) binding for a role. Precedence:
-//   1. per-role override   (--<role>-harness)
-//   2. group default       (--think-harness | --work-harness)
-//   3. global default      (--harness, always set)
+//  1. per-role override   (--<role>-harness)
+//  2. group default       (--think-harness | --work-harness)
+//  3. global default      (--harness, always set)
 //
 // Empty Model in the result means "let the harness pick its own default for this role"
 // — caller falls back to harness.DefaultModel(role).
@@ -200,6 +200,7 @@ func (o *Orchestrator) fatal(reason string) {
 func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin string, env map[string]string) AgentResult {
 	wsAbs := ""
 	tmpdir := ""
+	hostTmpdir := strings.TrimSpace(os.Getenv("TMPDIR"))
 
 	if wsID != "" {
 		wsAbs = wsPath(o.Root, wsID)
@@ -221,6 +222,10 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 
 	if tmpdir != "" {
 		rwArgs = append(rwArgs, "--rw="+tmpdir)
+	}
+
+	if hostTmpdir != "" {
+		rwArgs = append(rwArgs, "--rw="+hostTmpdir)
 	}
 
 	hm := o.harnessModelForRole(role)
@@ -245,7 +250,11 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 		cmd.Dir = wsAbs
 	}
 
-	cmd.Env = append(os.Environ(), "TMPDIR="+tmpdir)
+	cmd.Env = os.Environ()
+
+	if tmpdir != "" {
+		cmd.Env = append(cmd.Env, "TMPDIR="+tmpdir)
+	}
 
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -373,9 +382,11 @@ func (s *streamErr) record(msg string) {
 // wrapJail composes the final exec invocation. `jail` is the full jail-prefix
 // command picked by resolveJail; empty / nil means no wrapper. Three shapes
 // cover all modes:
-//   nil / []        → harness runs directly (--no-jail).
-//   ["X"]           → external jail binary X.
-//   ["/proc/self/exe", "jail"] → built-in `overseer jail` subcommand.
+//
+//	nil / []        → harness runs directly (--no-jail).
+//	["X"]           → external jail binary X.
+//	["/proc/self/exe", "jail"] → built-in `overseer jail` subcommand.
+//
 // Generic over all backends — only the inner (bin, args) pair varies per Harness.
 func wrapJail(jail, rwArgs []string, harnessBin string, harnessArgs []string) (string, []string) {
 	if len(jail) == 0 {

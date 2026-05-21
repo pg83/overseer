@@ -49,7 +49,6 @@ func (c *Codex) Args(model, wsAbs string) []string {
 
 func (c *Codex) JailRWPaths(home string) []string {
 	return []string{
-		"/tmp",
 		filepath.Join(home, ".cache"),
 		filepath.Join(home, "go"),
 		filepath.Join(home, ".codex"),

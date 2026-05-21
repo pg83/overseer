@@ -60,8 +60,8 @@ The built-in implements two re-execs (`top → --__stage=mount → --__stage=dro
 
 The RW set is composed at call time:
 
-- `run`: workspace → workspace's `.tmp` → `Harness.JailRWPaths(HOME)` → `--rw` flags
-- `plan`: `cwd` → `Harness.JailRWPaths(HOME)` → auto-bind `$TMPDIR` (if set, for wrapper scripts that mkdir there — e.g. wirez under DropBear) → `--rw` flags
+- `run`: workspace → workspace's `.tmp` → host `$TMPDIR` (if set) → `Harness.JailRWPaths(HOME)` → `--rw` flags
+- `plan`: `cwd` → `Harness.JailRWPaths(HOME)` → host `$TMPDIR` (if set) → `--rw` flags
 
 Everything else is bind-mounted read-only.
 

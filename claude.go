@@ -36,7 +36,6 @@ func (c *Claude) Args(model, _ string) []string {
 
 func (c *Claude) JailRWPaths(home string) []string {
 	return []string{
-		"/tmp",
 		filepath.Join(home, ".cache"),
 		filepath.Join(home, "go"),
 		filepath.Join(home, ".claude"),

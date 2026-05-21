@@ -43,7 +43,6 @@ func (g *Gemini) Args(model, wsAbs string) []string {
 
 func (g *Gemini) JailRWPaths(home string) []string {
 	return []string{
-		"/tmp",
 		filepath.Join(home, ".cache"),
 		filepath.Join(home, "go"),
 		filepath.Join(home, ".gemini"),

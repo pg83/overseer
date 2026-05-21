@@ -40,7 +40,6 @@ func (o *Opencode) Args(model, wsAbs string) []string {
 
 func (o *Opencode) JailRWPaths(home string) []string {
 	return []string{
-		"/tmp",
 		filepath.Join(home, ".cache"),
 		filepath.Join(home, "go"),
 		filepath.Join(home, ".config", "opencode"),
