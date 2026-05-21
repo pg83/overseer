@@ -552,13 +552,21 @@ func jsonInt(v any) int {
 }
 
 func jsonIntArray(v any) []int {
-	arr, _ := v.([]any)
+	switch x := v.(type) {
+	case []int:
+		out := make([]int, len(x))
+		copy(out, x)
 
-	var out []int
+		return out
+	case []any:
+		var out []int
 
-	for _, x := range arr {
-		out = append(out, jsonInt(x))
+		for _, item := range x {
+			out = append(out, jsonInt(item))
+		}
+
+		return out
 	}
 
-	return out
+	return nil
 }

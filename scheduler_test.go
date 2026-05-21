@@ -151,6 +151,80 @@ func TestApplyReplannerOpsCancelLastTicketTriggersOverseer(t *testing.T) {
 	}
 }
 
+func TestLegacyCreateDefaultsToCodeImplement(t *testing.T) {
+	got := applyLogEvent(nil, LogEvent{
+		"k":     "create",
+		"n":     1,
+		"descr": "legacy",
+		"prio":  1,
+		"deps":  []any{},
+	})
+
+	if got[0].Type != TicketTypeCode {
+		t.Fatalf("type = %q, want %q", got[0].Type, TicketTypeCode)
+	}
+
+	if got[0].Phase != PhaseImplement {
+		t.Fatalf("phase = %s, want %s", got[0].Phase, PhaseImplement)
+	}
+}
+
+func TestLegacyPlanPhaseNormalizesToImplementForCodeTicket(t *testing.T) {
+	tickets := applyLogEvent(nil, LogEvent{
+		"k":     "create",
+		"n":     1,
+		"descr": "legacy",
+		"prio":  1,
+		"deps":  []any{},
+	})
+
+	got := applyLogEvent(tickets, LogEvent{
+		"k":     "phase",
+		"n":     1,
+		"phase": string(PhasePlan),
+	})
+
+	if got[0].Phase != PhaseImplement {
+		t.Fatalf("phase = %s, want %s", got[0].Phase, PhaseImplement)
+	}
+}
+
+func TestApplyLogEventCreatePreservesDepsFromNativeIntSlice(t *testing.T) {
+	got := applyLogEvent(nil, LogEvent{
+		"k":     "create",
+		"n":     15,
+		"type":  "code",
+		"descr": "deps",
+		"prio":  1,
+		"deps":  []int{3, 7},
+	})
+
+	if len(got[0].Deps) != 2 || got[0].Deps[0] != 3 || got[0].Deps[1] != 7 {
+		t.Fatalf("deps = %#v, want []int{3,7}", got[0].Deps)
+	}
+}
+
+func TestApplyLogEventUpdatePreservesDepsFromNativeIntSlice(t *testing.T) {
+	tickets := applyLogEvent(nil, LogEvent{
+		"k":     "create",
+		"n":     15,
+		"type":  "code",
+		"descr": "deps",
+		"prio":  1,
+		"deps":  []any{},
+	})
+
+	got := applyLogEvent(tickets, LogEvent{
+		"k":    "update",
+		"n":    15,
+		"deps": []int{3},
+	})
+
+	if len(got[0].Deps) != 1 || got[0].Deps[0] != 3 {
+		t.Fatalf("deps = %#v, want []int{3}", got[0].Deps)
+	}
+}
+
 func testOrchestratorForArbiter(t *testing.T, tickets ...Ticket) *Orchestrator {
 	t.Helper()
 
