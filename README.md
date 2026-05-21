@@ -4,7 +4,7 @@ A small Go framework for describing multi-agent dialogs over heterogeneous CLI a
 
 The framework itself is one file (`harness.go`) declaring the `Harness` interface. Each backend implements it in one file (`claude.go`, `codex.go`, `opencode.go`, `gemini.go`). Each *orchestrator* — a recipe for how agents talk to each other — is another file that consumes `Harness` generically. Two orchestrators ship today, plus the sandbox primitive:
 
-- `overseer run` — full code-modification orchestrator. Drives a git working tree toward `GOALS.md` using seven roles (replanner / tasker / digger / reviewer / merger / overseer / arbiter), running in parallel under a global concurrency cap.
+- `overseer run` — full code-modification orchestrator. A single coordinator goroutine drives a git working tree toward `GOALS.md` using seven roles (replanner / tasker / digger / reviewer / merger / overseer / arbiter), each served by a fixed-size pool of harness workers.
 - `overseer plan` — synchronous two-agent debate. PUPA (solver) and LUPA (critic) iterate over a free-form question on stdin until LUPA accepts. Output: prose plan / forecast / analysis / code — whatever the question called for.
 - `overseer jail` — the sandbox itself. Used implicitly by `run` and `plan`; also callable standalone like `overseer jail --rw=/tmp -- <cmd>`.
 
@@ -69,7 +69,7 @@ Everything else is bind-mounted read-only.
 
 ## `overseer run` — full orchestrator
 
-A small-software-team emulator. You point it at a git working tree and a free-form `GOALS.md`, and it runs a continuous loop of *plan → implement → review → merge → verify* across a queue of tickets — using LLM agents in each role — until the goals are met. The orchestrator itself doesn't write code or call the API: it spawns role-shaped agent subprocesses, reads their JSON-event verdicts, persists ticket state, and shuttles work between roles.
+A small-software-team emulator. You point it at a git working tree and a free-form `GOALS.md`, and it runs a continuous loop of *plan → implement → review → merge → verify* across a queue of tickets — using LLM agents in each role — until the goals are met. The orchestrator itself doesn't write code or call the API: a single **coordinator** owns all ticket state and routes work; stateless **pool workers** run the role-shaped agent subprocesses and report JSON-event verdicts back.
 
 The mental model is a stripped-down engineering team:
 
@@ -77,17 +77,24 @@ The mental model is a stripped-down engineering team:
 |------------|----------------|--------------|
 | **overseer** | product owner / QA lead | Reads `GOALS.md`, decides whether the project is done. When done → emits `GOALS_ACHIEVED`, run terminates and writes `REPORT.md`. Otherwise nudges the replanner. |
 | **replanner** | planning lead | Owns the ticket database. Reads goals + ticket history + recent agent runs, emits `task` operations (`new` / `update` / `cancel`) that the orchestrator validates and applies. Invoked on every `replan` nudge from any role. |
-| **tasker** | senior engineer writing specs | Picks one OPEN ticket, researches the codebase, writes `plan.md` for that ticket — the work order for the digger. |
+| **tasker** | senior engineer writing specs | Gets a ticket in phase `PLAN`, researches the codebase, writes `plan.md` for it — the work order for the digger. |
 | **digger** | implementer | Reads `plan.md`, makes the changes in a per-ticket workspace, squashes + rebases onto trunk. Reports `READY` (work done) or `CANT_DO` (can't, here's why). |
 | **reviewer** | code reviewer | Independently audits the digger's branch. Reports `APPROVE`, `REWORK` (needs revision), or `DISCARD` (kill the ticket). |
-| **merger** | release engineer | Single, serial. Runs tests on trunk (baseline), `git merge --no-ff` the digger's branch into a scratch worktree, re-runs tests, ff-merges into real trunk on green. Reports `MERGED` or `MERGE_FAIL`. |
+| **merger** | release engineer | Serial (pool size 1). Runs tests on trunk (baseline), `git merge --no-ff` the digger's branch into a scratch worktree, re-runs tests. Reports `MERGED` or `MERGE_FAIL`; on `MERGED` the **coordinator** ff-merges that scratch branch into real trunk (the one place trunk is written). |
 | **arbiter** | tech lead breaking ties | Invoked on every disagreement (`REWORK` / `DISCARD` / `MERGE_FAIL` / `NO_PLAN`). Decides `CONTINUE` (keep iterating with the same role) or `ESCALATE` (kick to the replanner). |
 
-The orchestrator (`scheduler.go::Run`) is the project manager keeping the state machine moving — it never talks to the model, it just routes verdicts and updates tickets.
+### Architecture: one coordinator, role pools
+
+A single **coordinator** goroutine (`scheduler.go`) owns *all* ticket state — there are no locks. It reads agent results off one channel and, per result, (1) appends the phase transition to `tasks.events.jsonl`, (2) updates its in-memory ticket view, (3) updates an in-memory **shadow** scheduling map, then (4) dispatches every dispatchable ticket to the pool its phase calls for. Stateless **pool workers** (`pool.go`, fixed size per role) are the only place a harness is invoked; they read a `Job`, run the agent to a recognized verdict, and reply on the coordinator's channel. Agents never touch ticket state — they only message the coordinator.
+
+Two state axes:
+
+- **`Phase`** (persisted) — what work a ticket needs next: `PLAN` → tasker, `IMPLEMENT` → digger, `REVIEW` → reviewer, `MERGE` → merger, `ARBITRATE` → arbiter, `ESCALATE` → replanner, plus terminal `MERGED` / `DISCARDED`. Written to the event log as `phase` events; a restart replays them and resumes mid-pipeline.
+- **`shadow`** (in-memory, coordinator-only) — `STOPPED` (dispatchable) or `SCHEDULED` (handed to a pool). Dispatch routes every `STOPPED` non-terminal ticket to `roleForPhase(phase)` and flips it to `SCHEDULED`; the returning result flips it back to `STOPPED`. That two-line rule *is* the scheduler.
 
 ### Pipeline: from a goal to a merged commit
 
-The loop is **continuous and parallel**, not sequential. Multiple tickets are in flight at once (up to the global semaphore cap); the pipeline below is one ticket's path through the system.
+The loop is **continuous and parallel**, not sequential. Multiple tickets are in flight at once (bounded by the per-role pool sizes); the pipeline below is one ticket's path through the system — really a walk through its `Phase` values, driven by the coordinator.
 
 ```
                                             GOALS.md  (operator's input)
@@ -105,14 +112,14 @@ The loop is **continuous and parallel**, not sequential. Multiple tickets are in
                                         operations)
                                                │
                                                ▼
-                                   ┌─ priority queue of OPEN tickets ─┐
-                                   │   (deps satisfied, sorted by     │
-                                   │    prio DESC then n ASC)         │
+                                   ┌─ STOPPED tickets, deps satisfied ┐
+                                   │   (dispatched by phase, sorted   │
+                                   │    by prio DESC then n ASC)      │
                                    └────────────┬─────────────────────┘
-                                                │  scheduleReady picks one
+                                                │  coordinator dispatches by phase
                                                 ▼
-                              ┌─ no plan.md yet ─┐    ┌─ plan.md exists ─┐
-                              │      tasker      │    │  (replay path)   │
+                              ┌─ phase PLAN ────┐    ┌─ phase IMPLEMENT ┐
+                              │      tasker      │    │   (plan exists)  │
                               │  writes plan.md  │    └──────────────────┘
                               └────────┬─────────┘            │
                                        │ {"type":"plan",...}  │
@@ -143,45 +150,45 @@ The loop is **continuous and parallel**, not sequential. Multiple tickets are in
                                        ┌─────────┴──────────┐ iter         iter (or
                                        │ MERGED             │             ESCALATE)
                                        ▼                    │
-                                  ticket CLOSED             │ MERGE_FAIL
-                                  (reason MERGED)           ▼
-                                       │              arbiter ──▶ CONTINUE digger
+                                  phase MERGED              │ MERGE_FAIL
+                                  (terminal; coordinator    ▼
+                                   ff-merges into trunk)  arbiter ──▶ CONTINUE digger
                                        │                          (with rebase target +
                                        │                           merge-fail output)
                                        │                     or ESCALATE replanner
                                        ▼
-                              back to overseer
-                              ("queue small? are we done?")
+                              overseer re-evaluates
+                              ("open queue small? are we done?")
 ```
 
 Step by step, on one ticket:
 
-1. **Boot.** Orchestrator loads `tasks.events.jsonl` (the ticket DB) and queues one overseer request: «re-evaluate goals and seed plan if needed».
-2. **Overseer evaluates.** Reads `GOALS.md`, ticket DB, recent agent runs. If goals aren't met → emits one or more `replan` events with reasons. If met → `GOALS_ACHIEVED`, the run writes `REPORT.md` and shuts down.
-3. **Replanner reshapes the DB.** Reads the same context plus the new replan reasons, emits `task` events. The orchestrator validates them (no OPEN→DISCARDED deps, no cycles), appends to `tasks.events.jsonl`, updates in-memory tickets.
-4. **scheduleReady picks the next ticket.** OPEN tickets with all deps CLOSED form the ready queue, sorted by `prio DESC, n ASC`. The first one whose `InProgress` isn't already set is picked.
-5. **Tasker writes the spec.** Spawned with `tasker.txt` + ticket history + a fresh workspace path. Researches the codebase, writes `tickets/T-<N>/plan.md`, emits `{"type":"plan","path":"..."}`.
-6. **Digger implements.** Spawned with `digger.txt` + the plan + PRIOR_RUNS context. Works in `workspaces/<ws-id>/` (a clone of trunk on branch `ovs/<ws-id>`). On `READY`, the workspace has a clean rebase-able branch ahead of trunk. On `CANT_DO`, the digger says why and stops — arbiter decides next.
-7. **Reviewer audits.** Spawned independently against the same workspace. `APPROVE` → forward to merger. `REWORK` → arbiter (which usually spawns another digger pass with the reviewer's notes). `DISCARD` → arbiter (which usually closes the ticket as DISCARDED).
-8. **Merger lands the change.** Serial, one at a time. Runs the project's tests on trunk as a baseline; if baseline is red, the merger declines (you don't get to land into a broken trunk). Then `git merge --no-ff` into a merger scratch worktree, re-runs tests. On green → ff-merge into real trunk, ticket closes as MERGED. On red or merge conflict → MERGE_FAIL, the trunk is untouched and the arbiter is invoked with `RebaseTarget` (new trunk HEAD) and `MergeOut` (the merge output) so the next digger pass can rebase.
-9. **Arbiter resolves disagreements.** Spawned for every non-trivial bump: REWORK, DISCARD, MERGE_FAIL, NO_PLAN (tasker emitted no plan event). It's the cycle-internal escalation gate. `CONTINUE` → respawn the same role with extended context; `ESCALATE` → queue the full replanner so the ticket DB itself can be revised.
-10. **Overseer wakes again.** Periodically when the ready queue is small or after replans, asks itself "are the goals met now?". When yes → terminates the run.
+1. **Boot.** The coordinator loads `tasks.events.jsonl` (the ticket DB), marks every non-terminal ticket `STOPPED`, and triggers one overseer evaluation: «re-evaluate goals and seed plan if needed».
+2. **Overseer evaluates.** Reads `GOALS.md`, ticket DB, recent agent runs. If goals aren't met → emits one or more `replan` events with reasons (the coordinator accumulates them as nudges). If met → `GOALS_ACHIEVED`, the run writes `REPORT.md` and shuts down.
+3. **Replanner reshapes the DB.** The coordinator hands the (serial) replanner one batched job covering all `ESCALATE` tickets + pending nudges. It emits `task` events; the coordinator validates them (no non-terminal→DISCARDED deps, no cycles), appends to `tasks.events.jsonl`, updates in-memory tickets. New tickets start in phase `PLAN`.
+4. **Dispatch picks the ticket up.** Every `STOPPED` non-terminal ticket whose deps are all terminal is routed to `roleForPhase(phase)`, sorted by `prio DESC, n ASC`, and flipped to `SCHEDULED`. A fresh ticket is phase `PLAN` → tasker.
+5. **Tasker writes the spec.** A tasker worker researches the codebase in a fresh workspace, writes `tickets/T-<N>/plan.md`, emits `{"type":"plan","path":"..."}`. The coordinator advances the ticket to phase `IMPLEMENT`.
+6. **Digger implements.** A digger worker works in `workspaces/<ws-id>/` (a clone of trunk on branch `ovs/<ws-id>`, recorded as the ticket's branch workspace). On `READY` (clean rebase-able branch ahead of trunk) → phase `REVIEW`. On `CANT_DO` → phase `ARBITRATE`.
+7. **Reviewer audits.** A reviewer worker independently audits the same branch workspace. `APPROVE` → phase `MERGE`. `REWORK` / `DISCARD` → phase `ARBITRATE`.
+8. **Merger lands the change.** A single merger worker (pool size 1) runs the project's tests on trunk as a baseline; if baseline is red it declines (no landing into a broken trunk). Then `git merge --no-ff` into a scratch worktree, re-runs tests. On green → `MERGED`, and **the coordinator** ff-merges the scratch branch into real trunk (the only writer of trunk); ticket → terminal `MERGED`. On red / conflict, or a failed ff-merge → phase `ARBITRATE` with `RebaseTarget` (new trunk HEAD) + `MergeOut` so the next digger pass can rebase.
+9. **Arbiter resolves disagreements.** Runs for every `ARBITRATE` ticket — trigger was REWORK, DISCARD, MERGE_FAIL, CANT_DO, or NO_PLAN. `CONTINUE` → back to `IMPLEMENT` (or `PLAN` for NO_PLAN); `ESCALATE` → phase `ESCALATE`, which the coordinator feeds to the replanner. After a replanner pass, an escalated ticket returns to `PLAN`.
+10. **Overseer re-evaluates** on boot and whenever the open (non-terminal) count drops to ≤ 2, asking "are the goals met now?". When yes → terminates the run.
 
-Any agent (tasker, digger, reviewer, merger, arbiter, overseer) can emit `{"type":"replan","reason":"..."}` mid-run to signal «the ticket DB itself looks wrong, not just this one task» — those queue another replanner pass without short-circuiting the current role's verdict.
+Any agent can emit `{"type":"replan","reason":"..."}` mid-run to signal «the ticket DB itself looks wrong, not just this one task» — the coordinator collects these as nudges and folds them into the next replanner batch, without short-circuiting the current role's verdict.
 
 ### Workspaces
 
 Each ticket gets a dedicated workspace under `<root>/workspaces/<ws-id>/` — a fresh local clone of `--trunk` on a branch named `ovs/<ws-id>`. Workspaces are **never deleted**: once work in them ends (MERGED or DISCARDED), they go read-only and stay there as forensic record. Successive digger iterations on the same ticket reuse the same workspace, accumulating commits that get squashed before merge.
 
-`--trunk` itself is only written by the merger's final ff-merge. No other operation touches trunk — see `workspace.go::FfMergeBranch` for why even `git pull` is avoided.
+`--trunk` itself is written in exactly one place: the coordinator's ff-merge of a green merger scratch branch (`scheduler.go::onMerger` → `workspace.go::FfMergeBranch`). Single-writer by construction — the coordinator is one goroutine. No other operation touches trunk; see `FfMergeBranch` for why even `git pull` is avoided.
 
 ### State layout under `--root`
 
 | Path | Role | Notes |
 |------|------|-------|
-| `tasks.events.jsonl` | ticket database | Append-only event log. Legacy `tasks.jsonl` is migrated on first run. |
+| `tasks.events.jsonl` | ticket database | Append-only event log (`create` / `phase` / `update` / `event` / `ws`). `phase` events are the persisted ticket state. Legacy `tasks.jsonl` is migrated on first run. |
 | `tickets/T-<N>/plan.md` | per-ticket spec | Written by tasker, consumed by digger. |
-| `tickets/T-<N>/log.md` | per-ticket history | Human-readable trace of role transitions. |
+| `tickets/T-<N>/log.md` | per-ticket history | Human-readable trace of phase transitions. |
 | `workspaces/<ws-id>/` | per-ticket git clone | Branch `ovs/<ws-id>`. RO after terminal close. |
 | `runs/T-<N>-<ts>-<role>-<ws>.jsonl` | per-invocation stream | start / stdin / harness events / stderr / finish. The forensic record. |
 | `messages.txt` | team chat | Every `{"type":"message","text":...}` from any agent, appended in real time. Readable by humans and replayed in the next agent's PRIOR_RUNS context. |
@@ -199,27 +206,23 @@ Every agent's stdout is parsed as a JSON-line event stream by `parseEvents` in `
 
 Role-specific events on top: tasker emits `{"type":"plan","path":"..."}`; replanner emits `{"type":"task","op":"new","ticket":{...}}` / `op:update` / `op:cancel`.
 
-The **last** `verdict` event is authoritative — agents sometimes emit multiple. `message` events post to `messages.txt` and surface in the UI. `replan` events queue the replanner regardless of which role they came from.
+The **last** `verdict` event is authoritative — agents sometimes emit multiple. `message` events post to `messages.txt` and surface in the UI. `replan` events become coordinator nudges regardless of which role they came from.
 
 ### Concurrency
 
-The pipeline is parallel by default:
-
-- **One global semaphore size 6** for *all* harness invocations (`AgentSem` in `scheduler.go`). Caps total LLM-CLI parallelism so a wide queue doesn't fork hundreds of subprocesses.
-- **Merger queue is serial.** Only one merger runs at a time — tests + trunk write must not race.
-- **Merger throttle.** When `len(QMerger) > 4`, new tasker / digger spawns are paused (work in flight is allowed to finish). Keeps the diff-review pile from outrunning the test-and-land bottleneck.
-- **Independent loops.** Replanner, merger, overseer, arbiter each have their own queue and a dedicated goroutine that pulls work as it appears.
+- **Fixed per-role worker pools** (`poolSizes` in `types.go`) cap parallelism — total harness concurrency is their sum, *not* a shared semaphore. Defaults: digger 4, tasker / reviewer / arbiter 2, merger / replanner / overseer 1. Tune `digger` to control implementation parallelism (and, transitively, how fast the merge queue fills).
+- **Merger / replanner / overseer are serial** (pool size 1). The merger because tests + the trunk ff-merge must not race; the replanner because it rewrites the shared ticket DB; the overseer because it's a single global decision.
+- **One coordinator, no locks.** All ticket state (`Phase`, `shadow`, branch workspaces, arbiter context, pending nudges) is owned by the single `scheduler.go` coordinate goroutine. Pools communicate with it only by channel (`Job` in, `AgentResult` out), so there is nothing to lock.
 
 ### Tickets
 
 ```json
-{"n": 12, "state": "OPEN", "descr": "...", "prio": 7, "deps": [3, 8]}
+{"n": 12, "phase": "REVIEW", "descr": "...", "prio": 7, "deps": [3, 8]}
 ```
 
-- `state ∈ {OPEN, CLOSED}` on disk; `InProgress` is in-memory only.
-- `CloseReason ∈ {MERGED, DISCARDED}`. `MERGED` = work landed; `DISCARDED` = every other terminal close (cancelled by replanner, repeatedly bounced, reviewer killed, etc.).
-- `prio ∈ [1, 10]`. Ready-queue sorted by `prio DESC, n ASC`.
-- An OPEN ticket may not depend on a DISCARDED prerequisite — `ValidateTasks` enforces this on every replanner-batch.
+- **`Phase`** is the persisted state: `PLAN` / `IMPLEMENT` / `REVIEW` / `MERGE` / `ARBITRATE` / `ESCALATE`, plus terminal `MERGED` (work landed) and `DISCARDED` (every other terminal close — cancelled by replanner, repeatedly bounced, reviewer-killed, etc.). The in-memory `shadow` (`STOPPED` / `SCHEDULED`) is the only ephemeral state and never persisted.
+- `prio ∈ [1, 10]`. Dispatch order: `prio DESC, n ASC`.
+- A non-terminal ticket may not depend on a `DISCARDED` prerequisite — `ValidateTasks` enforces this on every replanner batch. A dependency is "satisfied" once the dep reaches a terminal phase.
 
 ### Example invocation
 
