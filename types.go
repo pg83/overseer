@@ -178,13 +178,16 @@ type HarnessModel struct {
 
 // arbCtx is the trigger context the coordinator remembers for a ticket parked in
 // PhaseArbitrate / PhaseImplement-after-merge-fail, so it can build the right Job.
-// Reconstructed from the phase event on replay (rebaseTarget / mergeOut are live
-// only — a restart loses them and the digger simply rebases without the diff text).
+// detail/workspace are needed for arbiter inspection; rebaseTarget/mergeOut are the
+// live-only merge-fail extras. The whole struct is in-memory only today — a restart
+// loses it, and recovery falls back to whatever can be inferred from persisted ticket
+// state alone.
 type arbCtx struct {
 	trigger      AgentVerdict
 	detail       string
 	rebaseTarget string
 	mergeOut     string
+	workspace    string
 }
 
 // Orchestrator is the coordinator: a single goroutine owns all of the fields below

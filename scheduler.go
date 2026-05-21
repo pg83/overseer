@@ -236,8 +236,17 @@ func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
 	case RoleReviewer:
 		j.WS = o.branchWS[t.N]
 	case RoleArbiter:
-		j.WS = o.branchWS[t.N]
 		c := o.arb[t.N]
+
+		switch {
+		case c.workspace != "":
+			j.WS = c.workspace
+		case o.branchWS[t.N] != "":
+			j.WS = o.branchWS[t.N]
+		default:
+			j.NewWS = true
+		}
+
 		j.Trigger, j.Detail, j.RebaseTarget, j.MergeOut = c.trigger, c.detail, c.rebaseTarget, c.mergeOut
 	case RoleMerger:
 		j.WS = o.branchWS[t.N]
@@ -306,7 +315,7 @@ func (o *Orchestrator) onTasker(res AgentResult) {
 	plan := strings.TrimSpace(taskerPlanContent(res.Events))
 
 	if plan == "" {
-		o.arb[n] = arbCtx{trigger: VerdictNoPlan, detail: "tasker produced no plan"}
+		o.arb[n] = arbCtx{trigger: VerdictNoPlan, detail: "tasker produced no plan", workspace: res.Workspace}
 		o.recordEvent(n, "TASKER_NO_PLAN", "no plan")
 		o.setPhase(n, PhaseArbitrate, "tasker NO_PLAN")
 		uiTicket("💀", RoleTasker, n, "NO_PLAN", "")
@@ -345,7 +354,7 @@ func (o *Orchestrator) onDigger(res AgentResult) {
 		o.setPhase(n, PhaseReview, detail)
 		uiTicket("✅", RoleDigger, n, "READY", detail)
 	case VerdictCantDo:
-		o.arb[n] = arbCtx{trigger: VerdictCantDo, detail: detail}
+		o.arb[n] = arbCtx{trigger: VerdictCantDo, detail: detail, workspace: res.Workspace}
 		o.recordEvent(n, "DIGGER_CANT_DO", detail)
 		o.setPhase(n, PhaseArbitrate, detail)
 		uiTicket("🛑", RoleDigger, n, "CANT_DO", detail)
@@ -362,12 +371,12 @@ func (o *Orchestrator) onReviewer(res AgentResult) {
 		o.setPhase(n, PhaseMerge, detail)
 		uiTicket("👍", RoleReviewer, n, "APPROVE", detail)
 	case VerdictRework:
-		o.arb[n] = arbCtx{trigger: VerdictRework, detail: detail}
+		o.arb[n] = arbCtx{trigger: VerdictRework, detail: detail, workspace: res.Workspace}
 		o.recordEvent(n, "REVIEWER_REWORK", detail)
 		o.setPhase(n, PhaseArbitrate, detail)
 		uiTicket("🔁", RoleReviewer, n, "REWORK", detail)
 	case VerdictDiscard:
-		o.arb[n] = arbCtx{trigger: VerdictDiscard, detail: detail}
+		o.arb[n] = arbCtx{trigger: VerdictDiscard, detail: detail, workspace: res.Workspace}
 		o.recordEvent(n, "REVIEWER_DISCARD", detail)
 		o.setPhase(n, PhaseArbitrate, detail)
 		uiTicket("👎", RoleReviewer, n, "DISCARD", detail)
@@ -385,7 +394,13 @@ func (o *Orchestrator) onMerger(res AgentResult) {
 		newHead := CurrentTrunkHash(o.Trunk)
 
 		if !ok {
-			o.arb[n] = arbCtx{trigger: VerdictMergeFail, detail: "ff-merge failed: " + out, rebaseTarget: newHead, mergeOut: out}
+			o.arb[n] = arbCtx{
+				trigger:      VerdictMergeFail,
+				detail:       "ff-merge failed: " + out,
+				rebaseTarget: newHead,
+				mergeOut:     out,
+				workspace:    o.branchWS[n],
+			}
 			o.recordEvent(n, "MERGE_FF_FAIL", out)
 			o.setPhase(n, PhaseArbitrate, "ff-merge failed")
 			uiTicket("⚠️", RoleMerger, n, "FF_FAIL", out)
@@ -404,7 +419,13 @@ func (o *Orchestrator) onMerger(res AgentResult) {
 	}
 
 	head := CurrentTrunkHash(o.Trunk)
-	o.arb[n] = arbCtx{trigger: VerdictMergeFail, detail: detail, rebaseTarget: head, mergeOut: detail}
+	o.arb[n] = arbCtx{
+		trigger:      VerdictMergeFail,
+		detail:       detail,
+		rebaseTarget: head,
+		mergeOut:     detail,
+		workspace:    o.branchWS[n],
+	}
 	o.recordEvent(n, "MERGE_FAIL", detail)
 	o.setPhase(n, PhaseArbitrate, detail)
 	uiTicket("❌", RoleMerger, n, "FAIL", detail)
