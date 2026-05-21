@@ -106,6 +106,22 @@ func (o *Orchestrator) findTicket(n int) (Ticket, bool) {
 	return Ticket{}, false
 }
 
+func (o *Orchestrator) ticketWorkspaceHint(n int) string {
+	if c := o.arb[n]; c.workspace != "" {
+		return c.workspace
+	}
+
+	if ws := o.branchWS[n]; ws != "" {
+		return ws
+	}
+
+	if t, ok := o.findTicket(n); ok && len(t.Workspaces) > 0 {
+		return t.Workspaces[len(t.Workspaces)-1]
+	}
+
+	return ""
+}
+
 func (o *Orchestrator) nonTerminalCount() int {
 	n := 0
 
@@ -206,8 +222,10 @@ func (o *Orchestrator) dispatchReplanner() {
 	for _, n := range escalate {
 		t, _ := o.findTicket(n)
 		reasons = append(reasons, ReplanReason{
-			Source: RoleArbiter, Ticket: n,
-			Reason: "escalated ticket — re-scope it or cancel it: " + t.Descr,
+			Source:    RoleArbiter,
+			Ticket:    n,
+			Workspace: o.ticketWorkspaceHint(n),
+			Reason:    "escalated ticket — re-scope it or cancel it: " + t.Descr,
 		})
 		o.shadow[n] = ShadowScheduled
 	}
@@ -277,7 +295,7 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 	n := res.Ticket
 
 	for _, line := range eventReplans(res.Events) {
-		o.nudges = append(o.nudges, ReplanReason{Source: res.Role, Ticket: n, Reason: line})
+		o.nudges = append(o.nudges, ReplanReason{Source: res.Role, Ticket: n, Workspace: res.Workspace, Reason: line})
 	}
 
 	// Per-ticket result for an already-terminal ticket (replanner cancelled it
@@ -431,7 +449,7 @@ func (o *Orchestrator) onMerger(res AgentResult) {
 		delete(o.arb, n)
 		delete(o.branchWS, n)
 		uiTicket("✅", RoleMerger, n, "MERGED", "head="+shortHash(newHead))
-		o.afterTerminal(n, "MERGED")
+		o.afterTerminal(n, "MERGED", mergerWS)
 
 		return
 	}
@@ -527,10 +545,12 @@ func (o *Orchestrator) onOverseer(res AgentResult) {
 
 // afterTerminal fires the post-terminal bookkeeping: a fallout replan nudge plus an
 // overseer re-evaluation when the open queue reaches zero.
-func (o *Orchestrator) afterTerminal(n int, reason string) {
+func (o *Orchestrator) afterTerminal(n int, reason, workspace string) {
 	o.nudges = append(o.nudges, ReplanReason{
-		Source: RoleMerger, Ticket: n,
-		Reason: fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, reason),
+		Source:    RoleMerger,
+		Ticket:    n,
+		Workspace: workspace,
+		Reason:    fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, reason),
 	})
 
 	if o.nonTerminalCount() == 0 {
@@ -605,8 +625,10 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 			o.recordEvent(n, "DISCARDED", "by=replanner reason="+reason)
 			uiTicket("🛑", RoleReplanner, n, "DISCARDED", reason)
 			o.nudges = append(o.nudges, ReplanReason{
-				Source: RoleMerger, Ticket: n,
-				Reason: fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, "DISCARDED"),
+				Source:    RoleMerger,
+				Ticket:    n,
+				Workspace: o.ticketWorkspaceHint(n),
+				Reason:    fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, "DISCARDED"),
 			})
 			canceledAny = true
 		case "replace":

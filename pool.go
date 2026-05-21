@@ -409,12 +409,16 @@ func replaceDepRefs(deps []int, from, to int) ([]int, bool) {
 }
 
 // formatReplanTriggers renders the batch of nudges a replanner Job carries — one
-// numbered line per trigger (source role, ticket, reason).
+// numbered line per trigger (source role, ticket, optional workspace, reason).
 func formatReplanTriggers(reasons []ReplanReason) string {
 	var sb strings.Builder
 
 	for i, r := range reasons {
-		fmt.Fprintf(&sb, "%d. source=%s ticket=T-%d: %s\n", i+1, r.Source, r.Ticket, r.Reason)
+		if r.Workspace != "" {
+			fmt.Fprintf(&sb, "%d. source=%s ticket=T-%d workspace=%s: %s\n", i+1, r.Source, r.Ticket, r.Workspace, r.Reason)
+		} else {
+			fmt.Fprintf(&sb, "%d. source=%s ticket=T-%d: %s\n", i+1, r.Source, r.Ticket, r.Reason)
+		}
 	}
 
 	return sb.String()

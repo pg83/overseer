@@ -175,9 +175,10 @@ type AgentResult struct {
 // global signal (overseer guidance, post-merge fallout, GOALS.md change). The
 // coordinator accumulates these and batches them into a single replanner Job.
 type ReplanReason struct {
-	Source AgentRole
-	Ticket int
-	Reason string
+	Source    AgentRole
+	Ticket    int
+	Workspace string
+	Reason    string
 }
 
 // Job is a unit of work the coordinator hands to a role pool. The coordinator is

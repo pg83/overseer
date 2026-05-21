@@ -327,8 +327,8 @@ func (o *Orchestrator) recordEvent(n int, kind, detail string) {
 }
 
 // SerializeTasks renders the in-memory tickets for the replanner's CURRENT_TASKS
-// input. OPEN_TICKETS = every non-terminal ticket (full JSONL incl. phase);
-// CLOSED_DEPS = compact one-liner for terminal tickets that are direct deps of a
+// input. OPEN_TICKETS = every non-terminal ticket (pretty JSON incl. phase);
+// CLOSED_DEPS = compact JSON blocks for terminal tickets that are direct deps of a
 // non-terminal one. Sorted by N.
 func SerializeTasks(tickets []Ticket) string {
 	sorted := make([]Ticket, len(tickets))
@@ -351,12 +351,17 @@ func SerializeTasks(tickets []Ticket) string {
 
 	for _, t := range sorted {
 		if !t.Phase.Terminal() {
-			b := Throw2(json.Marshal(t))
+			b := Throw2(json.MarshalIndent(t, "", "  "))
 			open.Write(b)
-			open.WriteByte('\n')
+			open.WriteString("\n\n")
 		} else if directDeps[t.N] {
-			fmt.Fprintf(&closedDeps, "{\"n\":%d,\"phase\":%q,\"descr\":%s}\n",
-				t.N, t.Phase, Throw2(json.Marshal(t.Descr)))
+			b := Throw2(json.MarshalIndent(map[string]any{
+				"n":     t.N,
+				"phase": t.Phase,
+				"descr": t.Descr,
+			}, "", "  "))
+			closedDeps.Write(b)
+			closedDeps.WriteString("\n\n")
 		}
 	}
 
