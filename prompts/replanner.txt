@@ -45,6 +45,10 @@ Every new ticket must declare a kind:
 
 There is no default kind. Choose explicitly when creating a ticket. Use `plan` only when the work product should be a reusable design/spec artifact; use `code` when the ticket should go straight into implementation.
 
+The replanner may create `plan` tickets for its own needs — for example, when a situation needs deeper investigation before the work can be broken down correctly. A `plan` ticket can produce the research artifact that the replanner then uses to create follow-up tickets.
+
+Use `code` without any `plan` dependency for simple, obvious tasks that do not require deep research or architectural digging first.
+
 ## Process: draft → critique → emit
 
 Work through three phases — but keep phases one and two as your own private reasoning. Do NOT narrate them to the team chat one thought per `message`. The chat is shared by every role across every ticket; a wall of replanner draft/critique lines buries the signal others actually need.
