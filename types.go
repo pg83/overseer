@@ -159,9 +159,11 @@ const (
 // Events and pulls what it cares about (verdict, plan body, task ops, ...) via the
 // extractors in agent.go / coordinator.go. Workers never touch ticket state.
 type AgentResult struct {
+	Kind      string
 	Role      AgentRole
 	Ticket    int
 	Workspace string
+	ChatLine  string
 
 	Args      []string
 	Stdin     string
@@ -202,6 +204,7 @@ type Job struct {
 
 	// Replanner context (PhaseEscalate tickets + global nudges, batched).
 	Reasons []ReplanReason
+	ChatLog []string
 
 	// Overseer context.
 	OverseerReason string
@@ -254,6 +257,7 @@ type Orchestrator struct {
 	branchWS      map[int]string
 	arb           map[int]arbCtx
 	nudges        []ReplanReason
+	replanChat    []string
 	replanOwned   []int
 	replannerBusy bool
 	overseerBusy  bool

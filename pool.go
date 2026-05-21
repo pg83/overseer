@@ -222,14 +222,16 @@ func (o *Orchestrator) jobMerger(job Job) AgentResult {
 func (o *Orchestrator) jobReplanner(job Job) AgentResult {
 	ws := o.workspaceFor(job)
 	triggers := formatReplanTriggers(job.Reasons)
+	chat := strings.Join(job.ChatLog, "\n")
 
 	input := o.agentSelfBlock(RoleReplanner, 0) +
-		fmt.Sprintf("REPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
-			triggers, runsDir(o.Root), tasksDBPath(o.Root), job.Snapshot)
+		fmt.Sprintf("REPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nREPLAN_CHAT (all team-chat lines accumulated since the previous replanner run):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
+			triggers, chat, runsDir(o.Root), tasksDBPath(o.Root), job.Snapshot)
 	stdin := concatPromptInput(loadPrompt(RoleReplanner), input)
 
 	env := map[string]string{
 		"REPLAN_TRIGGERS": triggers,
+		"REPLAN_CHAT":     chat,
 		"RUNS_DIR":        runsDir(o.Root),
 		"TASKS_DB":        tasksDBPath(o.Root),
 	}

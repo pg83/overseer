@@ -119,8 +119,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 			for _, ev := range parseEvents(fault.stdout) {
 				if t, _ := ev["type"].(string); t == "message" {
 					if text := messageText(ev); text != "" {
-						uiTicket("💬", role, ticket, "MESSAGE", text)
-						appendMessage(o.Root, role, ticket, text)
+						o.noteMessage(role, ticket, text)
 					}
 				}
 			}
@@ -146,8 +145,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 					continue
 				}
 
-				uiTicket("💬", role, ticket, "MESSAGE", text)
-				appendMessage(o.Root, role, ticket, text)
+				o.noteMessage(role, ticket, text)
 
 			case "unparsed":
 				text, _ := ev["text"].(string)
@@ -161,6 +159,16 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 		}
 
 		return res
+	}
+}
+
+func (o *Orchestrator) noteMessage(role AgentRole, ticket int, text string) {
+	uiTicket("💬", role, ticket, "MESSAGE", text)
+	line := appendMessage(o.Root, role, ticket, text)
+
+	select {
+	case o.Events <- AgentResult{Kind: "chat", Role: role, Ticket: ticket, ChatLine: line}:
+	case <-o.StopCtx.Done():
 	}
 }
 

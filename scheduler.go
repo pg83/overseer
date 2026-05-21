@@ -218,6 +218,7 @@ func (o *Orchestrator) dispatchReplanner() {
 	}
 
 	reasons := append([]ReplanReason{}, o.nudges...)
+	chatLog := append([]string{}, o.replanChat...)
 
 	for _, n := range escalate {
 		t, _ := o.findTicket(n)
@@ -231,11 +232,12 @@ func (o *Orchestrator) dispatchReplanner() {
 	}
 
 	o.nudges = nil
+	o.replanChat = nil
 	o.replanOwned = escalate
 	o.replannerBusy = true
 
 	uiSys("📤", "REPLANNER", fmt.Sprintf("%d reason(s), %d escalated", len(reasons), len(escalate)))
-	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Reasons: reasons, Snapshot: SerializeTasks(o.Tickets)}
+	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
 }
 
 // buildJob assembles the Job for a ticket's phase: which workspace the worker uses
@@ -292,6 +294,14 @@ func (o *Orchestrator) triggerOverseer(reason string) {
 // handleResult folds one worker result into the state machine: collect any replan
 // nudges, then advance the ticket's phase / shadow per role+verdict.
 func (o *Orchestrator) handleResult(res AgentResult) {
+	if res.Kind == "chat" {
+		if line := strings.TrimRight(res.ChatLine, "\n"); line != "" {
+			o.replanChat = append(o.replanChat, line)
+		}
+
+		return
+	}
+
 	n := res.Ticket
 
 	for _, line := range eventReplans(res.Events) {
