@@ -338,11 +338,8 @@ func (o *Orchestrator) onTasker(res AgentResult) {
 	uiTicket("📝", RoleTasker, n, "PLAN_WRITTEN", "")
 
 	if t.Type == TicketTypePlan {
-		o.setPhase(n, PhasePlanned, "plan written")
-
-		if o.nonTerminalCount() == 0 {
-			o.triggerOverseer(fmt.Sprintf("zero-open after T-%d PLANNED", n))
-		}
+		o.arb[n] = arbCtx{trigger: VerdictPlanWritten, detail: "tasker produced plan", workspace: res.Workspace}
+		o.setPhase(n, PhaseArbitrate, "tasker PLAN_WRITTEN")
 
 		return
 	}
@@ -462,10 +459,11 @@ func (o *Orchestrator) onArbiter(res AgentResult) {
 		o.recordEvent(n, "ARBITER_CONTINUE", detail)
 		uiTicket("➡️", RoleArbiter, n, "CONTINUE", detail)
 
-		// NO_PLAN → re-plan; everything else → re-implement. The MERGE_FAIL rebase
+		// Tasker plan/no-plan tickets loop back to planning; everything else routes
+		// into implementation. The MERGE_FAIL rebase
 		// context stays in o.arb so the next digger Job rebases; other triggers drop it
 		// (the digger reads the reviewer/CANT_DO feedback from log.md).
-		if c.trigger == VerdictNoPlan {
+		if c.trigger == VerdictNoPlan || c.trigger == VerdictPlanWritten {
 			delete(o.arb, n)
 			o.setPhase(n, PhasePlan, "arbiter continue (re-plan)")
 

@@ -288,6 +288,8 @@ func sourceForTrigger(t AgentVerdict) AgentRole {
 	switch t {
 	case VerdictNoPlan:
 		return RoleTasker
+	case VerdictPlanWritten:
+		return RoleTasker
 	case VerdictCantDo:
 		return RoleDigger
 	case VerdictRework, VerdictDiscard:

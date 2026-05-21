@@ -17,6 +17,34 @@ func TestArbiterWorkspaceFromTaskerNoPlan(t *testing.T) {
 	assertArbiterJobWorkspace(t, o, 12, "ws-tasker")
 }
 
+func TestPlanTicketTaskerSuccessRoutesToArbiter(t *testing.T) {
+	o := testOrchestratorForArbiter(t, Ticket{N: 13, Type: TicketTypePlan, Phase: PhasePlan, Descr: "plan", Prio: 1})
+
+	o.onTasker(AgentResult{
+		Role:      RoleTasker,
+		Ticket:    13,
+		Workspace: "ws-tasker",
+		Events: []map[string]any{
+			{"type": "plan", "body": "research artifact"},
+		},
+	})
+
+	got, ok := o.findTicket(13)
+	if !ok {
+		t.Fatalf("ticket not found")
+	}
+
+	if got.Phase != PhaseArbitrate {
+		t.Fatalf("phase = %s, want %s", got.Phase, PhaseArbitrate)
+	}
+
+	if o.arb[13].trigger != VerdictPlanWritten {
+		t.Fatalf("trigger = %s, want %s", o.arb[13].trigger, VerdictPlanWritten)
+	}
+
+	assertArbiterJobWorkspace(t, o, 13, "ws-tasker")
+}
+
 func TestArbiterWorkspaceFromDiggerCantDo(t *testing.T) {
 	o := testOrchestratorForArbiter(t, Ticket{N: 1, Phase: PhaseImplement, Descr: "t", Prio: 1})
 
@@ -96,6 +124,28 @@ func TestArbiterFallsBackToFreshWorkspaceWhenNoWorkspaceKnown(t *testing.T) {
 
 	if job.WS != "" {
 		t.Fatalf("arbiter job ws = %q, want empty when NewWS is set", job.WS)
+	}
+}
+
+func TestArbiterContinueAfterPlanWrittenReturnsToPlan(t *testing.T) {
+	o := testOrchestratorForArbiter(t, Ticket{N: 6, Type: TicketTypePlan, Phase: PhaseArbitrate, Descr: "plan", Prio: 1})
+	o.arb[6] = arbCtx{trigger: VerdictPlanWritten, detail: "tasker produced plan", workspace: "ws-tasker"}
+
+	o.onArbiter(AgentResult{
+		Role:   RoleArbiter,
+		Ticket: 6,
+		Events: []map[string]any{
+			{"type": "verdict", "verdict": string(VerdictContinue), "detail": "revise the plan"},
+		},
+	})
+
+	got, ok := o.findTicket(6)
+	if !ok {
+		t.Fatalf("ticket not found")
+	}
+
+	if got.Phase != PhasePlan {
+		t.Fatalf("phase = %s, want %s", got.Phase, PhasePlan)
 	}
 }
 

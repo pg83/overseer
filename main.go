@@ -13,7 +13,7 @@ import (
 func main() {
 	exc := Try(func() {
 		if len(os.Args) < 2 {
-			ThrowFmt("usage: overseer {run|plan|jail} [args...]")
+			ThrowFmt("usage: overseer {run|plan|jail|tickets} [args...]")
 		}
 
 		sub := os.Args[1]
@@ -26,8 +26,10 @@ func main() {
 			planMain(args)
 		case "jail":
 			jailMain(args)
+		case "tickets":
+			ticketsMain(args)
 		default:
-			ThrowFmt("unknown subcommand %q (expected: run, plan, jail)", sub)
+			ThrowFmt("unknown subcommand %q (expected: run, plan, jail, tickets)", sub)
 		}
 	})
 
@@ -132,9 +134,10 @@ func runMain(argv []string) {
 
 // resolveJail returns the jail-prefix command (passed verbatim to wrapJail)
 // plus a human description for the BOOT log. Three modes:
-//   --no-jail            → nil           (insecure direct exec, trusted hosts).
-//   --jail-bin X         → ["X"]         (external jail binary, PATH-resolved).
-//   neither              → [self, "jail"] (built-in `overseer jail` subcommand).
+//
+//	--no-jail            → nil           (insecure direct exec, trusted hosts).
+//	--jail-bin X         → ["X"]         (external jail binary, PATH-resolved).
+//	neither              → [self, "jail"] (built-in `overseer jail` subcommand).
 func resolveJail(jailBin string, noJail bool) (jail []string, descr string) {
 	if noJail {
 		return nil, "(direct, --no-jail)"
