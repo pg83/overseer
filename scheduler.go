@@ -133,7 +133,7 @@ func (o *Orchestrator) scheduleReady() {
 
 		cur, ok := o.findTicketLocked(t.N)
 
-		if !ok || cur.InProgress || cur.State != StateOpen {
+		if !ok || cur.Stage != StageIdle || cur.State != StateOpen {
 			o.Mu.Unlock()
 
 			continue
@@ -165,7 +165,7 @@ func (o *Orchestrator) readyCandidatesLocked() []Ticket {
 			continue
 		}
 
-		if t.InProgress {
+		if t.Stage != StageIdle {
 			continue
 		}
 
@@ -386,7 +386,7 @@ func (o *Orchestrator) ticketEnv(ticketN int, wsAbs string) map[string]string {
 func (o *Orchestrator) spawnTaskerLocked(ticketN int) {
 	wsID := NewWorkspace(o.Root, o.Trunk)
 
-	o.setInProgressLocked(ticketN, true)
+	o.setStageLocked(ticketN, StageTasker)
 	o.appendWorkspaceLocked(ticketN, wsID)
 
 	wsAbs := wsPath(o.Root, wsID)
@@ -408,7 +408,7 @@ func (o *Orchestrator) spawnTaskerLocked(ticketN int) {
 func (o *Orchestrator) spawnDiggerFreshLocked(ticketN int) {
 	wsID := NewWorkspace(o.Root, o.Trunk)
 
-	o.setInProgressLocked(ticketN, true)
+	o.setStageLocked(ticketN, StageDigger)
 	o.appendWorkspaceLocked(ticketN, wsID)
 
 	o.recordEventLocked(ticketN, "AGENT_START", fmt.Sprintf("role=%s ws=%s", RoleDigger, wsID))
@@ -487,10 +487,49 @@ func (o *Orchestrator) appendWorkspaceLocked(n int, ws string) {
 	o.appendLogEventLocked(LogEvent{"k": "ws", "n": n, "ws": ws})
 }
 
-func (o *Orchestrator) setInProgressLocked(n int, v bool) {
+// setStageLocked sets the in-memory pipeline stage of ticket n. Caller holds o.Mu.
+func (o *Orchestrator) setStageLocked(n int, s TicketStage) {
 	for i := range o.Tickets {
 		if o.Tickets[i].N == n {
-			o.Tickets[i].InProgress = v
+			o.Tickets[i].Stage = s
+		}
+	}
+}
+
+// setStage is the locking wrapper for callers that don't already hold o.Mu — the
+// arbiter / merger goroutines, which run outside the main loop.
+func (o *Orchestrator) setStage(n int, s TicketStage) {
+	o.Mu.Lock()
+	o.setStageLocked(n, s)
+	o.Mu.Unlock()
+}
+
+// replannerStageNsLocked returns the N of every OPEN ticket parked in
+// StageReplanner — escalated tickets awaiting a replanner pass. Caller holds o.Mu.
+func (o *Orchestrator) replannerStageNsLocked() []int {
+	var out []int
+
+	for _, t := range o.Tickets {
+		if t.State == StateOpen && t.Stage == StageReplanner {
+			out = append(out, t.N)
+		}
+	}
+
+	return out
+}
+
+// releaseReplannerStage returns the given tickets from StageReplanner back to
+// StageIdle so scheduleReady picks them up again — called after a replanner pass
+// has considered them (re-scoped, cancelled, or deliberately left as-is). Cancelled
+// tickets are already CLOSED and skipped. This is what closes the wedge the old
+// InProgress bool left open: an escalated ticket can no longer stay stuck forever.
+func (o *Orchestrator) releaseReplannerStage(ns []int) {
+	o.Mu.Lock()
+	defer o.Mu.Unlock()
+
+	for _, n := range ns {
+		if t, ok := o.findTicketLocked(n); ok && t.State == StateOpen && t.Stage == StageReplanner {
+			o.setStageLocked(n, StageIdle)
 		}
 	}
 }
@@ -501,9 +540,9 @@ func (o *Orchestrator) handleAgentResult(res AgentResult) {
 	// If the ticket was closed while the agent was still running (replanner cancel op
 	// closed it; the agent finished anyway and its result landed here), drop the result
 	// and stop the pipeline at this transition. No follow-up spawn, no state rewrite —
-	// also clear InProgress in case it survived the close path.
+	// also reset the stage in case it survived the close path.
 	if t, ok := o.findTicketLocked(res.Ticket); ok && t.State == StateClosed {
-		o.setInProgressLocked(res.Ticket, false)
+		o.setStageLocked(res.Ticket, StageIdle)
 		o.Mu.Unlock()
 		v, _ := lastVerdict(res.Events)
 		uiTicket("👻", res.Role, res.Ticket, "STALE", fmt.Sprintf("ticket already %s, dropping %s result", t.CloseReason, v))
@@ -565,6 +604,7 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 		o.recordEventLocked(res.Ticket, "TASKER_NO_PLAN", reason)
 		uiTicket("💀", RoleTasker, res.Ticket, "NO_PLAN", reason)
 
+		o.setStageLocked(res.Ticket, StageArbiter)
 		o.QArbiter <- ArbiterRequest{
 			Ticket:    res.Ticket,
 			Workspace: res.Workspace,
@@ -581,8 +621,9 @@ func (o *Orchestrator) handleTaskerResultLocked(res AgentResult) {
 	o.recordEventLocked(res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace)
 	uiTicket("📝", RoleTasker, res.Ticket, "PLAN_WRITTEN", "ws="+res.Workspace)
 
-	// Tasker done; ticket stays InProgress=true. scheduleReady won't pick it again,
-	// so spawn digger explicitly with a fresh workspace.
+	// Tasker done; ticket is still owned (StageTasker). scheduleReady won't pick it
+	// again, so spawn the digger explicitly — startAgentForTicketLocked flips it to
+	// StageDigger.
 	if t, ok := o.findTicketLocked(res.Ticket); ok {
 		o.startAgentForTicketLocked(t)
 	}
@@ -609,6 +650,7 @@ func (o *Orchestrator) handleDiggerResultLocked(res AgentResult) {
 		o.recordEventLocked(res.Ticket, "DIGGER_CANT_DO", detail)
 		uiTicket("🛑", RoleDigger, res.Ticket, "CANT_DO", detail)
 
+		o.setStageLocked(res.Ticket, StageArbiter)
 		o.QArbiter <- ArbiterRequest{
 			Ticket:    res.Ticket,
 			Workspace: res.Workspace,
@@ -628,12 +670,14 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 		o.recordEventLocked(res.Ticket, "REVIEWER_APPROVE", detail)
 		uiTicket("👍", RoleReviewer, res.Ticket, "APPROVE", detail)
 
+		o.setStageLocked(res.Ticket, StageMerger)
 		o.QMerger <- MergeRequest{Ticket: res.Ticket, Workspace: res.Workspace}
 		uiTicket("📥", RoleReviewer, res.Ticket, "→Q_merger", "ws="+res.Workspace)
 	case VerdictRework:
 		o.recordEventLocked(res.Ticket, "REVIEWER_REWORK", detail)
 		uiTicket("🔁", RoleReviewer, res.Ticket, "REWORK", detail)
 
+		o.setStageLocked(res.Ticket, StageArbiter)
 		o.QArbiter <- ArbiterRequest{
 			Ticket:    res.Ticket,
 			Workspace: res.Workspace,
@@ -646,6 +690,7 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 		o.recordEventLocked(res.Ticket, "REVIEWER_DISCARD", detail)
 		uiTicket("👎", RoleReviewer, res.Ticket, "DISCARD", detail)
 
+		o.setStageLocked(res.Ticket, StageArbiter)
 		o.QArbiter <- ArbiterRequest{
 			Ticket:    res.Ticket,
 			Workspace: res.Workspace,
@@ -659,7 +704,7 @@ func (o *Orchestrator) handleReviewerResultLocked(res AgentResult) {
 
 func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 	// Idempotent: applyLogEvent on a "close" event for an already-CLOSED ticket
-	// preserves the original close_reason and just clears InProgress.
+	// preserves the original close_reason and just resets the stage.
 	o.appendLogEventLocked(LogEvent{"k": "close", "n": n, "reason": string(reason)})
 
 	if o.openCountLocked() <= 2 {
@@ -669,6 +714,7 @@ func (o *Orchestrator) closeTicketLocked(n int, reason CloseReason) {
 }
 
 func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
+	o.setStageLocked(ticketN, StageReviewer)
 	uiTicket("🚀", RoleReviewer, ticketN, "START", "ws="+ws)
 
 	wsAbs := wsPath(o.Root, ws)
@@ -684,6 +730,7 @@ func (o *Orchestrator) spawnReviewerLocked(ticketN int, ws string) {
 }
 
 func (o *Orchestrator) spawnDiggerSameWorkspaceLocked(ticketN int, ws string) {
+	o.setStage(ticketN, StageDigger)
 	o.recordEvent(ticketN, "AGENT_START", fmt.Sprintf("role=%s ws=%s", RoleDigger, ws))
 	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws)
 
@@ -706,7 +753,47 @@ func (o *Orchestrator) replannerLoop() {
 			batch := o.drainReplanQueue(req)
 			o.safe("REPLANNER", func() { o.runReplanner(batch) })
 		}
+
+		// Liveness: an escalated ticket parks in StageReplanner. runReplanner releases
+		// the tickets a pass owned, but new escalations can arrive mid-pass — keep
+		// running until none remain, so an escalated ticket is never left stuck
+		// awaiting a replanner that never comes (the old InProgress wedge).
+		for o.drainReplannerStage() {
+		}
 	}
+}
+
+// drainReplannerStage runs one replanner pass over every ticket still parked in
+// StageReplanner, returning whether it found any (so the caller loops until the
+// stage is empty). Each request carries the ticket's N so the replanner sees which
+// escalated tickets it must resolve.
+func (o *Orchestrator) drainReplannerStage() bool {
+	select {
+	case <-o.StopCtx.Done():
+		return false
+	default:
+	}
+
+	o.Mu.Lock()
+	ns := o.replannerStageNsLocked()
+	o.Mu.Unlock()
+
+	if len(ns) == 0 {
+		return false
+	}
+
+	var batch []ReplanRequest
+
+	for _, n := range ns {
+		batch = append(batch, ReplanRequest{
+			Source: RoleArbiter, Ticket: n,
+			Reason: "ticket parked in replanner stage (escalated) — re-scope or cancel it",
+		})
+	}
+
+	o.safe("REPLANNER", func() { o.runReplanner(batch) })
+
+	return true
 }
 
 // drainReplanQueue returns the triggering request plus every other request
@@ -740,8 +827,15 @@ func (o *Orchestrator) runReplanner(batch []ReplanRequest) {
 	wsID := NewWorkspace(o.Root, o.Trunk)
 
 	o.Mu.Lock()
+	owned := o.replannerStageNsLocked()
 	currentTasks := SerializeTasks(o.Tickets)
 	o.Mu.Unlock()
+
+	// Whatever this pass decides, the escalated tickets it owns must go back to
+	// StageIdle so scheduleReady picks them up again — otherwise a re-scope (or a
+	// no-op pass) would leave them parked forever. Captured before the run; released
+	// after, so escalations that arrive mid-pass stay parked for the next pass.
+	defer o.releaseReplannerStage(owned)
 
 	input := o.agentSelfBlock(RoleReplanner, 0) +
 		fmt.Sprintf("REPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
@@ -879,7 +973,7 @@ func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {
 
 		tickets[idx].State = StateClosed
 		tickets[idx].CloseReason = CloseDiscarded
-		tickets[idx].InProgress = false
+		tickets[idx].Stage = StageIdle
 
 		return tickets
 	}
@@ -1095,6 +1189,10 @@ func (o *Orchestrator) runArbiter(req ArbiterRequest) {
 		o.recordEvent(req.Ticket, "ARBITER_ESCALATE", detail)
 		uiTicket("⤴️", RoleArbiter, req.Ticket, "ESCALATE", detail)
 
+		// Hand the ticket to the replanner: park it in StageReplanner so scheduleReady
+		// leaves it alone and the replanner loop is obliged to deal with it (and then
+		// release it back to StageIdle). Without the stage the ticket would wedge.
+		o.setStage(req.Ticket, StageReplanner)
 		o.QReplanner <- ReplanRequest{
 			Source: RoleArbiter,
 			Ticket: req.Ticket,
@@ -1121,7 +1219,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 	t, ok := o.findTicketLocked(req.Ticket)
 
 	if !ok || t.State == StateClosed {
-		o.setInProgressLocked(req.Ticket, false)
+		o.setStageLocked(req.Ticket, StageIdle)
 		o.Mu.Unlock()
 		uiTicket("👻", RoleMerger, req.Ticket, "STALE", fmt.Sprintf("ticket %s before merger picked it up; skipping", t.CloseReason))
 
@@ -1184,6 +1282,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 			o.recordEvent(req.Ticket, "MERGE_FF_FAIL", out)
 			uiTicket("⚠️", RoleMerger, req.Ticket, "FF_FAIL", out)
 
+			o.setStage(req.Ticket, StageArbiter)
 			o.QArbiter <- ArbiterRequest{
 				Ticket:       req.Ticket,
 				Workspace:    req.Workspace,
@@ -1218,6 +1317,7 @@ func (o *Orchestrator) runMerger(req MergeRequest) {
 
 		head := CurrentTrunkHash(o.Trunk)
 
+		o.setStage(req.Ticket, StageArbiter)
 		o.QArbiter <- ArbiterRequest{
 			Ticket:       req.Ticket,
 			Workspace:    req.Workspace,
@@ -1240,6 +1340,7 @@ func (o *Orchestrator) spawnDiggerWithRebase(ticketN int, ws, target, mergeOut s
 		short = short[:8]
 	}
 
+	o.setStageLocked(ticketN, StageDigger)
 	o.recordEventLocked(ticketN, "AGENT_START",
 		fmt.Sprintf("role=%s ws=%s rebase=%s", RoleDigger, ws, short))
 	uiTicket("🚀", RoleDigger, ticketN, "START", "ws="+ws+" rebase→"+short)

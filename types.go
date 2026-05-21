@@ -26,6 +26,24 @@ const (
 	CloseDiscarded CloseReason = "DISCARDED"
 )
 
+// TicketStage is the in-memory pipeline position of a ticket — which role
+// currently owns it. Ephemeral (never persisted); rebuilt as agents are spawned.
+// StageIdle is the zero value: not in flight, the only stage scheduleReady will
+// pick up. StageReplanner means "escalated, handed back to the replanner": the
+// replanner loop runs until no ticket sits in it, then returns the ticket to
+// StageIdle — closing the gap where the old InProgress bool stayed stuck.
+type TicketStage string
+
+const (
+	StageIdle      TicketStage = ""
+	StageTasker    TicketStage = "tasker"
+	StageDigger    TicketStage = "digger"
+	StageReviewer  TicketStage = "reviewer"
+	StageMerger    TicketStage = "merger"
+	StageArbiter   TicketStage = "arbiter"
+	StageReplanner TicketStage = "replanner"
+)
+
 type TicketEvent struct {
 	Ts     string `json:"ts"`
 	Kind   string `json:"kind"`
@@ -42,10 +60,12 @@ type Ticket struct {
 	CloseReason CloseReason   `json:"close_reason,omitempty"`
 	Events      []TicketEvent `json:"events,omitempty"`
 
-	// In-memory only; never persisted.
-	// Set true when the ticket enters the work pipeline (tasker / digger / reviewer / merger),
-	// cleared only on terminal close. Source of truth for scheduleReady's "is this ticket busy".
-	InProgress bool `json:"-"`
+	// In-memory only; never persisted. Which role currently owns the ticket in the
+	// work pipeline (StageIdle = not in flight). Source of truth for scheduleReady's
+	// "is this ticket busy". Set on every handoff; returned to StageIdle when the
+	// ticket leaves the pipeline (terminal close, stale drop, or once the replanner
+	// has dealt with an escalated StageReplanner ticket).
+	Stage TicketStage `json:"-"`
 }
 
 type AgentRole string

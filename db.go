@@ -215,7 +215,7 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 		}
 
 		if tickets[idx].State == StateClosed {
-			tickets[idx].InProgress = false
+			tickets[idx].Stage = StageIdle
 
 			return tickets
 		}
@@ -228,7 +228,7 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 
 		tickets[idx].State = StateClosed
 		tickets[idx].CloseReason = CloseReason(reason)
-		tickets[idx].InProgress = false
+		tickets[idx].Stage = StageIdle
 
 		return tickets
 	case "event":
