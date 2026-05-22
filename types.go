@@ -128,6 +128,15 @@ const (
 	// --overseer / --replan boot flags. Never dispatched (it has no pool); used
 	// only to label the directive in the replanner's trigger list.
 	RoleOperator AgentRole = "operator"
+
+	// Common names the shared prompt tail appended to every role. It has no pool;
+	// the constant exists so its repo override file resolves to COMMON.md.
+	RoleCommon AgentRole = "common"
+
+	// Pupa and Lupa are the two `overseer plan` debate agents. Not dispatched by
+	// the run coordinator; their prompts get repo overrides PUPA.md / LUPA.md.
+	RolePupa AgentRole = "pupa"
+	RoleLupa AgentRole = "lupa"
 )
 
 type AgentVerdict string

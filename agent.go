@@ -627,8 +627,35 @@ func messageText(ev map[string]any) string {
 	return strings.TrimSpace(t)
 }
 
-func loadPrompt(role AgentRole) string {
-	return loadEmbedded("prompts/"+string(role)+".txt") + "\n\n" + loadEmbedded("prompts/common.txt")
+func loadPrompt(repoRoot string, role AgentRole) string {
+	body := withRepoOverride(repoRoot, role, loadEmbedded("prompts/"+string(role)+".txt"))
+	common := withRepoOverride(repoRoot, RoleCommon, loadEmbedded("prompts/common.txt"))
+
+	return body + "\n\n" + common
+}
+
+// withRepoOverride appends an operator-supplied per-role override to the embedded
+// prompt. The override lives in the repo root as <ROLE>.md (merger → MERGER.md,
+// common → COMMON.md, ...), letting an operator extend any role's instructions
+// without touching the binary. Missing file or empty repoRoot is a no-op.
+func withRepoOverride(repoRoot string, role AgentRole, base string) string {
+	if repoRoot == "" {
+		return base
+	}
+
+	data, err := os.ReadFile(filepath.Join(repoRoot, strings.ToUpper(string(role))+".md"))
+
+	if err != nil {
+		return base
+	}
+
+	extra := strings.TrimSpace(string(data))
+
+	if extra == "" {
+		return base
+	}
+
+	return base + "\n\n" + extra
 }
 
 func loadEmbedded(path string) string {

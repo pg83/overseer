@@ -18,6 +18,8 @@ go build ./...
 
 Self-contained binary. Prompts in `prompts/*.txt` are baked in via `embed.FS`; no runtime files outside the working directory.
 
+Per-role prompt overrides: drop a `<ROLE>.md` file in the repo root (the trunk for `run`, the cwd for `plan`) and its contents are appended to that role's baked-in prompt — `MERGER.md` extends the merger, `COMMON.md` extends the tail shared by every role, `PUPA.md` / `LUPA.md` extend the plan-mode debaters, and so on for `DIGGER` / `REVIEWER` / `TASKER` / `REPLANNER` / `OVERSEER` / `ARBITER`. Missing files are simply ignored.
+
 ## Core concepts
 
 ### The `Harness` interface (`harness.go`)

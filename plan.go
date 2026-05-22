@@ -91,11 +91,11 @@ func planMain(args []string) {
 	fmt.Fprintf(os.Stderr, "🟢 plan: pupa=%s lupa=%s cwd=%s jail=%s max_rounds=%d\n",
 		planBindingDescr(pupaBinding), planBindingDescr(lupaBinding), cwd, jailDescr, *maxRounds)
 
-	pupa := &planAgent{name: "PUPA", role: AgentRole("pupa"), binding: pupaBinding, jail: jail, extraRW: extraRW, cwd: cwd}
-	lupa := &planAgent{name: "LUPA", role: AgentRole("lupa"), binding: lupaBinding, jail: jail, extraRW: extraRW, cwd: cwd}
+	pupa := &planAgent{name: "PUPA", role: RolePupa, binding: pupaBinding, jail: jail, extraRW: extraRW, cwd: cwd}
+	lupa := &planAgent{name: "LUPA", role: RoleLupa, binding: lupaBinding, jail: jail, extraRW: extraRW, cwd: cwd}
 
-	pupaPrompt := strings.TrimRight(loadEmbedded("prompts/pupa.txt"), "\n")
-	lupaPrompt := strings.TrimRight(loadEmbedded("prompts/lupa.txt"), "\n")
+	pupaPrompt := strings.TrimRight(withRepoOverride(cwd, RolePupa, loadEmbedded("prompts/pupa.txt")), "\n")
+	lupaPrompt := strings.TrimRight(withRepoOverride(cwd, RoleLupa, loadEmbedded("prompts/lupa.txt")), "\n")
 
 	pupaInput := pupaPrompt + "\n\nQUESTION:\n" + question
 	lupaFirst := true
