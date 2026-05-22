@@ -216,11 +216,25 @@ func (o *Orchestrator) dispatch() {
 			continue
 		}
 
+		// Serialize merges through the coordinator: dispatch the next merge only
+		// after onMerger has ff-merged the previous one (mergerBusy cleared there).
+		// Otherwise the merger worker would clone trunk for the next job in parallel
+		// with the coordinator's ff-merge of the last one, capturing a pre-landing
+		// trunk and then failing to fast-forward.
+		if role == RoleMerger && o.mergerBusy {
+			continue
+		}
+
 		if (t.Phase == PhasePlan || t.Phase == PhaseImplement) && !o.depsSatisfied(t) {
 			continue
 		}
 
 		o.shadow[t.N] = ShadowScheduled
+
+		if role == RoleMerger {
+			o.mergerBusy = true
+		}
+
 		o.jobs[role] <- o.buildJob(t, role)
 		uiTicket("📤", role, t.N, "DISPATCH", string(t.Phase))
 	}
@@ -340,9 +354,14 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 	}
 
 	// Per-ticket result for an already-terminal ticket (replanner cancelled it
-	// mid-flight): drop it, just clear the shadow.
+	// mid-flight): drop it, just clear the shadow. A merger landing here never
+	// reaches onMerger, so free the merge slot explicitly or it deadlocks.
 	if res.Role != RoleReplanner && res.Role != RoleOverseer {
 		if t, ok := o.findTicket(n); ok && t.Phase.Terminal() {
+			if res.Role == RoleMerger {
+				o.mergerBusy = false
+			}
+
 			o.shadow[n] = ShadowStopped
 			uiTicket("👻", res.Role, n, "STALE", "ticket "+string(t.Phase))
 
@@ -461,6 +480,8 @@ func (o *Orchestrator) onReviewer(res AgentResult) {
 }
 
 func (o *Orchestrator) onMerger(res AgentResult) {
+	o.mergerBusy = false
+
 	n := res.Ticket
 	verdict, detail := lastVerdict(res.Events)
 

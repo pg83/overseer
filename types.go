@@ -280,6 +280,7 @@ type Orchestrator struct {
 	replanOwned   []int
 	replannerBusy bool
 	overseerBusy  bool
+	mergerBusy    bool
 
 	jobs   map[AgentRole]chan Job
 	Events chan AgentResult
