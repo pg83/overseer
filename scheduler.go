@@ -86,10 +86,12 @@ func (o *Orchestrator) Run() {
 	}
 }
 
-// bootDirectives applies the operator's --overseer / --replan flags once at startup.
-// --replan queues a mandatory operator nudge for the next replanner batch; --overseer
-// force-runs an overseer pass with the same mandatory framing. Operator intent takes
-// precedence over the auto-seed overseer that fires on an empty DB.
+// bootDirectives kicks off exactly one agent at startup. Operator flags take
+// precedence: --replan queues a mandatory operator nudge for the replanner, and
+// --overseer force-runs an overseer pass, both with mandatory framing. Absent a
+// flag, the default boot depends on the task DB — an empty DB needs the overseer
+// to evaluate goals and seed direction; an existing plan gets one replanner pass
+// to re-evaluate it against the goals before work resumes.
 func (o *Orchestrator) bootDirectives() {
 	if o.bootReplan != "" {
 		o.nudges = append(o.nudges, ReplanReason{
@@ -103,9 +105,15 @@ func (o *Orchestrator) bootDirectives() {
 	case o.bootOverseer != "":
 		o.triggerOverseer(operatorDirective(o.bootOverseer))
 	case o.bootReplan != "":
-		// operator drives the replanner directly — skip the auto-seed overseer.
+		// operator drives the replanner directly — skip the default kick.
 	case o.nonTerminalCount() == 0:
 		o.triggerOverseer("boot: zero open tickets — evaluate goals and seed plan if needed")
+	default:
+		o.nudges = append(o.nudges, ReplanReason{
+			Source: RoleOverseer,
+			Reason: "boot: re-evaluate the open plan against GOALS.md and current state before resuming work",
+		})
+		uiSys("📥", "BOOT_REPLAN", "re-evaluate open plan")
 	}
 }
 
