@@ -13,7 +13,7 @@ import (
 func main() {
 	exc := Try(func() {
 		if len(os.Args) < 2 {
-			ThrowFmt("usage: overseer {run|plan|jail|tickets} [args...]")
+			ThrowFmt("usage: overseer {run|plan|jail|tickets|cost} [args...]")
 		}
 
 		sub := os.Args[1]
@@ -28,8 +28,10 @@ func main() {
 			jailMain(args)
 		case "tickets":
 			ticketsMain(args)
+		case "cost":
+			costMain(args)
 		default:
-			ThrowFmt("unknown subcommand %q (expected: run, plan, jail, tickets)", sub)
+			ThrowFmt("unknown subcommand %q (expected: run, plan, jail, tickets, cost)", sub)
 		}
 	})
 
