@@ -13,7 +13,7 @@ import (
 func main() {
 	exc := Try(func() {
 		if len(os.Args) < 2 {
-			ThrowFmt("usage: overseer {run|plan|jail|tickets|cost} [args...]")
+			ThrowFmt("usage: overseer {run|plan|jail} [args...]")
 		}
 
 		sub := os.Args[1]
@@ -21,17 +21,13 @@ func main() {
 
 		switch sub {
 		case "run":
-			runMain(args)
+			runDispatch(args)
 		case "plan":
 			planMain(args)
 		case "jail":
 			jailMain(args)
-		case "tickets":
-			ticketsMain(args)
-		case "cost":
-			costMain(args)
 		default:
-			ThrowFmt("unknown subcommand %q (expected: run, plan, jail, tickets, cost)", sub)
+			ThrowFmt("unknown subcommand %q (expected: run, plan, jail)", sub)
 		}
 	})
 
@@ -39,6 +35,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, "overseer:", e.Error())
 		os.Exit(1)
 	})
+}
+
+// runDispatch routes the `run` group: `run cost` / `run tickets` inspect an
+// existing run's root, anything else (flags, no args) is the orchestrator itself.
+func runDispatch(argv []string) {
+	if len(argv) > 0 {
+		switch argv[0] {
+		case "cost":
+			costMain(argv[1:])
+
+			return
+		case "tickets":
+			ticketsMain(argv[1:])
+
+			return
+		}
+	}
+
+	runMain(argv)
 }
 
 func runMain(argv []string) {

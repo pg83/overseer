@@ -21,14 +21,14 @@ var (
 // dollar cost of past runs from the saved run logs (run-usage is also persisted
 // live, but this works on any root's logs after the fact).
 func costMain(argv []string) {
-	fs := flag.NewFlagSet("cost", flag.ExitOnError)
+	fs := flag.NewFlagSet("run cost", flag.ExitOnError)
 	ticket := fs.Int("ticket", -1, "restrict to ticket N (default: whole project)")
 	Throw(fs.Parse(argv))
 
 	root := fs.Arg(0)
 
 	if root == "" {
-		ThrowFmt("usage: overseer cost [--ticket N] <root>")
+		ThrowFmt("usage: overseer run cost [--ticket N] <root>")
 	}
 
 	reportCost(root, *ticket)

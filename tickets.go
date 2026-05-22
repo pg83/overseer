@@ -13,13 +13,13 @@ import (
 )
 
 func ticketsMain(argv []string) {
-	fs := flag.NewFlagSet("tickets", flag.ExitOnError)
+	fs := flag.NewFlagSet("run tickets", flag.ExitOnError)
 	path := fs.String("path", "", "path to tasks.events.jsonl")
 
 	Throw(fs.Parse(argv))
 
 	if *path == "" {
-		ThrowFmt("tickets: --path is required")
+		ThrowFmt("run tickets: --path is required")
 	}
 
 	abs := *path
