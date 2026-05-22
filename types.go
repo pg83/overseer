@@ -177,7 +177,6 @@ type AgentResult struct {
 	Ticket    int
 	Workspace string
 	ChatLine  string
-	Model     string
 	Usage     RunUsage
 
 	Args      []string

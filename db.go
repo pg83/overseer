@@ -69,6 +69,13 @@ func LoadTasks(root string) []Ticket {
 		var ev LogEvent
 		Throw(json.Unmarshal(line, &ev))
 
+		if k, _ := ev["k"].(string); k == "usage" {
+			usd, _ := ev["usd"].(float64)
+			meter.add(RunUsage{USD: usd})
+
+			continue
+		}
+
 		tickets = applyLogEvent(tickets, ev)
 	}
 
@@ -211,6 +218,28 @@ func (o *Orchestrator) recordEvent(n int, kind, detail string) {
 	o.appendLog(LogEvent{"ts": ts, "k": "event", "n": n, "kind": kind, "detail": detail})
 
 	appendTicketLogTs(o.Root, n, ts, kind, detail)
+}
+
+// recordUsage persists one run's token tally + harness-synthesized USD to the
+// events log and folds it into the live cost meter. Called only by the coordinate
+// goroutine (the single events-log writer). USD is stored so the project total is
+// model-stable and survives restarts — LoadTasks sums it back. The model itself is
+// not stored.
+func (o *Orchestrator) recordUsage(res AgentResult) {
+	if res.Usage.tokens() == 0 {
+		return
+	}
+
+	meter.add(res.Usage)
+
+	o.appendLog(LogEvent{
+		"k": "usage", "n": res.Ticket, "role": string(res.Role),
+		"in": res.Usage.Input, "cache": res.Usage.Cache, "out": res.Usage.Output, "usd": res.Usage.USD,
+	})
+
+	if res.Usage.USD > 0 {
+		uiTicket("💰", res.Role, res.Ticket, "COST", fmt.Sprintf("$%.4f", res.Usage.USD))
+	}
 }
 
 // SerializeTasks renders the in-memory tickets for the replanner's CURRENT_TASKS

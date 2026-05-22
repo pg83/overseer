@@ -1,8 +1,11 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 )
 
 // Codex drives OpenAI's `codex` CLI (codex 0.130+, `codex exec --json`) as
@@ -149,16 +152,46 @@ func (c *Codex) AccumulateUsage(ev map[string]any, u *RunUsage) {
 	u.Output += jsonInt(usage["output_tokens"]) + jsonInt(usage["reasoning_output_tokens"])
 }
 
-// codexDefaultModel is the price-table key used when no --model was pinned. codex
-// does not report its model in the JSON stream, so cost for an unpinned run is an
-// estimate under codex's current default; bump this when that default moves.
-const codexDefaultModel = "gpt-5.2-codex"
+// codexFallbackModel prices a run when ~/.codex/config.toml can't be read.
+const codexFallbackModel = "gpt-5.4"
 
-// CostUSD prices the tokens, falling back to the assumed default model when the
-// run didn't pin one (the common case — we let codex pick).
+var (
+	codexModelOnce sync.Once
+	codexModel     string
+)
+
+// codexConfiguredModel is the model codex actually runs: it doesn't report the
+// model in its JSON stream, and we don't pass --model, so codex picks it from
+// ~/.codex/config.toml — we read the same `model = "..."` line for pricing. Cached.
+func codexConfiguredModel() string {
+	codexModelOnce.Do(func() {
+		codexModel = codexFallbackModel
+
+		home, err := os.UserHomeDir()
+
+		if err != nil {
+			return
+		}
+
+		data, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+
+		if err != nil {
+			return
+		}
+
+		if m := regexp.MustCompile(`(?m)^\s*model\s*=\s*"([^"]+)"`).FindSubmatch(data); m != nil {
+			codexModel = string(m[1])
+		}
+	})
+
+	return codexModel
+}
+
+// CostUSD prices the tokens under the run's model, falling back to codex's
+// configured default when none was pinned (the common case — we let codex pick).
 func (c *Codex) CostUSD(model string, u RunUsage) float64 {
 	if model == "" {
-		model = codexDefaultModel
+		model = codexConfiguredModel()
 	}
 
 	usd, _ := usdForModel(model, u)

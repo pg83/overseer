@@ -349,6 +349,8 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 
 	n := res.Ticket
 
+	o.recordUsage(res)
+
 	for _, line := range eventReplans(res.Events) {
 		o.nudges = append(o.nudges, ReplanReason{Source: res.Role, Ticket: n, Workspace: res.Workspace, Reason: line})
 	}
