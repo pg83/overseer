@@ -634,28 +634,78 @@ func loadPrompt(repoRoot string, role AgentRole) string {
 	return body + "\n\n" + common
 }
 
-// withRepoOverride appends an operator-supplied per-role override to the embedded
-// prompt. The override lives in the repo root as <ROLE>.md (merger → MERGER.md,
-// common → COMMON.md, ...), letting an operator extend any role's instructions
-// without touching the binary. Missing file or empty repoRoot is a no-op.
+// withRepoOverride appends operator-supplied per-role prompt extensions to the
+// embedded prompt, letting an operator extend any role's instructions without
+// touching the binary. Two sources, both read from the repo root and both
+// optional: a dedicated <ROLE>.md file (merger → MERGER.md, common → COMMON.md,
+// ...), and the matching "### ROLE" section of a shared PROMPTS.md. Whatever is
+// found is appended in that order; missing files/sections and an empty repoRoot
+// are no-ops.
 func withRepoOverride(repoRoot string, role AgentRole, base string) string {
 	if repoRoot == "" {
 		return base
 	}
 
-	data, err := os.ReadFile(filepath.Join(repoRoot, strings.ToUpper(string(role))+".md"))
+	for _, extra := range []string{
+		readRepoFile(filepath.Join(repoRoot, strings.ToUpper(string(role))+".md")),
+		promptsSection(readRepoFile(filepath.Join(repoRoot, "PROMPTS.md")), role),
+	} {
+		if extra != "" {
+			base += "\n\n" + extra
+		}
+	}
+
+	return base
+}
+
+// readRepoFile returns a file's trimmed contents, "" if it can't be read.
+func readRepoFile(path string) string {
+	data, err := os.ReadFile(path)
 
 	if err != nil {
-		return base
+		return ""
 	}
 
-	extra := strings.TrimSpace(string(data))
+	return strings.TrimSpace(string(data))
+}
 
-	if extra == "" {
-		return base
+// promptsSection pulls the body of the "### ROLE" section out of a PROMPTS.md
+// document, matching the role name case-insensitively. The body runs from the
+// header to the next "### " header or end of file. "" if the section is absent.
+func promptsSection(doc string, role AgentRole) string {
+	if doc == "" {
+		return ""
 	}
 
-	return base + "\n\n" + extra
+	var body []string
+	collecting := false
+
+	for _, line := range strings.Split(doc, "\n") {
+		if name, ok := promptsHeader(line); ok {
+			collecting = strings.EqualFold(name, string(role))
+
+			continue
+		}
+
+		if collecting {
+			body = append(body, line)
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(body, "\n"))
+}
+
+// promptsHeader reports whether a line is a "### NAME" section header (exactly
+// three hashes, so deeper "####" subheadings inside a body are left alone) and
+// returns the trimmed NAME.
+func promptsHeader(line string) (string, bool) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "###")
+
+	if !ok || strings.HasPrefix(rest, "#") {
+		return "", false
+	}
+
+	return strings.TrimSpace(rest), true
 }
 
 func loadEmbedded(path string) string {
