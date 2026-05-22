@@ -5,13 +5,27 @@ import (
 	"os"
 )
 
-// uiSink consumes uiEvents. logSink prints the same colored line the orchestrator
-// always has; tuiSink (tui.go) folds them into the live TUI model.
+// taskSnap is one ticket's DB state for the TUI tasks tab — pushed by the
+// coordinator (the owner of ticket state) so the TUI never reads o.Tickets across
+// goroutines.
+type taskSnap struct {
+	n        int
+	descr    string
+	phase    Phase
+	inFlight bool // dispatched to a pool right now (shadow SCHEDULED)
+}
+
+// uiSink consumes uiEvents (and, for the TUI, ticket-DB snapshots). logSink prints
+// the classic colored line and ignores snapshots; tuiSink folds both into the
+// live model.
 type uiSink interface {
 	emit(uiEvent)
+	tasks([]taskSnap)
 }
 
 type logSink struct{}
+
+func (logSink) tasks([]taskSnap) {}
 
 func (logSink) emit(e uiEvent) {
 	fmt.Fprintf(os.Stderr, "%s%s%s  %s%7s%s  %s  %s%-5s%s  %s%-10s%s  %s%s%s  %s\n",

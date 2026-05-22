@@ -77,6 +77,10 @@ var uiOut uiSink = logSink{}
 // terminal in raw mode.
 var uiCleanup func()
 
+// uiTasksWanted gates the coordinator's per-dispatch ticket-DB snapshot — only
+// the TUI consumes it, so log mode skips the work.
+var uiTasksWanted bool
+
 func ui(emoji string, role AgentRole, ticket int, kind, msg string) {
 	uiOut.emit(uiEvent{
 		ts:     time.Now(),

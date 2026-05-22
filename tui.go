@@ -46,18 +46,23 @@ type lane struct {
 	buf       []uiEvent
 }
 
+// tuiSink is an actor: emit()/tasks() (called from the coordinator and pool
+// workers) only send messages on ch; the render goroutine is the sole owner of
+// the model and the only one that mutates it (in apply). No locks anywhere.
 type tuiSink struct {
-	mu      sync.Mutex // guards the model fields below (written by emit on worker goroutines)
-	log     []uiEvent
-	agents  []*lane
-	aidx    map[string]*lane
-	tasks   []*lane
-	tidx    map[int]*lane
-	roleUSD map[AgentRole]float64
-	runs    int
-	start   time.Time
+	ch chan any // uiEvent (log/activity) or []taskSnap (ticket DB), drained by the loop
 
-	// loop-only state (touched only by the render goroutine — no lock)
+	// owned exclusively by the render goroutine
+	log       []uiEvent
+	agents    []*lane
+	aidx      map[string]*lane
+	taskLanes []*lane
+	tidx      map[int]*lane
+	snaps     []taskSnap
+	roleUSD   map[AgentRole]float64
+	runs      int
+	start     time.Time
+
 	scr    tcell.Screen
 	tab    int // 0 log, 1 agents, 2 tasks, 3 stats
 	sel    int
@@ -67,6 +72,7 @@ type tuiSink struct {
 
 func newTuiSink() *tuiSink {
 	return &tuiSink{
+		ch:      make(chan any, 16384),
 		aidx:    map[string]*lane{},
 		tidx:    map[int]*lane{},
 		roleUSD: map[AgentRole]float64{},
@@ -74,9 +80,34 @@ func newTuiSink() *tuiSink {
 	}
 }
 
+// emit / tasks are the cross-goroutine entry points: non-blocking sends so a slow
+// or paused TUI never stalls the orchestrator. A full buffer drops the message —
+// the TUI is a live view, not the source of truth (the log files keep everything).
 func (t *tuiSink) emit(e uiEvent) {
-	t.mu.Lock()
+	select {
+	case t.ch <- e:
+	default:
+	}
+}
 
+func (t *tuiSink) tasks(snap []taskSnap) {
+	select {
+	case t.ch <- snap:
+	default:
+	}
+}
+
+// apply folds one message into the model — render-goroutine only.
+func (t *tuiSink) apply(m any) {
+	switch v := m.(type) {
+	case uiEvent:
+		t.applyEvent(v)
+	case []taskSnap:
+		t.snaps = v
+	}
+}
+
+func (t *tuiSink) applyEvent(e uiEvent) {
 	t.log = append(t.log, e)
 
 	if len(t.log) > tuiLogCap {
@@ -115,15 +146,13 @@ func (t *tuiSink) emit(e uiEvent) {
 		if k == nil {
 			k = &lane{ticket: e.ticket}
 			t.tidx[e.ticket] = k
-			t.tasks = append(t.tasks, k)
+			t.taskLanes = append(t.taskLanes, k)
 		}
 
 		laneAppend(k, e)
 		k.role = e.role
 		k.running = !terminalKinds[e.kind]
 	}
-
-	t.mu.Unlock()
 }
 
 func laneAppend(l *lane, e uiEvent) {
@@ -190,6 +219,7 @@ func runWithTUI(o *Orchestrator) {
 
 	uiOut = t
 	uiCleanup = cleanup
+	uiTasksWanted = true
 
 	go o.Run()
 	t.loop(o.StopCtx, o.StopCancel)
@@ -222,6 +252,11 @@ func (t *tuiSink) loop(ctx context.Context, stop func()) {
 		select {
 		case <-ctx.Done():
 			return
+		case m := <-t.ch:
+			// apply this and any other pending messages, then let the ticker
+			// render — batches bursts into one redraw.
+			t.apply(m)
+			t.drain()
 		case ev := <-evCh:
 			switch ev := ev.(type) {
 			case *tcell.EventResize:
@@ -235,6 +270,18 @@ func (t *tuiSink) loop(ctx context.Context, stop func()) {
 			t.render()
 		case <-tick.C:
 			t.render()
+		}
+	}
+}
+
+// drain applies every message currently queued without blocking.
+func (t *tuiSink) drain() {
+	for {
+		select {
+		case m := <-t.ch:
+			t.apply(m)
+		default:
+			return
 		}
 	}
 }
@@ -298,27 +345,30 @@ func (t *tuiSink) handleKey(ev *tcell.EventKey, stop func()) bool {
 }
 
 func (t *tuiSink) openDetail() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	var lanes []*lane
-
 	switch t.tab {
 	case 1:
-		lanes = t.sortedAgents()
-	case 2:
-		lanes = t.sortedTasks()
-	default:
-		return
-	}
+		lanes := t.sortedAgents()
 
-	if t.sel < len(lanes) {
-		t.detail = lanes[t.sel]
-		t.scroll = 0
+		if t.sel < len(lanes) {
+			t.detail = lanes[t.sel]
+			t.scroll = 0
+		}
+	case 2:
+		snaps := t.orderedSnaps()
+
+		if t.sel < len(snaps) {
+			n := snaps[t.sel].n
+			t.detail = t.tidx[n]
+
+			if t.detail == nil {
+				t.detail = &lane{ticket: n}
+			}
+
+			t.scroll = 0
+		}
 	}
 }
 
-// sortedAgents / sortedTasks assume the caller holds t.mu.
 func (t *tuiSink) sortedAgents() []*lane {
 	out := append([]*lane{}, t.agents...)
 
@@ -333,20 +383,34 @@ func (t *tuiSink) sortedAgents() []*lane {
 	return out
 }
 
-func (t *tuiSink) sortedTasks() []*lane {
-	out := append([]*lane{}, t.tasks...)
+// orderedSnaps groups the ticket DB for the tasks tab: in-flight first, then open
+// (non-terminal, not dispatched), then terminal; by ticket number within a group.
+func (t *tuiSink) orderedSnaps() []taskSnap {
+	out := append([]taskSnap{}, t.snaps...)
+
+	group := func(s taskSnap) int {
+		switch {
+		case s.inFlight:
+			return 0
+		case !s.phase.Terminal():
+			return 1
+		default:
+			return 2
+		}
+	}
 
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].ticket < out[j].ticket
+		if gi, gj := group(out[i]), group(out[j]); gi != gj {
+			return gi < gj
+		}
+
+		return out[i].n < out[j].n
 	})
 
 	return out
 }
 
 func (t *tuiSink) render() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	s := t.scr
 	s.Clear()
 
@@ -438,16 +502,46 @@ func (t *tuiSink) drawEvent(y, w int, e uiEvent) {
 }
 
 func (t *tuiSink) drawAgents(w, h int) {
-	lanes := t.sortedAgents()
-	t.drawLaneList(lanes, w, h, true)
+	t.drawLaneList(t.sortedAgents(), w, h)
 }
 
 func (t *tuiSink) drawTasks(w, h int) {
-	lanes := t.sortedTasks()
-	t.drawLaneList(lanes, w, h, false)
+	snaps := t.orderedSnaps()
+
+	if len(snaps) > 0 {
+		t.sel = clampInt(t.sel, 0, len(snaps)-1)
+	}
+
+	y := 2
+
+	for i, s := range snaps {
+		if y > h-2 {
+			break
+		}
+
+		base := tcell.StyleDefault
+		marker := "· "
+
+		switch {
+		case s.inFlight:
+			base, marker = base.Foreground(tcell.ColorGreen), "● "
+		case s.phase.Terminal():
+			base, marker = base.Dim(true), "  "
+		}
+
+		if i == t.sel {
+			base = tcell.StyleDefault.Reverse(true)
+		}
+
+		x := putStr(t.scr, 0, y, base, marker)
+		x = putStr(t.scr, x, y, base.Bold(true), fmt.Sprintf("%-5s ", ticketLabel(s.n)))
+		drawClip(t.scr, x, y, w, base, s.descr)
+
+		y++
+	}
 }
 
-func (t *tuiSink) drawLaneList(lanes []*lane, w, h int, showRoleCol bool) {
+func (t *tuiSink) drawLaneList(lanes []*lane, w, h int) {
 	if len(lanes) > 0 {
 		t.sel = clampInt(t.sel, 0, len(lanes)-1)
 	}
@@ -532,15 +626,18 @@ func (t *tuiSink) drawStats(w, h int) {
 		lines = append(lines, fmt.Sprintf("  %-10s  $%.2f", roleName(x.r), x.v))
 	}
 
-	active := 0
+	inflight, open := 0, 0
 
-	for _, k := range t.tasks {
-		if k.running {
-			active++
+	for _, s := range t.snaps {
+		switch {
+		case s.inFlight:
+			inflight++
+		case !s.phase.Terminal():
+			open++
 		}
 	}
 
-	lines = append(lines, "", fmt.Sprintf("tasks seen: %d  (%d active)", len(t.tasks), active))
+	lines = append(lines, "", fmt.Sprintf("tickets: %d  (%d in-flight, %d open)", len(t.snaps), inflight, open))
 
 	y := 2
 

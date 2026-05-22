@@ -240,6 +240,29 @@ func (o *Orchestrator) dispatch() {
 	}
 
 	o.dispatchReplanner()
+	o.publishTasks()
+}
+
+// publishTasks pushes a ticket-DB snapshot to the TUI (coordinator-owned state →
+// safe to read here). No-op in log mode. Sent at boot too, since dispatch runs
+// before the main loop.
+func (o *Orchestrator) publishTasks() {
+	if !uiTasksWanted {
+		return
+	}
+
+	snap := make([]taskSnap, 0, len(o.Tickets))
+
+	for _, t := range o.Tickets {
+		snap = append(snap, taskSnap{
+			n:        t.N,
+			descr:    t.Descr,
+			phase:    t.Phase,
+			inFlight: o.shadow[t.N] == ShadowScheduled,
+		})
+	}
+
+	uiOut.tasks(snap)
 }
 
 // dispatchReplanner hands the (serial) replanner pool one batched Job covering every
