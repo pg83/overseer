@@ -42,7 +42,7 @@ func main() {
 func runMain(argv []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 
-	root := fs.String("root", "", "orchestrator root (where tasks.jsonl, tickets/, workspaces/ live)")
+	root := fs.String("root", "", "orchestrator root (where tasks.events.jsonl, tickets/, workspaces/ live)")
 	trunk := fs.String("trunk", "", "path to git working tree being modified")
 
 	defaultHarness := fs.String("harness", "", "default harness:model spec — '<bin>' or '<bin>:<model>'. Required.")

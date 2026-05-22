@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,20 +38,17 @@ func tasksDBPath(orchRoot string) string {
 //	update: descr? (string), deps? ([]int) — only present fields change
 //	event:  kind (string), detail (string) — appended to ticket.Events (history)
 //	ws:     ws (string) — appended to ticket.Workspaces
-//
-// Legacy logs may carry "close" (reason MERGED/DISCARDED) — replayed into a phase.
 type LogEvent = map[string]any
 
 // LoadTasks rebuilds the in-memory ticket list by replaying tasks.events.jsonl.
-// Missing log = fresh orchestrator (returns nil). A legacy tasks.jsonl snapshot is
-// migrated on first run.
+// Missing log = fresh orchestrator (returns nil).
 func LoadTasks(root string) []Ticket {
 	path := eventsLogPath(root)
 
 	f, err := os.Open(path)
 
 	if os.IsNotExist(err) {
-		return migrateLegacyFormat(root)
+		return nil
 	}
 
 	Throw(err)
@@ -79,95 +75,6 @@ func LoadTasks(root string) []Ticket {
 	Throw(scanner.Err())
 
 	return tickets
-}
-
-// migrateLegacyFormat reads the old tasks.jsonl snapshot (if any), converts each
-// ticket into a series of log events, and writes them as the new event log. The
-// legacy file is left in place — operator can rm after verifying.
-func migrateLegacyFormat(root string) []Ticket {
-	oldPath := filepath.Join(root, "tasks.jsonl")
-
-	f, err := os.Open(oldPath)
-
-	if os.IsNotExist(err) {
-		return nil
-	}
-
-	Throw(err)
-	defer f.Close()
-
-	out := Throw2(os.Create(eventsLogPath(root)))
-	defer out.Close()
-
-	var tickets []Ticket
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 64<<20)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
-		}
-
-		var legacy struct {
-			N           int           `json:"n"`
-			State       string        `json:"state"`
-			Descr       string        `json:"descr"`
-			Deps        []int         `json:"deps"`
-			Workspaces  []string      `json:"workspaces"`
-			CloseReason string        `json:"close_reason"`
-			Events      []TicketEvent `json:"events"`
-		}
-		Throw(json.Unmarshal(line, &legacy))
-
-		phase := PhasePlan
-
-		if legacy.State == "CLOSED" {
-			phase = PhaseDiscarded
-
-			if legacy.CloseReason == "MERGED" {
-				phase = PhaseMerged
-			}
-		}
-
-		emitLegacyTicketAsEvents(out, legacy.N, legacy.Descr, legacy.Deps, legacy.Workspaces, legacy.Events, phase)
-
-		tickets = applyLogEvent(tickets, LogEvent{"k": "create", "n": legacy.N, "descr": legacy.Descr, "deps": legacy.Deps})
-		tickets = applyLogEvent(tickets, LogEvent{"k": "phase", "n": legacy.N, "phase": string(phase)})
-	}
-
-	Throw(scanner.Err())
-
-	return tickets
-}
-
-// emitLegacyTicketAsEvents writes a synthetic event sequence reproducing one
-// legacy ticket's state. Used only at one-shot migration time.
-func emitLegacyTicketAsEvents(w io.Writer, n int, descr string, deps []int, workspaces []string, events []TicketEvent, phase Phase) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	write := func(ev LogEvent) {
-		if _, ok := ev["ts"]; !ok {
-			ev["ts"] = now
-		}
-
-		b := Throw2(json.Marshal(ev))
-		Throw2(w.Write(append(b, '\n')))
-	}
-
-	write(LogEvent{"k": "create", "n": n, "type": string(TicketTypeCode), "descr": descr, "deps": deps})
-
-	for _, ws := range workspaces {
-		write(LogEvent{"k": "ws", "n": n, "ws": ws})
-	}
-
-	for _, e := range events {
-		write(LogEvent{"ts": e.Ts, "k": "event", "n": n, "kind": e.Kind, "detail": e.Detail})
-	}
-
-	write(LogEvent{"k": "phase", "n": n, "phase": string(phase)})
 }
 
 // applyLogEvent applies one event to a ticket list, returning the updated list.
@@ -222,20 +129,6 @@ func applyLogEvent(tickets []Ticket, ev LogEvent) []Ticket {
 			}
 
 			tickets[idx].Phase = phase
-		}
-
-		return tickets
-	case "close":
-		// Legacy: map an old close record onto a terminal phase.
-		if idx < 0 {
-			return tickets
-		}
-
-		reason, _ := ev["reason"].(string)
-		tickets[idx].Phase = PhaseDiscarded
-
-		if reason == "MERGED" {
-			tickets[idx].Phase = PhaseMerged
 		}
 
 		return tickets
