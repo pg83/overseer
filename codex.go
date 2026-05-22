@@ -127,6 +127,28 @@ func (c *Codex) firstChangedPath(item map[string]any) string {
 	return "<file change>"
 }
 
+// AccumulateUsage reads `turn.completed`, which carries per-run usage (codex
+// emits one per exec run). codex's input_tokens INCLUDES cached_input_tokens, so
+// subtract to get fresh input; reasoning tokens are billed as output, so fold
+// them in. codex reports no dollar cost — USD stays 0.
+func (c *Codex) AccumulateUsage(ev map[string]any, u *RunUsage) {
+	if t, _ := ev["type"].(string); t != "turn.completed" {
+		return
+	}
+
+	usage, _ := ev["usage"].(map[string]any)
+
+	if usage == nil {
+		return
+	}
+
+	cached := jsonInt(usage["cached_input_tokens"])
+
+	u.Input += jsonInt(usage["input_tokens"]) - cached
+	u.Cache += cached
+	u.Output += jsonInt(usage["output_tokens"]) + jsonInt(usage["reasoning_output_tokens"])
+}
+
 // ClassifyFault: OpenAI-side transient signatures plus the shared network set.
 // Grow the list as we observe new codex-cli error messages.
 func (c *Codex) ClassifyFault(f *agentFault) (bool, string) {

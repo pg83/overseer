@@ -317,6 +317,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 	var finalText strings.Builder
 	var rawStream bytes.Buffer
 	var streamFault streamErr
+	var usage RunUsage
 
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
@@ -336,6 +337,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 		writeEvent(map[string]any{"t": "harness", "ev": ev})
 
 		harness.ParseStreamLine(ev, &finalText, &streamFault, role, ticket)
+		harness.AccumulateUsage(ev, &usage)
 	}
 
 	err := cmd.Wait()
@@ -371,6 +373,8 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 			stdout: res.Stdout,
 		})
 	}
+
+	meter.add(usage)
 
 	return res
 }

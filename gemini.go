@@ -82,6 +82,9 @@ func (g *Gemini) ParseStreamLine(ev map[string]any, finalText *strings.Builder, 
 }
 
 // ClassifyFault: Google-side transient signatures plus the shared network set.
+// AccumulateUsage: gemini's stream isn't wired for usage extraction yet.
+func (g *Gemini) AccumulateUsage(_ map[string]any, _ *RunUsage) {}
+
 // Gemini surfaces quota / safety / overload errors with distinctive wording —
 // grow the list as production reveals new patterns.
 func (g *Gemini) ClassifyFault(f *agentFault) (bool, string) {

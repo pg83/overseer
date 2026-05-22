@@ -64,6 +64,29 @@ func (c *Claude) ParseStreamLine(ev map[string]any, finalText *strings.Builder, 
 	}
 }
 
+// AccumulateUsage reads the single `result` event, which carries the run's
+// cumulative usage and dollar cost. claude's input_tokens excludes cache (cache
+// is reported separately), so map it straight to fresh Input.
+func (c *Claude) AccumulateUsage(ev map[string]any, u *RunUsage) {
+	if t, _ := ev["type"].(string); t != "result" {
+		return
+	}
+
+	if cost, ok := ev["total_cost_usd"].(float64); ok {
+		u.USD += cost
+	}
+
+	usage, _ := ev["usage"].(map[string]any)
+
+	if usage == nil {
+		return
+	}
+
+	u.Input += jsonInt(usage["input_tokens"])
+	u.Output += jsonInt(usage["output_tokens"])
+	u.Cache += jsonInt(usage["cache_read_input_tokens"]) + jsonInt(usage["cache_creation_input_tokens"])
+}
+
 // ClassifyFault: Anthropic-side transient signatures plus the shared network set.
 // Grow the rate-limit / quota list as we observe new claude-code error signatures.
 func (c *Claude) ClassifyFault(f *agentFault) (bool, string) {

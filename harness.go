@@ -42,6 +42,11 @@ type Harness interface {
 	// classifier owns that knowledge.
 	ClassifyFault(f *agentFault) (retryable bool, reason string)
 
+	// AccumulateUsage folds one stream event's token/cost figures into u,
+	// normalized to fresh-input / cache / output (+ USD when the harness reports
+	// one). Harnesses that don't surface usage leave u untouched.
+	AccumulateUsage(ev map[string]any, u *RunUsage)
+
 	// SupportsSession reports whether this harness can resume a multi-turn dialog.
 	// The `overseer plan` handler refuses to bind a non-supporting harness as PUPA
 	// or LUPA. Orchestrator main loop ignores this — each agent run there is its

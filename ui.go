@@ -74,8 +74,9 @@ func ui(emoji string, role AgentRole, ticket int, kind, msg string) {
 
 	color := roleColor(role)
 
-	fmt.Fprintf(os.Stderr, "%s%s%s  %s  %s%-5s%s  %s%-10s%s  %s%s%s  %s\n",
+	fmt.Fprintf(os.Stderr, "%s%s%s  %s%7s%s  %s  %s%-5s%s  %s%-10s%s  %s%s%s  %s\n",
 		cDim, ts, cReset,
+		cGray, meter.column(), cReset,
 		emoji,
 		cBold, tstr, cReset,
 		color, rname, cReset,
