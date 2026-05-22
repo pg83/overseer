@@ -65,15 +65,11 @@ func (c *Claude) ParseStreamLine(ev map[string]any, finalText *strings.Builder, 
 }
 
 // AccumulateUsage reads the single `result` event, which carries the run's
-// cumulative usage and dollar cost. claude's input_tokens excludes cache (cache
-// is reported separately), so map it straight to fresh Input.
+// cumulative token usage. claude's input_tokens excludes cache (cache is reported
+// separately), so map it straight to fresh Input.
 func (c *Claude) AccumulateUsage(ev map[string]any, u *RunUsage) {
 	if t, _ := ev["type"].(string); t != "result" {
 		return
-	}
-
-	if cost, ok := ev["total_cost_usd"].(float64); ok {
-		u.USD += cost
 	}
 
 	usage, _ := ev["usage"].(map[string]any)
@@ -85,6 +81,23 @@ func (c *Claude) AccumulateUsage(ev map[string]any, u *RunUsage) {
 	u.Input += jsonInt(usage["input_tokens"])
 	u.Output += jsonInt(usage["output_tokens"])
 	u.Cache += jsonInt(usage["cache_read_input_tokens"]) + jsonInt(usage["cache_creation_input_tokens"])
+}
+
+// CostUSD maps claude-code's model aliases (the bare names DefaultModel hands out)
+// to current price-table keys, then prices the tokens.
+func (c *Claude) CostUSD(model string, u RunUsage) float64 {
+	switch model {
+	case "sonnet":
+		model = "claude-sonnet-4-5"
+	case "opus":
+		model = "claude-opus-4-7"
+	case "haiku":
+		model = "claude-haiku-4-5"
+	}
+
+	usd, _ := usdForModel(model, u)
+
+	return usd
 }
 
 // ClassifyFault: Anthropic-side transient signatures plus the shared network set.

@@ -85,6 +85,9 @@ func (g *Gemini) ParseStreamLine(ev map[string]any, finalText *strings.Builder, 
 // AccumulateUsage: gemini's stream isn't wired for usage extraction yet.
 func (g *Gemini) AccumulateUsage(_ map[string]any, _ *RunUsage) {}
 
+// CostUSD: no usage wired, so no synthesized cost.
+func (g *Gemini) CostUSD(_ string, _ RunUsage) float64 { return 0 }
+
 // Gemini surfaces quota / safety / overload errors with distinctive wording —
 // grow the list as production reveals new patterns.
 func (g *Gemini) ClassifyFault(f *agentFault) (bool, string) {

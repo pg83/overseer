@@ -92,6 +92,9 @@ func (o *Opencode) ParseStreamLine(ev map[string]any, finalText *strings.Builder
 // AccumulateUsage: opencode's stream isn't wired for usage extraction yet.
 func (o *Opencode) AccumulateUsage(_ map[string]any, _ *RunUsage) {}
 
+// CostUSD: no usage wired, so no synthesized cost.
+func (o *Opencode) CostUSD(_ string, _ RunUsage) float64 { return 0 }
+
 func (o *Opencode) ClassifyFault(f *agentFault) (bool, string) {
 	if ok, reason := classifyTransientNetworkFault(f.stderr, f.stdout); ok {
 		return true, reason

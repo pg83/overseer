@@ -149,6 +149,23 @@ func (c *Codex) AccumulateUsage(ev map[string]any, u *RunUsage) {
 	u.Output += jsonInt(usage["output_tokens"]) + jsonInt(usage["reasoning_output_tokens"])
 }
 
+// codexDefaultModel is the price-table key used when no --model was pinned. codex
+// does not report its model in the JSON stream, so cost for an unpinned run is an
+// estimate under codex's current default; bump this when that default moves.
+const codexDefaultModel = "gpt-5.2-codex"
+
+// CostUSD prices the tokens, falling back to the assumed default model when the
+// run didn't pin one (the common case — we let codex pick).
+func (c *Codex) CostUSD(model string, u RunUsage) float64 {
+	if model == "" {
+		model = codexDefaultModel
+	}
+
+	usd, _ := usdForModel(model, u)
+
+	return usd
+}
+
 // ClassifyFault: OpenAI-side transient signatures plus the shared network set.
 // Grow the list as we observe new codex-cli error messages.
 func (c *Codex) ClassifyFault(f *agentFault) (bool, string) {

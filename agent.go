@@ -374,7 +374,14 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 		})
 	}
 
+	usage.USD = harness.CostUSD(model, usage)
+	res.Model = model
+	res.Usage = usage
 	meter.add(usage)
+
+	if usage.USD > 0 {
+		uiTicket("💰", role, ticket, "COST", fmt.Sprintf("$%.4f", usage.USD))
+	}
 
 	return res
 }

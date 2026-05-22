@@ -42,10 +42,15 @@ type Harness interface {
 	// classifier owns that knowledge.
 	ClassifyFault(f *agentFault) (retryable bool, reason string)
 
-	// AccumulateUsage folds one stream event's token/cost figures into u,
-	// normalized to fresh-input / cache / output (+ USD when the harness reports
-	// one). Harnesses that don't surface usage leave u untouched.
+	// AccumulateUsage folds one stream event's token counts into u, normalized to
+	// fresh-input / cache / output. Harnesses that don't surface usage leave u
+	// untouched. Dollar cost is NOT taken from the stream — see CostUSD.
 	AccumulateUsage(ev map[string]any, u *RunUsage)
+
+	// CostUSD synthesizes the run's dollar cost from its token tally and the
+	// embedded price table, given the model the run used (which the harness may
+	// map to a table key or default when empty). 0 when the model isn't priceable.
+	CostUSD(model string, u RunUsage) float64
 
 	// SupportsSession reports whether this harness can resume a multi-turn dialog.
 	// The `overseer plan` handler refuses to bind a non-supporting harness as PUPA
