@@ -72,6 +72,10 @@ func (m *costMeter) add(u RunUsage) {
 	m.microUSD.Add(int64(u.USD * 1e6))
 }
 
+func (m *costMeter) totalUSD() float64 {
+	return float64(m.microUSD.Load()) / 1e6
+}
+
 // column renders the cumulative total for the fixed-width UI column; "" before
 // the first priced run (blank column).
 func (m *costMeter) column() string {

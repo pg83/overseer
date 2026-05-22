@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"os"
 	"time"
 )
 
@@ -57,31 +55,38 @@ func roleEmoji(r AgentRole) string {
 	return "📦"
 }
 
+// uiEvent is one line of orchestrator output, captured structurally so both sinks
+// (log → stderr, tui → in-memory model) render it their own way. cost is a
+// snapshot of the running cost column at emit time.
+type uiEvent struct {
+	ts     time.Time
+	cost   string
+	emoji  string
+	role   AgentRole
+	ticket int
+	kind   string
+	msg    string
+}
+
+// uiOut is the active sink. Default is the line logger (unchanged behavior);
+// `run --ui=tui` swaps in the TUI sink at startup.
+var uiOut uiSink = logSink{}
+
+// uiCleanup, when set (TUI mode), tears down the alternate screen and restores
+// stdio. fatal() calls it before exiting so a hard stop doesn't leave the
+// terminal in raw mode.
+var uiCleanup func()
+
 func ui(emoji string, role AgentRole, ticket int, kind, msg string) {
-	ts := time.Now().Format("15:04:05")
-
-	rname := string(role)
-
-	if rname == "" {
-		rname = "system"
-	}
-
-	tstr := "—"
-
-	if ticket >= 0 {
-		tstr = fmt.Sprintf("T-%d", ticket)
-	}
-
-	color := roleColor(role)
-
-	fmt.Fprintf(os.Stderr, "%s%s%s  %s%7s%s  %s  %s%-5s%s  %s%-10s%s  %s%s%s  %s\n",
-		cDim, ts, cReset,
-		cGray, meter.column(), cReset,
-		emoji,
-		cBold, tstr, cReset,
-		color, rname, cReset,
-		cBold, kind, cReset,
-		msg)
+	uiOut.emit(uiEvent{
+		ts:     time.Now(),
+		cost:   meter.column(),
+		emoji:  emoji,
+		role:   role,
+		ticket: ticket,
+		kind:   kind,
+		msg:    msg,
+	})
 }
 
 func uiSys(emoji, kind, msg string) {

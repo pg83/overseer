@@ -76,6 +76,8 @@ func runMain(argv []string) {
 	overseerDirective := fs.String("overseer", "", "operator directive: force one overseer pass at boot, injected as a mandatory instruction")
 	replanDirective := fs.String("replan", "", "operator directive: force one replanner pass at boot, injected as a mandatory instruction")
 
+	uiMode := fs.String("ui", "log", "ui mode: log (scrolling lines) | tui (interactive tcell tabs)")
+
 	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
 	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
 
@@ -147,9 +149,12 @@ func runMain(argv []string) {
 		o.StopCancel()
 	}()
 
-	o.Run()
-
-	<-o.Stopped
+	if strings.EqualFold(*uiMode, "tui") {
+		runWithTUI(o)
+	} else {
+		o.Run()
+		<-o.Stopped
+	}
 
 	uiSys("🔚", "STOP", "overseer halted")
 }

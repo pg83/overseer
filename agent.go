@@ -191,6 +191,11 @@ func (f *agentFault) Error() string {
 // signals shutdown to other goroutines, and exits the process (defers don't run).
 func (o *Orchestrator) fatal(reason string) {
 	uiSys("💀", "FATAL", reason)
+
+	if uiCleanup != nil {
+		uiCleanup()
+	}
+
 	fmt.Fprintf(os.Stderr, "FATAL: %s\n", reason)
 
 	if o.StopCancel != nil {
