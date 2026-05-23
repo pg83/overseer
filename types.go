@@ -15,6 +15,7 @@ const (
 	PhaseMerge     Phase = "MERGE"     // needs the merger
 	PhaseArbitrate Phase = "ARBITRATE" // needs the arbiter (a disagreement surfaced)
 	PhaseEscalate  Phase = "ESCALATE"  // needs the replanner (arbiter escalated)
+	PhaseFrozen    Phase = "FROZEN"    // held: a digger pulled the algedonic cord; awaits the overseer
 	PhasePlanned   Phase = "PLANNED"   // terminal: plan ticket produced its plan
 	PhaseMerged    Phase = "MERGED"    // terminal: code landed in trunk
 	PhaseDiscarded Phase = "DISCARDED" // terminal: dropped
@@ -151,6 +152,12 @@ const (
 	VerdictMergeFail     AgentVerdict = "MERGE_FAIL"
 	VerdictGoalsAchieved AgentVerdict = "GOALS_ACHIEVED"
 
+	// VerdictAlgedonic is the digger's emergency cord (VSM algedonic signal):
+	// systemic distress that bypasses review / merge / arbiter and goes straight
+	// to the overseer for a full re-think. Distinct from CANT_DO (this ticket is
+	// locally impossible) — algedonic means the problem is bigger than the ticket.
+	VerdictAlgedonic AgentVerdict = "algedonic"
+
 	// VerdictNoPlan is a synthetic trigger raised when a tasker fails to produce a
 	// plan. The tasker doesn't emit it (it just emits no `plan` event); the
 	// coordinator categorizes that absence as NO_PLAN for the arbiter's input.
@@ -282,6 +289,14 @@ type Orchestrator struct {
 	replannerBusy bool
 	overseerBusy  bool
 	mergerBusy    bool
+
+	// algedonic channel: tickets a digger froze via the emergency cord, awaiting
+	// the overseer's analysis; the in-flight pass's algedonic flag; and a queued
+	// scream that arrived while the overseer was busy (only algedonic queues).
+	frozen               []int
+	overseerAlgedonic    bool
+	overseerQueued       bool
+	overseerQueuedReason string
 
 	jobs   map[AgentRole]chan Job
 	Events chan AgentResult

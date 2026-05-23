@@ -93,6 +93,14 @@ func (o *Orchestrator) Run() {
 // to evaluate goals and seed direction; an existing plan gets one replanner pass
 // to re-evaluate it against the goals before work resumes.
 func (o *Orchestrator) bootDirectives() {
+	// A ticket persisted as FROZEN lost its in-memory algedonic context on
+	// restart; hand it to the replanner rather than leaving it stuck forever.
+	for _, t := range o.Tickets {
+		if t.Phase == PhaseFrozen {
+			o.setPhase(t.N, PhaseEscalate, "frozen ticket recovered after restart")
+		}
+	}
+
 	if o.bootReplan != "" {
 		o.nudges = append(o.nudges, ReplanReason{
 			Source: RoleOperator,
@@ -103,11 +111,11 @@ func (o *Orchestrator) bootDirectives() {
 
 	switch {
 	case o.bootOverseer != "":
-		o.triggerOverseer(operatorDirective(o.bootOverseer))
+		o.triggerOverseer(operatorDirective(o.bootOverseer), false)
 	case o.bootReplan != "":
 		// operator drives the replanner directly — skip the default kick.
 	case o.nonTerminalCount() == 0:
-		o.triggerOverseer("boot: zero open tickets — evaluate goals and seed plan if needed")
+		o.triggerOverseer("boot: zero open tickets — evaluate goals and seed plan if needed", false)
 	default:
 		o.nudges = append(o.nudges, ReplanReason{
 			Source: RoleOverseer,
@@ -349,12 +357,20 @@ func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
 
 // triggerOverseer dispatches a (serial) overseer evaluation if one isn't already in
 // flight.
-func (o *Orchestrator) triggerOverseer(reason string) {
+func (o *Orchestrator) triggerOverseer(reason string, algedonic bool) {
 	if o.overseerBusy {
+		// A routine trigger is droppable (another pass will come), but an algedonic
+		// scream must not be lost — queue it to run after the current pass.
+		if algedonic {
+			o.overseerQueued = true
+			o.overseerQueuedReason = reason
+		}
+
 		return
 	}
 
 	o.overseerBusy = true
+	o.overseerAlgedonic = algedonic
 	uiSys("🚀", "OVERSEER_START", reason)
 	o.jobs[RoleOverseer] <- Job{Role: RoleOverseer, NewWS: true, OverseerReason: reason, Snapshot: SerializeTasks(o.Tickets)}
 }
@@ -479,7 +495,20 @@ func (o *Orchestrator) onDigger(res AgentResult) {
 		o.recordEvent(n, "DIGGER_CANT_DO", detail)
 		o.setPhase(n, PhaseArbitrate, detail)
 		uiTicket("🛑", RoleDigger, n, "CANT_DO", detail)
+	case VerdictAlgedonic:
+		// Emergency cord: freeze the ticket (no pool will pick FROZEN up) and fire
+		// the overseer straight away, bypassing review / merge / arbiter. The
+		// overseer analyzes, then onOverseer releases the ticket to the replanner.
+		o.frozen = append(o.frozen, n)
+		o.recordEvent(n, "ALGEDONIC", detail)
+		o.setPhase(n, PhaseFrozen, detail)
+		uiTicket("🚨", RoleDigger, n, "ALGEDONIC", detail)
+		o.triggerOverseer(algedonicReason(n, detail), true)
 	}
+}
+
+func algedonicReason(n int, detail string) string {
+	return fmt.Sprintf("ALGEDONIC — the digger on T-%d pulled the emergency cord: %q. Drop the routine evaluation and do a FULL situation analysis (this ticket and its run history, GOALS.md, the surrounding plan), then hand the replanner concrete, mandatory direction to unblock or re-scope it.", n, detail)
 }
 
 func (o *Orchestrator) onReviewer(res AgentResult) {
@@ -617,6 +646,21 @@ func (o *Orchestrator) onReplanner(res AgentResult) {
 func (o *Orchestrator) onOverseer(res AgentResult) {
 	o.overseerBusy = false
 
+	// An algedonic-triggered pass has now done its analysis (and its replan nudges
+	// are already in o.nudges via handleResult). Release the frozen tickets to the
+	// replanner — ESCALATE routes them there with the overseer's mandatory direction.
+	if o.overseerAlgedonic {
+		o.overseerAlgedonic = false
+
+		for _, n := range o.frozen {
+			if t, ok := o.findTicket(n); ok && t.Phase == PhaseFrozen {
+				o.setPhase(n, PhaseEscalate, "algedonic analyzed — handed to replanner")
+			}
+		}
+
+		o.frozen = nil
+	}
+
 	verdict, detail := lastVerdict(res.Events)
 
 	if verdict == VerdictGoalsAchieved {
@@ -628,6 +672,11 @@ func (o *Orchestrator) onOverseer(res AgentResult) {
 	}
 
 	uiSys("🦉", "OVERSEER_DONE", fmt.Sprintf("verdict=%s pending_nudges=%d", verdict, len(o.nudges)))
+
+	if o.overseerQueued {
+		o.overseerQueued = false
+		o.triggerOverseer(o.overseerQueuedReason, true)
+	}
 }
 
 // afterTerminal fires the post-terminal bookkeeping: a fallout replan nudge plus an
@@ -641,7 +690,7 @@ func (o *Orchestrator) afterTerminal(n int, reason, workspace string) {
 	})
 
 	if o.nonTerminalCount() == 0 {
-		o.triggerOverseer(fmt.Sprintf("zero-open after T-%d %s", n, reason))
+		o.triggerOverseer(fmt.Sprintf("zero-open after T-%d %s", n, reason), false)
 	}
 }
 
@@ -734,7 +783,7 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 	}
 
 	if canceledAny && o.nonTerminalCount() == 0 {
-		o.triggerOverseer("zero-open after replanner batch")
+		o.triggerOverseer("zero-open after replanner batch", false)
 	}
 }
 

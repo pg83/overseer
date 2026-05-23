@@ -80,7 +80,7 @@ The mental model is a stripped-down engineering team:
 | **overseer** | product owner / QA lead | Reads `GOALS.md`, decides whether the project is done. When done → emits `GOALS_ACHIEVED`, run terminates and writes `REPORT.md`. Otherwise nudges the replanner. |
 | **replanner** | planning lead | Owns the ticket database. Reads goals + ticket history + recent agent runs, emits `task` operations (`new` / `update` / `replace` / `cancel`) that the orchestrator validates and applies. Invoked on every `replan` nudge from any role. |
 | **tasker** | senior engineer writing specs | Gets a ticket in phase `PLAN`, researches the codebase, writes `plan.md` for it — the work order for the digger. |
-| **digger** | implementer | Reads `plan.md`, makes the changes in a per-ticket workspace, squashes + rebases onto trunk. Reports `READY` (work done) or `CANT_DO` (can't, here's why). |
+| **digger** | implementer | Reads `plan.md`, makes the changes in a per-ticket workspace, squashes + rebases onto trunk. Reports `READY` (work done), `CANT_DO` (this ticket can't, here's why → arbiter), or `algedonic` — the emergency cord (VSM algedonic signal) for *systemic* trouble: it bypasses review/merge/arbiter, freezes the ticket, and fires the overseer for a full re-think. |
 | **reviewer** | code reviewer | Independently audits the digger's branch. Reports `APPROVE`, `REWORK` (needs revision), or `DISCARD` (kill the ticket). |
 | **merger** | release engineer | Serial (pool size 1). Runs tests on trunk (baseline), `git merge --no-ff` the digger's branch into a scratch worktree, re-runs tests. Reports `MERGED` or `MERGE_FAIL`; on `MERGED` the **coordinator** ff-merges that scratch branch into real trunk (the one place trunk is written). |
 | **arbiter** | tech lead breaking ties | Invoked on every disagreement (`REWORK` / `DISCARD` / `MERGE_FAIL` / `NO_PLAN`). Decides `CONTINUE` (keep iterating with the same role) or `ESCALATE` (kick to the replanner). |
@@ -91,7 +91,7 @@ A single **coordinator** goroutine (`scheduler.go`) owns *all* ticket state — 
 
 Two state axes:
 
-- **`Phase`** (persisted) — what work a ticket needs next: `PLAN` → tasker, `IMPLEMENT` → digger, `REVIEW` → reviewer, `MERGE` → merger, `ARBITRATE` → arbiter, `ESCALATE` → replanner, plus terminal `MERGED` / `DISCARDED`. Written to the event log as `phase` events; a restart replays them and resumes mid-pipeline.
+- **`Phase`** (persisted) — what work a ticket needs next: `PLAN` → tasker, `IMPLEMENT` → digger, `REVIEW` → reviewer, `MERGE` → merger, `ARBITRATE` → arbiter, `ESCALATE` → replanner, `FROZEN` → nobody (held after an algedonic scream until the overseer responds, then released to the replanner), plus terminal `MERGED` / `DISCARDED`. Written to the event log as `phase` events; a restart replays them and resumes mid-pipeline.
 - **`shadow`** (in-memory, coordinator-only) — `STOPPED` (dispatchable) or `SCHEDULED` (handed to a pool). Dispatch routes every `STOPPED` non-terminal ticket to `roleForPhase(phase)` and flips it to `SCHEDULED`; the returning result flips it back to `STOPPED`. That two-line rule *is* the scheduler.
 
 ### Pipeline: from a goal to a merged commit

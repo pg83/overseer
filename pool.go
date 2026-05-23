@@ -124,7 +124,7 @@ func (o *Orchestrator) jobDigger(job Job) AgentResult {
 		res := o.runAgent(RoleDigger, job.Ticket.N, ws, build(), env)
 		v, _ := lastVerdict(res.Events)
 
-		if v == VerdictReady || v == VerdictCantDo {
+		if v == VerdictReady || v == VerdictCantDo || v == VerdictAlgedonic {
 			res.Workspace = ws
 
 			return res
