@@ -14,8 +14,7 @@ const (
 	PhaseReview    Phase = "REVIEW"    // needs a reviewer
 	PhaseMerge     Phase = "MERGE"     // needs the merger
 	PhaseArbitrate Phase = "ARBITRATE" // needs the arbiter (a disagreement surfaced)
-	PhaseEscalate  Phase = "ESCALATE"  // needs the replanner (arbiter escalated)
-	PhaseFrozen    Phase = "FROZEN"    // held: a digger pulled the algedonic cord; awaits the overseer
+	PhaseEscalate  Phase = "ESCALATE"  // needs the replanner (arbiter escalated, or a digger's algedonic cord)
 	PhasePlanned   Phase = "PLANNED"   // terminal: plan ticket produced its plan
 	PhaseMerged    Phase = "MERGED"    // terminal: code landed in trunk
 	PhaseDiscarded Phase = "DISCARDED" // terminal: dropped
@@ -289,14 +288,6 @@ type Orchestrator struct {
 	replannerBusy bool
 	overseerBusy  bool
 	mergerBusy    bool
-
-	// algedonic channel: tickets a digger froze via the emergency cord, awaiting
-	// the overseer's analysis; the in-flight pass's algedonic flag; and a queued
-	// scream that arrived while the overseer was busy (only algedonic queues).
-	frozen               []int
-	overseerAlgedonic    bool
-	overseerQueued       bool
-	overseerQueuedReason string
 
 	jobs   map[AgentRole]chan Job
 	Events chan AgentResult

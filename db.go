@@ -395,7 +395,7 @@ func ValidateTasks(tickets []Ticket) {
 
 func validPhase(p Phase) bool {
 	switch p {
-	case PhasePlan, PhaseImplement, PhaseReview, PhaseMerge, PhaseArbitrate, PhaseEscalate, PhaseFrozen, PhasePlanned, PhaseMerged, PhaseDiscarded:
+	case PhasePlan, PhaseImplement, PhaseReview, PhaseMerge, PhaseArbitrate, PhaseEscalate, PhasePlanned, PhaseMerged, PhaseDiscarded:
 		return true
 	}
 
