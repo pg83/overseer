@@ -199,6 +199,13 @@ func (c *Codex) CostUSD(model string, u RunUsage) float64 {
 	return usd
 }
 
+// IsDone: codex's `exec` run ends with a single `turn.completed`.
+func (c *Codex) IsDone(ev map[string]any) bool {
+	t, _ := ev["type"].(string)
+
+	return t == "turn.completed"
+}
+
 // ClassifyFault: OpenAI-side transient signatures plus the shared network set.
 // Grow the list as we observe new codex-cli error messages.
 func (c *Codex) ClassifyFault(f *agentFault) (bool, string) {

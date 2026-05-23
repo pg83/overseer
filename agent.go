@@ -17,6 +17,12 @@ import (
 //go:embed prompts/*.txt
 var embeddedPrompts embed.FS
 
+// harnessExitGrace is how long we wait for a harness to exit after it emits its
+// terminal stream event before force-killing it (see the liveness guard in
+// runAgentOnce). Generous, since the run's output is already captured — this only
+// rescues a hung process, it never cuts a working one short.
+const harnessExitGrace = 30 * time.Second
+
 // harnessModelForRole resolves the (harness, model) binding for a role. Precedence:
 //  1. per-role override   (--<role>-harness)
 //  2. group default       (--think-harness | --work-harness)
@@ -61,7 +67,10 @@ func (hm HarnessModel) resolveModel(role AgentRole) string {
 
 // runAgent is the only entry-point consumers use. It guarantees:
 //
-//   - The harness always runs to completion. We never kill it from outside.
+//   - The harness runs to completion: we never kill it mid-run. The lone
+//     exception is the liveness guard — if it emits its terminal event and then
+//     hangs without exiting, it is force-killed after a grace window (its output
+//     is already captured), so a stuck process can't deadlock the pool worker.
 //   - On retryable transport failures (rate limit, quota, network glitch) — retries
 //     with exponential backoff; the consumer never sees the failure.
 //   - On any other transport failure — fatal() the orchestrator process.
@@ -208,8 +217,9 @@ func (o *Orchestrator) fatal(reason string) {
 // runAgentOnce executes one harness invocation. On success returns the AgentResult
 // (Events come from the agent's own output). On a real harness failure Throws an
 // *agentFault — the caller (runAgent) classifies and either retries or hard-stops the
-// process. Never returns a synthesized "crashed" verdict event. The harness is never
-// killed from outside — it always runs to completion, on the user's invariant.
+// process. Never returns a synthesized "crashed" verdict event. The harness is not
+// killed mid-run; it is only force-killed if it hangs AFTER its terminal event (the
+// liveness guard below), so its output is never lost to a kill.
 func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin string, env map[string]string) AgentResult {
 	wsAbs := ""
 	tmpdir := ""
@@ -327,6 +337,15 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 	scanner := bufio.NewScanner(stdoutPipe)
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
 
+	// Liveness guard: a harness sometimes emits its terminal event and then fails
+	// to exit, leaving stdout open — the scan below would block forever and
+	// deadlock the pool worker (observed with claude-code: a run hung ~13h after
+	// its `result`). Once the run is logically done, arm a timer that force-kills
+	// the process if it doesn't exit within the grace window. This is the only
+	// place we kill a harness, and only AFTER it has finished its work, so the
+	// "never kill mid-run" invariant holds.
+	var killTimer *time.Timer
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
@@ -343,7 +362,19 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 
 		harness.ParseStreamLine(ev, &finalText, &streamFault, role, ticket)
 		harness.AccumulateUsage(ev, &usage)
+
+		if harness.IsDone(ev) {
+			if killTimer == nil {
+				killTimer = time.AfterFunc(harnessExitGrace, func() { _ = cmd.Process.Kill() })
+			} else {
+				killTimer.Reset(harnessExitGrace)
+			}
+		}
 	}
+
+	// Stop() returns false iff the timer already fired — i.e. we force-killed a
+	// hung-but-finished harness. That kill is expected, not a fault.
+	killedAfterDone := killTimer != nil && !killTimer.Stop()
 
 	err := cmd.Wait()
 
@@ -354,7 +385,10 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 	res.Stdout = finalText.String()
 	res.RawStream = rawStream.String()
 
-	if err != nil {
+	switch {
+	case killedAfterDone:
+		uiTicket("🔪", role, ticket, "HARNESS_KILL", "hung after its terminal event — force-killed; output already captured")
+	case err != nil:
 		fault := &agentFault{
 			stderr:   stderrBuf.String(),
 			stdout:   res.Stdout,

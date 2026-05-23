@@ -100,6 +100,14 @@ func (c *Claude) CostUSD(model string, u RunUsage) float64 {
 	return usd
 }
 
+// IsDone: claude-code's final stream event is `result`. After it, claude-code has
+// been seen to occasionally hang without exiting — the liveness guard handles that.
+func (c *Claude) IsDone(ev map[string]any) bool {
+	t, _ := ev["type"].(string)
+
+	return t == "result"
+}
+
 // ClassifyFault: Anthropic-side transient signatures plus the shared network set.
 // Grow the rate-limit / quota list as we observe new claude-code error signatures.
 func (c *Claude) ClassifyFault(f *agentFault) (bool, string) {

@@ -52,6 +52,12 @@ type Harness interface {
 	// map to a table key or default when empty). 0 when the model isn't priceable.
 	CostUSD(model string, u RunUsage) float64
 
+	// IsDone reports whether this stream event is the harness's terminal event —
+	// the run is logically complete after it. Arms the liveness guard: if the
+	// process then fails to exit, it is force-killed (its output is already in
+	// hand). "" / unknown harnesses return false (no guard).
+	IsDone(ev map[string]any) bool
+
 	// SupportsSession reports whether this harness can resume a multi-turn dialog.
 	// The `overseer plan` handler refuses to bind a non-supporting harness as PUPA
 	// or LUPA. Orchestrator main loop ignores this — each agent run there is its

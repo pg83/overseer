@@ -88,6 +88,9 @@ func (g *Gemini) AccumulateUsage(_ map[string]any, _ *RunUsage) {}
 // CostUSD: no usage wired, so no synthesized cost.
 func (g *Gemini) CostUSD(_ string, _ RunUsage) float64 { return 0 }
 
+// IsDone: no terminal-event detection wired — relies on the process exiting.
+func (g *Gemini) IsDone(_ map[string]any) bool { return false }
+
 // Gemini surfaces quota / safety / overload errors with distinctive wording —
 // grow the list as production reveals new patterns.
 func (g *Gemini) ClassifyFault(f *agentFault) (bool, string) {

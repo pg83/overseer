@@ -95,6 +95,9 @@ func (o *Opencode) AccumulateUsage(_ map[string]any, _ *RunUsage) {}
 // CostUSD: no usage wired, so no synthesized cost.
 func (o *Opencode) CostUSD(_ string, _ RunUsage) float64 { return 0 }
 
+// IsDone: no terminal-event detection wired — relies on the process exiting.
+func (o *Opencode) IsDone(_ map[string]any) bool { return false }
+
 func (o *Opencode) ClassifyFault(f *agentFault) (bool, string) {
 	if ok, reason := classifyTransientNetworkFault(f.stderr, f.stdout); ok {
 		return true, reason
