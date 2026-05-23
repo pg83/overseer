@@ -156,7 +156,7 @@ const (
 	// systemic distress that bypasses review / merge / arbiter and goes straight
 	// to the overseer for a full re-think. Distinct from CANT_DO (this ticket is
 	// locally impossible) — algedonic means the problem is bigger than the ticket.
-	VerdictAlgedonic AgentVerdict = "algedonic"
+	VerdictAlgedonic AgentVerdict = "ALGEDONIC"
 
 	// VerdictNoPlan is a synthetic trigger raised when a tasker fails to produce a
 	// plan. The tasker doesn't emit it (it just emits no `plan` event); the
