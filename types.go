@@ -211,19 +211,14 @@ type Job struct {
 	WS    string
 	NewWS bool
 
-	// Arbiter context (PhaseArbitrate).
-	Trigger      AgentVerdict
-	Detail       string
-	RebaseTarget string
-	MergeOut     string
-
 	// Replanner context (PhaseEscalate tickets + global nudges, batched).
 	Reasons []ReplanReason
 	ChatLog []string
 
 	// Params is the prompt template context the coordinator assembles at dispatch —
-	// generic key→value pairs the role's prompt substitutes (`{{.Subagent}}`,
-	// `{{.Plans}}`, ...). Filled here so a worker never reads coordinator state; add a
+	// generic key→value pairs the prompt substitutes (`{{.TICKET}}`, `{{.TRIGGER_ROLE}}`,
+	// `{{.MERGE_FAIL_OUTPUT}}`, `{{.Subagent}}`, `{{.Plans}}`, ...) and from which the env
+	// is derived (envFrom). Filled here so a worker never reads coordinator state; add a
 	// key to extend a prompt without threading new parameters through the call chain.
 	Params map[string]string
 

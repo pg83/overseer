@@ -118,10 +118,23 @@ func (o *Orchestrator) bootDirectives() {
 	}
 }
 
-// operatorDirective wraps a human-supplied directive so the agent's prompt marks it as
-// a mandatory, non-stale instruction from the operator.
+// Reason/message strings are templates rendered through the same `render` primitive as
+// the prompts — no Sprintf for user-facing text. The template source is a fixed const;
+// substituted values are inserted literally (never re-parsed), so a detail containing
+// `{{` is harmless.
+const (
+	operatorDirectiveTmpl = `OPERATOR DIRECTIVE (mandatory — a direct instruction from the human operator; act on it this pass, never dismiss it as stale or already-handled): {{.Text}}`
+	algedonicReasonTmpl   = `ALGEDONIC — the digger on T-{{.N}} pulled the emergency cord: "{{.Detail}}". Drop the routine pass and do a FULL root-cause analysis (this ticket and its run history, GOALS.md, the surrounding plan and deps), then re-scope decisively to unblock it.`
+	falloutReasonTmpl     = `T-{{.N}} {{.Reason}} — scan for fallout / unblocked work`
+)
+
+// operatorDirective marks a human-supplied directive as a mandatory, non-stale order.
 func operatorDirective(text string) string {
-	return "OPERATOR DIRECTIVE (mandatory — a direct instruction from the human operator; act on it this pass, never dismiss it as stale or already-handled): " + text
+	return render(operatorDirectiveTmpl, map[string]string{"Text": text})
+}
+
+func falloutReason(n int, reason string) string {
+	return render(falloutReasonTmpl, map[string]string{"N": fmt.Sprintf("%d", n), "Reason": reason})
 }
 
 // safe runs a coordinator step so a Throw inside it surfaces to the UI instead of
@@ -355,8 +368,10 @@ func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
 			j.NewWS = true
 		}
 
-		c := o.arb[t.N]
-		j.Trigger, j.Detail, j.RebaseTarget, j.MergeOut = c.trigger, c.detail, c.rebaseTarget, c.mergeOut
+		if c := o.arb[t.N]; c.mergeOut != "" {
+			j.Params["MERGE_FAIL_OUTPUT"] = c.mergeOut
+			j.Params["REBASE_TARGET"] = c.rebaseTarget
+		}
 	case RoleReviewer:
 		j.WS = o.branchWS[t.N]
 	case RoleArbiter:
@@ -371,7 +386,9 @@ func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
 			j.NewWS = true
 		}
 
-		j.Trigger, j.Detail, j.RebaseTarget, j.MergeOut = c.trigger, c.detail, c.rebaseTarget, c.mergeOut
+		j.Params["TRIGGER_ROLE"] = string(sourceForTrigger(c.trigger))
+		j.Params["TRIGGER_VERDICT"] = string(c.trigger)
+		j.Params["TRIGGER_DETAIL"] = c.detail
 	case RoleMerger:
 		j.WS = o.branchWS[t.N]
 	}
@@ -598,7 +615,7 @@ func (o *Orchestrator) onDigger(res AgentResult) {
 }
 
 func algedonicReason(n int, detail string) string {
-	return fmt.Sprintf("ALGEDONIC — the digger on T-%d pulled the emergency cord: %q. Drop the routine pass and do a FULL root-cause analysis (this ticket and its run history, GOALS.md, the surrounding plan and deps), then re-scope decisively to unblock it.", n, detail)
+	return render(algedonicReasonTmpl, map[string]string{"N": fmt.Sprintf("%d", n), "Detail": detail})
 }
 
 func (o *Orchestrator) onReviewer(res AgentResult) {
@@ -762,7 +779,7 @@ func (o *Orchestrator) afterTerminal(n int, reason, workspace string) {
 		Source:    RoleMerger,
 		Ticket:    n,
 		Workspace: workspace,
-		Reason:    fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, reason),
+		Reason:    falloutReason(n, reason),
 	})
 
 	if o.nonTerminalCount() == 0 {
@@ -833,7 +850,7 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 				Source:    RoleMerger,
 				Ticket:    n,
 				Workspace: o.ticketWorkspaceHint(n),
-				Reason:    fmt.Sprintf("T-%d %s — scan for fallout / unblocked work", n, "DISCARDED"),
+				Reason:    falloutReason(n, "DISCARDED"),
 			})
 			canceledAny = true
 		case "replace":

@@ -99,11 +99,3 @@ func summarizeRunJsonl(path string) string {
 // rules already live in prompts/*.txt and common.txt; this is the universal
 // last-line nudge.
 const outputPriming = "\n\nYour reply contains only JSON-line events. Each non-blank line is one JSON object: {\"type\": \"...\", ...}. Begin your reply with `{`."
-
-func concatPromptInput(prompt, input string) string {
-	if prompt == "" {
-		return input + outputPriming
-	}
-
-	return prompt + "\n\n" + input + outputPriming
-}

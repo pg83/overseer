@@ -678,27 +678,61 @@ func messageText(ev map[string]any) string {
 	return strings.TrimSpace(t)
 }
 
+// loadPrompt builds the full stdin for a role: concatenate the embedded role prompt
+// and common.txt, then run ONE templating pass over the whole with params — common.txt
+// carries the per-run context block (TICKET / WORKSPACE / PLAN / … or the replanner's
+// SUBAGENT / triggers / snapshot), so there is no separate "input" anymore. Operator
+// overrides are appended afterwards, un-templated, so their prose can't trip the parser.
 func loadPrompt(repoRoot string, role AgentRole, params map[string]string) string {
-	body := withRepoOverride(repoRoot, role, renderPrompt(loadEmbedded("prompts/"+string(role)+".txt"), params))
-	common := withRepoOverride(repoRoot, RoleCommon, loadEmbedded("prompts/common.txt"))
+	base := loadEmbedded("prompts/"+string(role)+".txt") + "\n\n" + loadEmbedded("prompts/common.txt")
+	out := render(base, params)
+	out = withRepoOverride(repoRoot, role, out)
+	out = withRepoOverride(repoRoot, RoleCommon, out)
 
-	return body + "\n\n" + common
+	return out + outputPriming
 }
 
-// renderPrompt runs the embedded prompt through text/template with a generic
-// key→value map: `{{.Plans}}`, `{{.Subagent}}`, etc. resolve to params["Plans"] and so
-// on, and a missing key renders empty (missingkey=zero). New context is added by
-// putting another key in the map at dispatch — no signature threading. A prompt with
-// no directives renders unchanged; a malformed checked-in prompt throws rather than
-// silently shipping a broken prompt.
-func renderPrompt(src string, params map[string]string) string {
-	tmpl := Throw2(template.New("prompt").Option("missingkey=zero").Parse(src))
+// render runs a text/template source against a generic key→value map: `{{.Plans}}`,
+// `{{.TICKET}}`, `{{if .TRIGGER_ROLE}}…{{end}}` resolve to params["…"], and a missing
+// key renders empty (missingkey=zero). It is the one substitution primitive — prompts,
+// per-role input blocks, and reason strings all go through it, so nothing builds text
+// with Sprintf. New context is one more map key, never a threaded parameter. Source
+// with no directives renders unchanged; a malformed checked-in template throws rather
+// than silently shipping broken text.
+func render(src string, params map[string]string) string {
+	tmpl := Throw2(template.New("t").Option("missingkey=zero").Parse(src))
 
 	var sb strings.Builder
 
 	Throw(tmpl.Execute(&sb, params))
 
 	return sb.String()
+}
+
+// envKeys is the allowlist of params exported to the harness as environment variables
+// (prompts reference them as $WORKSPACE / $TRUNK_PATH etc. in bash). Everything else in
+// the params map is template-only — in particular the bulk blobs (PLAN / LOG /
+// PRIOR_RUNS / SNAPSHOT / Plans) must never become env vars (size limits).
+var envKeys = map[string]bool{
+	"TICKET": true, "WORKSPACE": true, "TRUNK_PATH": true, "TRUNK_HASH": true,
+	"PREV_WORKSPACE": true, "REBASE_TARGET": true,
+	"TRIGGER_ROLE": true, "TRIGGER_VERDICT": true, "TRIGGER_DETAIL": true,
+	"DIGGER_BRANCH": true, "DIGGER_WORKTREE": true, "MERGER_WORKTREE": true, "TRUNK_HEAD": true,
+	"REPLAN_TRIGGERS": true, "REPLAN_CHAT": true, "RUNS_DIR": true, "TASKS_DB": true,
+}
+
+// envFrom extracts the env-exported subset of a params map (see envKeys) — the same
+// values the template renders, so env and input can never drift.
+func envFrom(params map[string]string) map[string]string {
+	env := map[string]string{}
+
+	for k, v := range params {
+		if envKeys[k] {
+			env[k] = v
+		}
+	}
+
+	return env
 }
 
 // withRepoOverride appends operator-supplied per-role prompt extensions to the

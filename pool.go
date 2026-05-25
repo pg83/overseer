@@ -81,9 +81,8 @@ func (o *Orchestrator) workspaceFor(job Job) string {
 
 func (o *Orchestrator) jobTasker(job Job) AgentResult {
 	ws := o.workspaceFor(job)
-	wsAbs := wsPath(o.Root, ws)
-	env := o.ticketEnv(job.Ticket.N, wsAbs)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleTasker, job.Params), o.buildAgentInput(RoleTasker, job.Ticket, wsAbs))
+	p := o.ticketParams(RoleTasker, job, wsPath(o.Root, ws))
+	stdin, env := loadPrompt(o.Trunk, RoleTasker, p), envFrom(p)
 
 	for {
 		res := o.runAgent(RoleTasker, job.Ticket.N, ws, stdin, env)
@@ -101,25 +100,13 @@ func (o *Orchestrator) jobTasker(job Job) AgentResult {
 func (o *Orchestrator) jobDigger(job Job) AgentResult {
 	ws := o.workspaceFor(job)
 	wsAbs := wsPath(o.Root, ws)
-	prompt := loadPrompt(o.Trunk, RoleDigger, job.Params)
-
-	env := o.ticketEnv(job.Ticket.N, wsAbs)
-	env["PREV_WORKSPACE"] = wsAbs
-
-	extra := fmt.Sprintf("PREV_WORKSPACE: %s\n", wsAbs)
-
-	if job.MergeOut != "" {
-		extra += "\nMERGE_FAIL_OUTPUT:\n" + job.MergeOut + "\nREBASE_TARGET: " + job.RebaseTarget + "\n"
-		env["REBASE_TARGET"] = job.RebaseTarget
-	}
-
-	// Rebuilt per attempt so PRIOR_RUNS includes the just-failed try.
-	build := func() string {
-		return concatPromptInput(prompt, o.buildAgentInput(RoleDigger, job.Ticket, wsAbs)+extra)
-	}
 
 	for {
-		res := o.runAgent(RoleDigger, job.Ticket.N, ws, build(), env)
+		// Rebuilt per attempt so PRIOR_RUNS includes the just-failed try.
+		p := o.ticketParams(RoleDigger, job, wsAbs)
+		p["PREV_WORKSPACE"] = wsAbs
+
+		res := o.runAgent(RoleDigger, job.Ticket.N, ws, loadPrompt(o.Trunk, RoleDigger, p), envFrom(p))
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictReady || v == VerdictCantDo || v == VerdictAlgedonic {
@@ -134,9 +121,8 @@ func (o *Orchestrator) jobDigger(job Job) AgentResult {
 
 func (o *Orchestrator) jobReviewer(job Job) AgentResult {
 	ws := job.WS
-	wsAbs := wsPath(o.Root, ws)
-	env := o.ticketEnv(job.Ticket.N, wsAbs)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReviewer, job.Params), o.buildAgentInput(RoleReviewer, job.Ticket, wsAbs))
+	p := o.ticketParams(RoleReviewer, job, wsPath(o.Root, ws))
+	stdin, env := loadPrompt(o.Trunk, RoleReviewer, p), envFrom(p)
 
 	for {
 		res := o.runAgent(RoleReviewer, job.Ticket.N, ws, stdin, env)
@@ -154,17 +140,8 @@ func (o *Orchestrator) jobReviewer(job Job) AgentResult {
 
 func (o *Orchestrator) jobArbiter(job Job) AgentResult {
 	ws := job.WS
-	wsAbs := wsPath(o.Root, ws)
-
-	env := o.ticketEnv(job.Ticket.N, wsAbs)
-	env["TRIGGER_ROLE"] = string(sourceForTrigger(job.Trigger))
-	env["TRIGGER_VERDICT"] = string(job.Trigger)
-	env["TRIGGER_DETAIL"] = job.Detail
-
-	input := o.buildAgentInput(RoleArbiter, job.Ticket, wsAbs) +
-		fmt.Sprintf("\nTRIGGER_ROLE: %s\nTRIGGER_VERDICT: %s\nTRIGGER_DETAIL: %s\n",
-			sourceForTrigger(job.Trigger), job.Trigger, job.Detail)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleArbiter, job.Params), input)
+	p := o.ticketParams(RoleArbiter, job, wsPath(o.Root, ws))
+	stdin, env := loadPrompt(o.Trunk, RoleArbiter, p), envFrom(p)
 
 	for {
 		res := o.runAgent(RoleArbiter, job.Ticket.N, ws, stdin, env)
@@ -183,23 +160,14 @@ func (o *Orchestrator) jobArbiter(job Job) AgentResult {
 func (o *Orchestrator) jobMerger(job Job) AgentResult {
 	diggerWS := job.WS
 	mergerWS := NewWorkspace(o.Root, o.Trunk)
-	mergerWSAbs := wsPath(o.Root, mergerWS)
-	diggerWSAbs := wsPath(o.Root, diggerWS)
-	diggerBranch := "ovs/" + diggerWS
-	trunkHead := CurrentTrunkHash(o.Trunk)
 
-	env := map[string]string{
-		"TICKET":          fmt.Sprintf("%d", job.Ticket.N),
-		"DIGGER_BRANCH":   diggerBranch,
-		"DIGGER_WORKTREE": diggerWSAbs,
-		"MERGER_WORKTREE": mergerWSAbs,
-		"TRUNK_HEAD":      trunkHead,
-	}
+	p := o.ticketParams(RoleMerger, job, wsPath(o.Root, mergerWS))
+	p["DIGGER_BRANCH"] = "ovs/" + diggerWS
+	p["DIGGER_WORKTREE"] = wsPath(o.Root, diggerWS)
+	p["MERGER_WORKTREE"] = wsPath(o.Root, mergerWS)
+	p["TRUNK_HEAD"] = p["TRUNK_HASH"]
 
-	input := o.buildAgentInput(RoleMerger, job.Ticket, mergerWSAbs) +
-		fmt.Sprintf("\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
-			diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleMerger, job.Params), input)
+	stdin, env := loadPrompt(o.Trunk, RoleMerger, p), envFrom(p)
 
 	for {
 		res := o.runAgent(RoleMerger, job.Ticket.N, mergerWS, stdin, env)
@@ -219,20 +187,17 @@ func (o *Orchestrator) jobMerger(job Job) AgentResult {
 
 func (o *Orchestrator) jobReplanner(job Job) AgentResult {
 	ws := o.workspaceFor(job)
-	triggers := formatReplanTriggers(job.Reasons)
-	chat := strings.Join(job.ChatLog, "\n")
 
-	input := o.agentSelfBlock(RoleReplanner, 0) +
-		fmt.Sprintf("SUBAGENT: %s\n\nREPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nREPLAN_CHAT (all team-chat lines accumulated since the previous replanner run):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
-			job.Params["Subagent"], triggers, chat, runsDir(o.Root), tasksDBPath(o.Root), job.Snapshot)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReplanner, job.Params), input)
+	p := o.selfParams(RoleReplanner)
+	p["Subagent"] = job.Params["Subagent"]
+	p["Plans"] = job.Params["Plans"]
+	p["REPLAN_TRIGGERS"] = formatReplanTriggers(job.Reasons)
+	p["REPLAN_CHAT"] = strings.Join(job.ChatLog, "\n")
+	p["RUNS_DIR"] = runsDir(o.Root)
+	p["TASKS_DB"] = tasksDBPath(o.Root)
+	p["SNAPSHOT"] = job.Snapshot
 
-	env := map[string]string{
-		"REPLAN_TRIGGERS": triggers,
-		"REPLAN_CHAT":     chat,
-		"RUNS_DIR":        runsDir(o.Root),
-		"TASKS_DB":        tasksDBPath(o.Root),
-	}
+	stdin, env := loadPrompt(o.Trunk, RoleReplanner, p), envFrom(p)
 
 	for {
 		res := o.runAgent(RoleReplanner, 0, ws, stdin, env)
@@ -264,9 +229,8 @@ func sourceForTrigger(t AgentVerdict) AgentRole {
 	return ""
 }
 
-// agentSelfBlock identifies the agent to itself: role, harness, model, chat-log path.
-// Reads only immutable bindings, so it is safe to call from a pool worker.
-func (o *Orchestrator) agentSelfBlock(role AgentRole, ticket int) string {
+// selfParams is the agent's self-identification, present for every role.
+func (o *Orchestrator) selfParams(role AgentRole) map[string]string {
 	hm := o.harnessModelForRole(role)
 	model := hm.resolveModel(role)
 
@@ -274,55 +238,54 @@ func (o *Orchestrator) agentSelfBlock(role AgentRole, ticket int) string {
 		model = "(harness default)"
 	}
 
-	return fmt.Sprintf("ROLE: %s\nMODEL: %s\nHARNESS: %s\nMESSAGES_LOG: %s\n",
-		role, model, hm.Harness.Name(), messagesLogPath(o.Root))
-}
-
-// ticketEnv is the common env every ticket-bound role gets — prompts reference these
-// as $WORKSPACE / $TRUNK_PATH etc. in bash tool calls.
-func (o *Orchestrator) ticketEnv(ticketN int, wsAbs string) map[string]string {
 	return map[string]string{
-		"WORKSPACE":  wsAbs,
-		"TICKET":     fmt.Sprintf("%d", ticketN),
-		"TRUNK_PATH": o.Trunk,
-		"TRUNK_HASH": CurrentTrunkHash(o.Trunk),
+		"ROLE":         string(role),
+		"MODEL":        model,
+		"HARNESS":      hm.Harness.Name(),
+		"MESSAGES_LOG": messagesLogPath(o.Root),
 	}
 }
 
-// buildAgentInput renders the prose input header for a ticket-bound role from the
-// Job's ticket snapshot plus on-disk context (plan / log / chat / prior runs). Reads
-// no coordinator state — keyed only by the snapshot and files.
-func (o *Orchestrator) buildAgentInput(role AgentRole, t Ticket, wsAbs string) string {
-	var sb strings.Builder
-
-	sb.WriteString(o.agentSelfBlock(role, t.N))
-	fmt.Fprintf(&sb, "TICKET: %d\nDESCR: %s\nDEPS: %v\n", t.N, t.Descr, t.Deps)
-	fmt.Fprintf(&sb, "WORKSPACE: %s\n", wsAbs)
-	fmt.Fprintf(&sb, "TRUNK_PATH: %s\n", o.Trunk)
-	fmt.Fprintf(&sb, "TRUNK_HASH: %s\n", CurrentTrunkHash(o.Trunk))
+// ticketParams assembles the prompt + env params for a ticket-bound role: the self
+// block, the ticket snapshot, on-disk context (plan / log / chat / prior runs), and the
+// coordinator's per-dispatch params (Plans, trigger, merge-fail) merged last. One map
+// feeds both the template (loadPrompt) and the env (envFrom), so they can't drift — and
+// TRUNK_HASH is read once here, not separately for env and input. The re-ingested LOG
+// is stripped of the bulky PROMPT blocks the coordinator records, so prompts don't feed
+// back on themselves.
+func (o *Orchestrator) ticketParams(role AgentRole, job Job, wsAbs string) map[string]string {
+	t := job.Ticket
+	p := o.selfParams(role)
+	p["TICKET"] = fmt.Sprintf("%d", t.N)
+	p["DESCR"] = t.Descr
+	p["DEPS"] = fmt.Sprintf("%v", t.Deps)
+	p["WORKSPACE"] = wsAbs
+	p["TRUNK_PATH"] = o.Trunk
+	p["TRUNK_HASH"] = CurrentTrunkHash(o.Trunk)
 
 	if planExists(o.Root, t.N) {
 		if data, err := os.ReadFile(ticketPlanPath(o.Root, t.N)); err == nil {
-			fmt.Fprintf(&sb, "\nPLAN:\n%s\n", string(data))
+			p["PLAN"] = string(data)
 		}
 	}
 
-	// Dependency plans now reach the digger / reviewer through the prompt template
-	// (params["Plans"]); the ticket LOG re-ingested here is stripped of the bulky
-	// PROMPT blocks the coordinator records, so prompts don't feed back on themselves.
 	if log := ticketLogForContext(o.Root, t.N); log != "" {
-		fmt.Fprintf(&sb, "\nLOG (phase transitions for this ticket, append-only):\n%s\n", log)
+		p["LOG"] = log
 	}
 
 	if msgs := ticketMessages(o.Root, t.N); msgs != "" {
-		fmt.Fprintf(&sb, "\nTICKET_CHAT (lines from MESSAGES_LOG mentioning this ticket):\n%s\n", msgs)
+		p["TICKET_CHAT"] = msgs
 	}
 
 	if prior := priorRunsForTicket(o.Root, t.N); prior != "" {
-		fmt.Fprintf(&sb, "\nPRIOR_RUNS (compact summaries — Read each LOG_FILE for the full reasoning stream):\n%s\n", prior)
+		p["PRIOR_RUNS"] = prior
 	}
 
-	return sb.String()
+	for k, v := range job.Params {
+		p[k] = v
+	}
+
+	return p
 }
 
 func dependencyPlans(orchRoot string, deps []int) string {
