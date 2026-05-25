@@ -59,7 +59,7 @@ func (simSpec) Set(v string) error {
 func (o *Orchestrator) simulatedRun(role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	time.Sleep(time.Duration(rand.Int63n(int64(2 * time.Second))))
 
-	res := AgentResult{Role: role, Ticket: ticket, Workspace: wsID, Events: simEvents(role, ticket, stdin)}
+	res := AgentResult{Role: role, Ticket: ticket, Workspace: wsID, Stdin: stdin, Events: simEvents(role, ticket, stdin)}
 
 	for _, ev := range res.Events {
 		if t, _ := ev["type"].(string); t == "message" {

@@ -340,12 +340,12 @@ func ValidateTasks(tickets []Ticket) {
 		switch t.Type {
 		case TicketTypePlan:
 			switch t.Phase {
-			case PhasePlan, PhaseArbitrate, PhaseEscalate, PhasePlanned, PhaseDiscarded:
+			case PhasePlan, PhaseArbitrate, PhaseEscalate, PhasePlanned, PhaseConsumed, PhaseDiscarded:
 			default:
 				ThrowFmt("ticket %d: plan ticket cannot be in phase %q", t.N, t.Phase)
 			}
 		case TicketTypeCode:
-			if t.Phase == PhasePlanned {
+			if t.Phase == PhasePlanned || t.Phase == PhaseConsumed {
 				ThrowFmt("ticket %d: code ticket cannot be in phase %q", t.N, t.Phase)
 			}
 		}
@@ -395,7 +395,7 @@ func ValidateTasks(tickets []Ticket) {
 
 func validPhase(p Phase) bool {
 	switch p {
-	case PhasePlan, PhaseImplement, PhaseReview, PhaseMerge, PhaseArbitrate, PhaseEscalate, PhasePlanned, PhaseMerged, PhaseDiscarded:
+	case PhasePlan, PhaseImplement, PhaseReview, PhaseMerge, PhaseArbitrate, PhaseEscalate, PhasePlanned, PhaseConsumed, PhaseMerged, PhaseDiscarded:
 		return true
 	}
 

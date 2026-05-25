@@ -21,6 +21,13 @@ Workspace is a fresh trunk HEAD — read GOALS.md, CLAUDE.md, source as needed.
 {{else}}
 **Routine replan.** Work the accumulated triggers below as one batch; if all are stale, emit nothing.
 {{end}}
+{{if .Plans}}
+## Completed plan artifacts (prior research — read and build on these, don't re-derive)
+
+These are the `plan.md` outputs of every finished `plan` ticket. When you operationalize a plan into code tickets, or scope new work, use what's already been investigated here.
+
+{{.Plans}}
+{{end}}
 
 ## How to spot a stuck ticket
 

@@ -83,7 +83,7 @@ func (o *Orchestrator) jobTasker(job Job) AgentResult {
 	ws := o.workspaceFor(job)
 	wsAbs := wsPath(o.Root, ws)
 	env := o.ticketEnv(job.Ticket.N, wsAbs)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleTasker, PromptData{}), o.buildAgentInput(RoleTasker, job.Ticket, wsAbs))
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleTasker, job.Params), o.buildAgentInput(RoleTasker, job.Ticket, wsAbs))
 
 	for {
 		res := o.runAgent(RoleTasker, job.Ticket.N, ws, stdin, env)
@@ -101,7 +101,7 @@ func (o *Orchestrator) jobTasker(job Job) AgentResult {
 func (o *Orchestrator) jobDigger(job Job) AgentResult {
 	ws := o.workspaceFor(job)
 	wsAbs := wsPath(o.Root, ws)
-	prompt := loadPrompt(o.Trunk, RoleDigger, PromptData{})
+	prompt := loadPrompt(o.Trunk, RoleDigger, job.Params)
 
 	env := o.ticketEnv(job.Ticket.N, wsAbs)
 	env["PREV_WORKSPACE"] = wsAbs
@@ -136,7 +136,7 @@ func (o *Orchestrator) jobReviewer(job Job) AgentResult {
 	ws := job.WS
 	wsAbs := wsPath(o.Root, ws)
 	env := o.ticketEnv(job.Ticket.N, wsAbs)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReviewer, PromptData{}), o.buildAgentInput(RoleReviewer, job.Ticket, wsAbs))
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReviewer, job.Params), o.buildAgentInput(RoleReviewer, job.Ticket, wsAbs))
 
 	for {
 		res := o.runAgent(RoleReviewer, job.Ticket.N, ws, stdin, env)
@@ -164,7 +164,7 @@ func (o *Orchestrator) jobArbiter(job Job) AgentResult {
 	input := o.buildAgentInput(RoleArbiter, job.Ticket, wsAbs) +
 		fmt.Sprintf("\nTRIGGER_ROLE: %s\nTRIGGER_VERDICT: %s\nTRIGGER_DETAIL: %s\n",
 			sourceForTrigger(job.Trigger), job.Trigger, job.Detail)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleArbiter, PromptData{}), input)
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleArbiter, job.Params), input)
 
 	for {
 		res := o.runAgent(RoleArbiter, job.Ticket.N, ws, stdin, env)
@@ -199,7 +199,7 @@ func (o *Orchestrator) jobMerger(job Job) AgentResult {
 	input := o.buildAgentInput(RoleMerger, job.Ticket, mergerWSAbs) +
 		fmt.Sprintf("\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
 			diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleMerger, PromptData{}), input)
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleMerger, job.Params), input)
 
 	for {
 		res := o.runAgent(RoleMerger, job.Ticket.N, mergerWS, stdin, env)
@@ -224,8 +224,8 @@ func (o *Orchestrator) jobReplanner(job Job) AgentResult {
 
 	input := o.agentSelfBlock(RoleReplanner, 0) +
 		fmt.Sprintf("SUBAGENT: %s\n\nREPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nREPLAN_CHAT (all team-chat lines accumulated since the previous replanner run):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
-			job.Subagent, triggers, chat, runsDir(o.Root), tasksDBPath(o.Root), job.Snapshot)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReplanner, PromptData{Subagent: job.Subagent}), input)
+			job.Params["Subagent"], triggers, chat, runsDir(o.Root), tasksDBPath(o.Root), job.Snapshot)
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReplanner, job.Params), input)
 
 	env := map[string]string{
 		"REPLAN_TRIGGERS": triggers,
@@ -307,14 +307,11 @@ func (o *Orchestrator) buildAgentInput(role AgentRole, t Ticket, wsAbs string) s
 		}
 	}
 
-	if t.Type != TicketTypePlan {
-		if plans := dependencyPlans(o.Root, t.Deps); plans != "" {
-			fmt.Fprintf(&sb, "\nDEPENDENCY_PLANS (from deps with plan.md):\n%s\n", plans)
-		}
-	}
-
-	if data, err := os.ReadFile(ticketLogPath(o.Root, t.N)); err == nil {
-		fmt.Fprintf(&sb, "\nLOG (phase transitions for this ticket, append-only):\n%s\n", string(data))
+	// Dependency plans now reach the digger / reviewer through the prompt template
+	// (params["Plans"]); the ticket LOG re-ingested here is stripped of the bulky
+	// PROMPT blocks the coordinator records, so prompts don't feed back on themselves.
+	if log := ticketLogForContext(o.Root, t.N); log != "" {
+		fmt.Fprintf(&sb, "\nLOG (phase transitions for this ticket, append-only):\n%s\n", log)
 	}
 
 	if msgs := ticketMessages(o.Root, t.N); msgs != "" {

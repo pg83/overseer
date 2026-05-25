@@ -42,6 +42,55 @@ func planExists(orchRoot string, n int) bool {
 	return err == nil
 }
 
+// PROMPT blocks in the ticket log are fenced so a human can read the exact prompt an
+// agent got, while ticketLogForContext strips them before re-feeding the log into the
+// next prompt — otherwise each prompt would embed the previous one and compound.
+const (
+	promptFenceOpen  = "<<<PROMPT"
+	promptFenceClose = ">>>PROMPT"
+)
+
+// appendTicketPrompt records the full prompt an agent received into the ticket log,
+// fenced. Called only from the coordinator goroutine, so it serializes with the other
+// log.md writers.
+func appendTicketPrompt(orchRoot string, n int, role AgentRole, prompt string) {
+	dir := ticketDir(orchRoot, n)
+	Throw(os.MkdirAll(dir, 0755))
+
+	f := Throw2(os.OpenFile(ticketLogPath(orchRoot, n), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644))
+	defer f.Close()
+
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	Throw2(f.WriteString(fmt.Sprintf("%s PROMPT role=%s\n%s\n%s\n%s\n", ts, role, promptFenceOpen, prompt, promptFenceClose)))
+}
+
+// ticketLogForContext returns the ticket log with the fenced PROMPT blocks removed —
+// the phase-transition history, safe to re-inject into a prompt without compounding.
+func ticketLogForContext(orchRoot string, n int) string {
+	data, err := os.ReadFile(ticketLogPath(orchRoot, n))
+
+	if err != nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	skip := false
+
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasPrefix(line, promptFenceOpen):
+			skip = true
+		case strings.HasPrefix(line, promptFenceClose):
+			skip = false
+		case !skip:
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
 func writePlan(orchRoot string, n int, content string) {
 	dir := ticketDir(orchRoot, n)
 	Throw(os.MkdirAll(dir, 0755))

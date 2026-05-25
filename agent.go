@@ -172,6 +172,8 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 			}
 		}
 
+		res.Stdin = stdin // the full prompt the agent received, for the ticket log
+
 		return res
 	}
 }
@@ -676,29 +678,25 @@ func messageText(ev map[string]any) string {
 	return strings.TrimSpace(t)
 }
 
-// PromptData is the template context for a role's prompt. Only the replanner uses it
-// today (Subagent selects which situation block renders); for other roles it is the
-// zero value and their prompts, having no template directives, render unchanged.
-type PromptData struct {
-	Subagent string
-}
-
-func loadPrompt(repoRoot string, role AgentRole, data PromptData) string {
-	body := withRepoOverride(repoRoot, role, renderPrompt(loadEmbedded("prompts/"+string(role)+".txt"), data))
+func loadPrompt(repoRoot string, role AgentRole, params map[string]string) string {
+	body := withRepoOverride(repoRoot, role, renderPrompt(loadEmbedded("prompts/"+string(role)+".txt"), params))
 	common := withRepoOverride(repoRoot, RoleCommon, loadEmbedded("prompts/common.txt"))
 
 	return body + "\n\n" + common
 }
 
-// renderPrompt runs the embedded prompt through text/template with data. A prompt
-// with no template directives renders unchanged; a malformed template is our bug in a
-// checked-in prompt, so it throws rather than silently shipping a broken prompt.
-func renderPrompt(src string, data PromptData) string {
-	tmpl := Throw2(template.New("prompt").Parse(src))
+// renderPrompt runs the embedded prompt through text/template with a generic
+// key→value map: `{{.Plans}}`, `{{.Subagent}}`, etc. resolve to params["Plans"] and so
+// on, and a missing key renders empty (missingkey=zero). New context is added by
+// putting another key in the map at dispatch — no signature threading. A prompt with
+// no directives renders unchanged; a malformed checked-in prompt throws rather than
+// silently shipping a broken prompt.
+func renderPrompt(src string, params map[string]string) string {
+	tmpl := Throw2(template.New("prompt").Option("missingkey=zero").Parse(src))
 
 	var sb strings.Builder
 
-	Throw(tmpl.Execute(&sb, data))
+	Throw(tmpl.Execute(&sb, params))
 
 	return sb.String()
 }

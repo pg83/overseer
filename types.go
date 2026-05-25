@@ -15,13 +15,14 @@ const (
 	PhaseMerge     Phase = "MERGE"     // needs the merger
 	PhaseArbitrate Phase = "ARBITRATE" // needs the arbiter (a disagreement surfaced)
 	PhaseEscalate  Phase = "ESCALATE"  // needs the replanner (arbiter escalated, or a digger's algedonic cord)
-	PhasePlanned   Phase = "PLANNED"   // terminal: plan ticket produced its plan
+	PhasePlanned   Phase = "PLANNED"   // terminal: plan written, awaiting replanner consumption
+	PhaseConsumed  Phase = "CONSUMED"  // terminal: plan read & operationalized by the replanner
 	PhaseMerged    Phase = "MERGED"    // terminal: code landed in trunk
 	PhaseDiscarded Phase = "DISCARDED" // terminal: dropped
 )
 
 func (p Phase) Terminal() bool {
-	return p == PhasePlanned || p == PhaseMerged || p == PhaseDiscarded
+	return p == PhasePlanned || p == PhaseConsumed || p == PhaseMerged || p == PhaseDiscarded
 }
 
 // roleForPhase maps a non-terminal phase to the agent role that advances it. The
@@ -220,9 +221,11 @@ type Job struct {
 	Reasons []ReplanReason
 	ChatLog []string
 
-	// Subagent selects the replanner's prompt template for this pass:
-	// start_project | end_project | algedonic | replan.
-	Subagent string
+	// Params is the prompt template context the coordinator assembles at dispatch —
+	// generic key→value pairs the role's prompt substitutes (`{{.Subagent}}`,
+	// `{{.Plans}}`, ...). Filled here so a worker never reads coordinator state; add a
+	// key to extend a prompt without threading new parameters through the call chain.
+	Params map[string]string
 
 	// Snapshot is CURRENT_TASKS, rendered by the coordinator (which owns o.Tickets)
 	// at dispatch time, for the replanner — so a worker never reads coordinator state.
@@ -277,6 +280,7 @@ type Orchestrator struct {
 	nudges        []ReplanReason
 	replanChat    []string
 	replanOwned   []int
+	replanPlans   []int
 	replanCtx     string
 	replannerBusy bool
 	mergerBusy    bool

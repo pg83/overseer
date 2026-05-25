@@ -333,16 +333,17 @@ func (o *Orchestrator) dispatchReplanner() {
 	o.replanChat = nil
 	o.replanCtx = ""
 	o.replanOwned = escalate
+	o.replanPlans = o.plannedPlanTickets()
 	o.replannerBusy = true
 
-	uiSys("📤", "REPLANNER", fmt.Sprintf("%s — %d reason(s), %d escalated", subagent, len(reasons), len(escalate)))
-	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Subagent: subagent, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
+	uiSys("📤", "REPLANNER", fmt.Sprintf("%s — %d reason(s), %d escalated, %d plan(s)", subagent, len(reasons), len(escalate), len(o.replanPlans)))
+	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Params: map[string]string{"Subagent": subagent, "Plans": o.closedPlansText()}, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
 }
 
 // buildJob assembles the Job for a ticket's phase: which workspace the worker uses
 // (fresh clone vs the digger branch) plus role-specific context.
 func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
-	j := Job{Role: role, Ticket: t}
+	j := Job{Role: role, Ticket: t, Params: o.promptParams(role, t)}
 
 	switch role {
 	case RoleTasker:
@@ -376,6 +377,51 @@ func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
 	}
 
 	return j
+}
+
+// promptParams assembles the prompt template context for a ticket-phase role. The
+// implementing roles get the text of the plan tickets their ticket depends on, via the
+// template (`{{.Plans}}`) rather than threaded through buildAgentInput.
+func (o *Orchestrator) promptParams(role AgentRole, t Ticket) map[string]string {
+	p := map[string]string{}
+
+	switch role {
+	case RoleDigger, RoleReviewer:
+		p["Plans"] = dependencyPlans(o.Root, t.Deps)
+	}
+
+	return p
+}
+
+// plannedPlanTickets lists the plan tickets sitting in PLANNED — written but not yet
+// read by the replanner. After a replanner pass consumes them they flip to CONSUMED
+// and drop out, so each plan is shown to the replanner exactly once.
+func (o *Orchestrator) plannedPlanTickets() []int {
+	var ns []int
+
+	for _, t := range o.Tickets {
+		if t.Phase == PhasePlanned {
+			ns = append(ns, t.N)
+		}
+	}
+
+	return ns
+}
+
+// closedPlansText concatenates the plan.md of every PLANNED (not-yet-consumed) plan
+// ticket, so the replanner can build on prior research instead of re-deriving it.
+func (o *Orchestrator) closedPlansText() string {
+	var sb strings.Builder
+
+	for _, n := range o.plannedPlanTickets() {
+		t, _ := o.findTicket(n)
+
+		if data, err := os.ReadFile(ticketPlanPath(o.Root, n)); err == nil {
+			fmt.Fprintf(&sb, "T-%d (%s):\n%s\n\n", n, t.Descr, string(data))
+		}
+	}
+
+	return strings.TrimSpace(sb.String())
 }
 
 // replanCtxRank orders the replanner's wake-up contexts by urgency so the most
@@ -419,6 +465,12 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 
 	for _, line := range eventReplans(res.Events) {
 		o.nudges = append(o.nudges, ReplanReason{Source: res.Role, Ticket: n, Workspace: res.Workspace, Reason: line})
+	}
+
+	// Record the exact prompt this run received into the ticket log, so it can be
+	// audited that everything needed (plans, deps, history) actually reached the agent.
+	if res.Stdin != "" {
+		appendTicketPrompt(o.Root, n, res.Role, res.Stdin)
 	}
 
 	// Per-ticket result for an already-terminal ticket (replanner cancelled it
@@ -689,6 +741,18 @@ func (o *Orchestrator) onReplanner(res AgentResult) {
 	}
 
 	o.replanOwned = nil
+
+	// The plans this pass was shown are now read & processed — flip them PLANNED →
+	// CONSUMED so the next pass isn't re-fed the same research. Their plan.md stays on
+	// disk for dependents (dependencyPlans reads the file regardless of phase).
+	for _, n := range o.replanPlans {
+		if t, ok := o.findTicket(n); ok && t.Phase == PhasePlanned {
+			o.recordEvent(n, "CONSUMED", "read & processed by replanner")
+			o.setPhase(n, PhaseConsumed, "consumed by replanner")
+		}
+	}
+
+	o.replanPlans = nil
 }
 
 // afterTerminal fires the post-terminal bookkeeping: a fallout replan nudge plus an
