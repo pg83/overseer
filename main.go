@@ -70,17 +70,15 @@ func runMain(argv []string) {
 	reviewerHarness := fs.String("reviewer-harness", "", "harness:model for reviewer (overrides --work-harness)")
 	mergerHarness := fs.String("merger-harness", "", "harness:model for merger (overrides --harness)")
 	replannerHarness := fs.String("replanner-harness", "", "harness:model for replanner (overrides --think-harness)")
-	overseerHarness := fs.String("overseer-harness", "", "harness:model for overseer (overrides --think-harness)")
 	arbiterHarness := fs.String("arbiter-harness", "", "harness:model for arbiter (overrides --think-harness)")
 
-	overseerDirective := fs.String("overseer", "", "operator directive: force one overseer pass at boot, injected as a mandatory instruction")
 	replanDirective := fs.String("replan", "", "operator directive: force one replanner pass at boot, injected as a mandatory instruction")
 
 	uiMode := fs.String("ui", "log", "ui mode: log (scrolling lines) | tui (interactive tcell tabs)")
 
 	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
 	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
-	simFlag := fs.Bool("sim", false, "simulator: synthesize agent verdicts instead of running real harnesses — stress-tests the state machine with no tokens, no real workspaces, no trunk writes")
+	fs.Var(simSpec{}, "sim", "simulator: synthesize agent verdicts instead of running real harnesses (no tokens, no real workspaces, no trunk writes). Bare --sim or --sim=0 runs open-ended; --sim=N caps the project at N tickets so it winds down and exercises stop conditions")
 
 	var extraRW []string
 
@@ -91,8 +89,6 @@ func runMain(argv []string) {
 	})
 
 	Throw(fs.Parse(argv))
-
-	simulate = *simFlag
 
 	if *root == "" {
 		ThrowFmt("--root is required")
@@ -129,7 +125,6 @@ func runMain(argv []string) {
 		{"--reviewer-harness", string(RoleReviewer), *reviewerHarness},
 		{"--merger-harness", string(RoleMerger), *mergerHarness},
 		{"--replanner-harness", string(RoleReplanner), *replannerHarness},
-		{"--overseer-harness", string(RoleOverseer), *overseerHarness},
 		{"--arbiter-harness", string(RoleArbiter), *arbiterHarness},
 	} {
 		if kv.val == "" {
@@ -145,11 +140,16 @@ func runMain(argv []string) {
 		*root, *trunk, formatBindings(bindings), jailDescr))
 
 	if simulate {
-		uiSys("🧪", "SIMULATION", "synthesizing agent verdicts — no real harnesses, workspaces, or trunk writes")
+		scope := "open-ended"
+
+		if simMaxTickets > 0 {
+			scope = fmt.Sprintf("cap %d tickets", simMaxTickets)
+		}
+
+		uiSys("🧪", "SIMULATION", "synthesizing agent verdicts ("+scope+") — no real harnesses, workspaces, or trunk writes")
 	}
 
 	o := NewOrchestrator(*root, *trunk, bindings, jail, extraRW)
-	o.bootOverseer = strings.TrimSpace(*overseerDirective)
 	o.bootReplan = strings.TrimSpace(*replanDirective)
 
 	go func() {
@@ -234,8 +234,7 @@ func formatBindings(b map[string]HarnessModel) string {
 	order := []string{
 		"default", "think", "work",
 		string(RoleTasker), string(RoleDigger), string(RoleReviewer),
-		string(RoleMerger), string(RoleReplanner), string(RoleOverseer),
-		string(RoleArbiter),
+		string(RoleMerger), string(RoleReplanner), string(RoleArbiter),
 	}
 
 	var parts []string

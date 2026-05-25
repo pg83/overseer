@@ -29,8 +29,6 @@ func roleColor(r AgentRole) string {
 		return cCyan
 	case RoleReplanner:
 		return cGreen
-	case RoleOverseer:
-		return cRed
 	}
 
 	return cGray
@@ -48,8 +46,6 @@ func roleEmoji(r AgentRole) string {
 		return "🔀"
 	case RoleReplanner:
 		return "🧮"
-	case RoleOverseer:
-		return "🦉"
 	}
 
 	return "📦"

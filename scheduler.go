@@ -87,11 +87,10 @@ func (o *Orchestrator) Run() {
 }
 
 // bootDirectives kicks off exactly one agent at startup. Operator flags take
-// precedence: --replan queues a mandatory operator nudge for the replanner, and
-// --overseer force-runs an overseer pass, both with mandatory framing. Absent a
-// flag, the default boot depends on the task DB — an empty DB needs the overseer
-// to evaluate goals and seed direction; an existing plan gets one replanner pass
-// to re-evaluate it against the goals before work resumes.
+// precedence: --replan queues a mandatory operator nudge with mandatory framing.
+// Then the boot depends on the task DB — an empty DB runs the replanner in its
+// start_project context to read GOALS.md and seed direction; an existing plan gets
+// one routine replanner pass to re-evaluate it against the goals before work resumes.
 func (o *Orchestrator) bootDirectives() {
 	if o.bootReplan != "" {
 		o.nudges = append(o.nudges, ReplanReason{
@@ -102,15 +101,17 @@ func (o *Orchestrator) bootDirectives() {
 	}
 
 	switch {
-	case o.bootOverseer != "":
-		o.triggerOverseer(operatorDirective(o.bootOverseer))
-	case o.bootReplan != "":
-		// operator drives the replanner directly — skip the default kick.
+	case len(o.Tickets) == 0:
+		// Empty DB — a brand-new project. Seed it from GOALS.md.
+		o.wantReplan("start_project")
+		uiSys("🚀", "START_PROJECT", "boot: empty task DB — read GOALS.md and seed the plan")
 	case o.nonTerminalCount() == 0:
-		o.triggerOverseer("boot: zero open tickets — evaluate goals and seed plan if needed")
-	default:
+		// Tickets exist but all terminal — check whether the goals are met.
+		o.wantReplan("end_project")
+		uiSys("🏁", "END_PROJECT", "boot: all tickets terminal — verify goals / seed remaining work")
+	case o.bootReplan == "":
 		o.nudges = append(o.nudges, ReplanReason{
-			Source: RoleOverseer,
+			Source: RoleOperator,
 			Reason: "boot: re-evaluate the open plan against GOALS.md and current state before resuming work",
 		})
 		uiSys("📥", "BOOT_REPLAN", "re-evaluate open plan")
@@ -208,7 +209,7 @@ func (o *Orchestrator) checkGoals() {
 	h := readGoalsHash(o.Trunk)
 
 	if o.GoalsHash != "" && h != o.GoalsHash {
-		o.nudges = append(o.nudges, ReplanReason{Source: RoleOverseer, Reason: "GOALS.md changed in trunk"})
+		o.nudges = append(o.nudges, ReplanReason{Source: RoleOperator, Reason: "GOALS.md changed in trunk"})
 		uiSys("📥", "GOALS_CHANGED", "queued replan nudge")
 	}
 
@@ -285,12 +286,14 @@ func (o *Orchestrator) publishTasks() {
 }
 
 // dispatchReplanner hands the (serial) replanner pool one batched Job covering every
-// STOPPED ESCALATE ticket plus all pending global nudges. Only the coordinator
-// writes the replanner queue. Guarded by replannerBusy so one runs at a time, and
-// held off while the overseer is analyzing — so the overseer's (mandatory) direction
-// always lands before the replanner acts (e.g. on an algedonic-escalated ticket).
+// STOPPED ESCALATE ticket plus all pending global nudges. Only the coordinator writes
+// the replanner queue; replannerBusy keeps one in flight at a time. The Job carries a
+// subagent context (start_project / end_project / algedonic / replan) that selects the
+// replanner's prompt — the most urgent pending one wins (see wantReplan). A special
+// context dispatches a pass even with no nudges or escalations (e.g. end_project must
+// run to check the goals when the queue has drained).
 func (o *Orchestrator) dispatchReplanner() {
-	if o.replannerBusy || o.overseerBusy {
+	if o.replannerBusy {
 		return
 	}
 
@@ -302,8 +305,14 @@ func (o *Orchestrator) dispatchReplanner() {
 		}
 	}
 
-	if len(escalate) == 0 && len(o.nudges) == 0 {
+	if o.replanCtx == "" && len(escalate) == 0 && len(o.nudges) == 0 {
 		return
+	}
+
+	subagent := o.replanCtx
+
+	if subagent == "" {
+		subagent = "replan"
 	}
 
 	reasons := append([]ReplanReason{}, o.nudges...)
@@ -322,11 +331,12 @@ func (o *Orchestrator) dispatchReplanner() {
 
 	o.nudges = nil
 	o.replanChat = nil
+	o.replanCtx = ""
 	o.replanOwned = escalate
 	o.replannerBusy = true
 
-	uiSys("📤", "REPLANNER", fmt.Sprintf("%d reason(s), %d escalated", len(reasons), len(escalate)))
-	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
+	uiSys("📤", "REPLANNER", fmt.Sprintf("%s — %d reason(s), %d escalated", subagent, len(reasons), len(escalate)))
+	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Subagent: subagent, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
 }
 
 // buildJob assembles the Job for a ticket's phase: which workspace the worker uses
@@ -368,16 +378,28 @@ func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
 	return j
 }
 
-// triggerOverseer dispatches a (serial) overseer evaluation if one isn't already in
-// flight.
-func (o *Orchestrator) triggerOverseer(reason string) {
-	if o.overseerBusy {
-		return
+// replanCtxRank orders the replanner's wake-up contexts by urgency so the most
+// important one wins when several pend before the next dispatch.
+func replanCtxRank(c string) int {
+	switch c {
+	case "algedonic":
+		return 3
+	case "start_project":
+		return 2
+	case "end_project":
+		return 1
 	}
 
-	o.overseerBusy = true
-	uiSys("🚀", "OVERSEER_START", reason)
-	o.jobs[RoleOverseer] <- Job{Role: RoleOverseer, NewWS: true, OverseerReason: reason, Snapshot: SerializeTasks(o.Tickets)}
+	return 0
+}
+
+// wantReplan records that the replanner should run, keeping the most urgent pending
+// context; dispatchReplanner turns it into one Job. Replaces the former overseer
+// trigger — the replanner now does the overseer's job under that context.
+func (o *Orchestrator) wantReplan(ctx string) {
+	if replanCtxRank(ctx) >= replanCtxRank(o.replanCtx) {
+		o.replanCtx = ctx
+	}
 }
 
 // handleResult folds one worker result into the state machine: collect any replan
@@ -402,7 +424,7 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 	// Per-ticket result for an already-terminal ticket (replanner cancelled it
 	// mid-flight): drop it, just clear the shadow. A merger landing here never
 	// reaches onMerger, so free the merge slot explicitly or it deadlocks.
-	if res.Role != RoleReplanner && res.Role != RoleOverseer {
+	if res.Role != RoleReplanner {
 		if t, ok := o.findTicket(n); ok && t.Phase.Terminal() {
 			if res.Role == RoleMerger {
 				o.mergerBusy = false
@@ -433,8 +455,6 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 		o.onArbiter(res)
 	case RoleReplanner:
 		o.onReplanner(res)
-	case RoleOverseer:
-		o.onOverseer(res)
 	}
 }
 
@@ -513,19 +533,20 @@ func (o *Orchestrator) onDigger(res AgentResult) {
 		o.setPhase(n, PhaseArbitrate, detail)
 		uiTicket("🛑", RoleDigger, n, "CANT_DO", detail)
 	case VerdictAlgedonic:
-		// Emergency cord: jump straight to the overseer (bypassing review / merge /
-		// arbiter) and escalate the ticket. dispatchReplanner holds off while the
-		// overseer is analyzing, so its mandatory direction reaches the replanner
-		// before the ticket is re-scoped — no extra coordinator state needed.
+		// Emergency cord: escalate the ticket and wake the replanner in its algedonic
+		// context (bypassing review / merge / arbiter). The escalated ticket and the
+		// digger's cry are both in the next replanner batch, so one pass does the full
+		// analysis and the re-scope.
 		o.recordEvent(n, "ALGEDONIC", detail)
 		o.setPhase(n, PhaseEscalate, detail)
 		uiTicket("🚨", RoleDigger, n, "ALGEDONIC", detail)
-		o.triggerOverseer(algedonicReason(n, detail))
+		o.nudges = append(o.nudges, ReplanReason{Source: RoleDigger, Ticket: n, Workspace: res.Workspace, Reason: algedonicReason(n, detail)})
+		o.wantReplan("algedonic")
 	}
 }
 
 func algedonicReason(n int, detail string) string {
-	return fmt.Sprintf("ALGEDONIC — the digger on T-%d pulled the emergency cord: %q. Drop the routine evaluation and do a FULL situation analysis (this ticket and its run history, GOALS.md, the surrounding plan), then hand the replanner concrete, mandatory direction to unblock or re-scope it.", n, detail)
+	return fmt.Sprintf("ALGEDONIC — the digger on T-%d pulled the emergency cord: %q. Drop the routine pass and do a FULL root-cause analysis (this ticket and its run history, GOALS.md, the surrounding plan and deps), then re-scope decisively to unblock it.", n, detail)
 }
 
 func (o *Orchestrator) onReviewer(res AgentResult) {
@@ -637,6 +658,16 @@ func (o *Orchestrator) onArbiter(res AgentResult) {
 func (o *Orchestrator) onReplanner(res AgentResult) {
 	o.replannerBusy = false
 
+	// GOALS_ACHIEVED ends the run — the replanner now owns this top-level call (it was
+	// the overseer's). Reached mainly from the end_project context.
+	if verdict, detail := lastVerdict(res.Events); verdict == VerdictGoalsAchieved {
+		uiSys("🎯", "GOALS_ACHIEVED", detail)
+		o.writeReport()
+		o.StopCancel()
+
+		return
+	}
+
 	ops := replannerTaskOps(res.Events)
 
 	if len(ops) > 0 {
@@ -660,24 +691,8 @@ func (o *Orchestrator) onReplanner(res AgentResult) {
 	o.replanOwned = nil
 }
 
-func (o *Orchestrator) onOverseer(res AgentResult) {
-	o.overseerBusy = false
-
-	verdict, detail := lastVerdict(res.Events)
-
-	if verdict == VerdictGoalsAchieved {
-		uiSys("🎯", "GOALS_ACHIEVED", detail)
-		o.writeReport()
-		o.StopCancel()
-
-		return
-	}
-
-	uiSys("🦉", "OVERSEER_DONE", fmt.Sprintf("verdict=%s pending_nudges=%d", verdict, len(o.nudges)))
-}
-
 // afterTerminal fires the post-terminal bookkeeping: a fallout replan nudge plus an
-// overseer re-evaluation when the open queue reaches zero.
+// end_project replanner pass (check the goals) when the open queue reaches zero.
 func (o *Orchestrator) afterTerminal(n int, reason, workspace string) {
 	o.nudges = append(o.nudges, ReplanReason{
 		Source:    RoleMerger,
@@ -687,7 +702,7 @@ func (o *Orchestrator) afterTerminal(n int, reason, workspace string) {
 	})
 
 	if o.nonTerminalCount() == 0 {
-		o.triggerOverseer(fmt.Sprintf("zero-open after T-%d %s", n, reason))
+		o.wantReplan("end_project")
 	}
 }
 
@@ -780,13 +795,13 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 	}
 
 	if canceledAny && o.nonTerminalCount() == 0 {
-		o.triggerOverseer("zero-open after replanner batch")
+		o.wantReplan("end_project")
 	}
 }
 
 func (o *Orchestrator) writeReport() {
 	var sb strings.Builder
-	sb.WriteString("# Overseer Report\n\n")
+	sb.WriteString("# Project Report\n\n")
 
 	for _, t := range o.Tickets {
 		fmt.Fprintf(&sb, "- T-%d [%s] %s\n", t.N, t.Phase, t.Descr)

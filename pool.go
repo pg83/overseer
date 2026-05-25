@@ -11,7 +11,7 @@ import (
 // harness to a recognized verdict, and reply with an AgentResult on o.Events. A
 // worker never touches ticket state — everything it needs is in the Job (a ticket
 // snapshot, the workspace, role-specific context). Total harness concurrency is the
-// sum of pool sizes; merger / replanner / overseer are size 1 (serial).
+// sum of pool sizes; merger / replanner are size 1 (serial).
 
 func (o *Orchestrator) startPools() {
 	for role, size := range poolSizes {
@@ -62,8 +62,6 @@ func (o *Orchestrator) runJob(job Job) AgentResult {
 		return o.jobArbiter(job)
 	case RoleReplanner:
 		return o.jobReplanner(job)
-	case RoleOverseer:
-		return o.jobOverseer(job)
 	}
 
 	ThrowFmt("runJob: unknown role %q", job.Role)
@@ -85,7 +83,7 @@ func (o *Orchestrator) jobTasker(job Job) AgentResult {
 	ws := o.workspaceFor(job)
 	wsAbs := wsPath(o.Root, ws)
 	env := o.ticketEnv(job.Ticket.N, wsAbs)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleTasker), o.buildAgentInput(RoleTasker, job.Ticket, wsAbs))
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleTasker, PromptData{}), o.buildAgentInput(RoleTasker, job.Ticket, wsAbs))
 
 	for {
 		res := o.runAgent(RoleTasker, job.Ticket.N, ws, stdin, env)
@@ -103,7 +101,7 @@ func (o *Orchestrator) jobTasker(job Job) AgentResult {
 func (o *Orchestrator) jobDigger(job Job) AgentResult {
 	ws := o.workspaceFor(job)
 	wsAbs := wsPath(o.Root, ws)
-	prompt := loadPrompt(o.Trunk, RoleDigger)
+	prompt := loadPrompt(o.Trunk, RoleDigger, PromptData{})
 
 	env := o.ticketEnv(job.Ticket.N, wsAbs)
 	env["PREV_WORKSPACE"] = wsAbs
@@ -138,7 +136,7 @@ func (o *Orchestrator) jobReviewer(job Job) AgentResult {
 	ws := job.WS
 	wsAbs := wsPath(o.Root, ws)
 	env := o.ticketEnv(job.Ticket.N, wsAbs)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReviewer), o.buildAgentInput(RoleReviewer, job.Ticket, wsAbs))
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReviewer, PromptData{}), o.buildAgentInput(RoleReviewer, job.Ticket, wsAbs))
 
 	for {
 		res := o.runAgent(RoleReviewer, job.Ticket.N, ws, stdin, env)
@@ -166,7 +164,7 @@ func (o *Orchestrator) jobArbiter(job Job) AgentResult {
 	input := o.buildAgentInput(RoleArbiter, job.Ticket, wsAbs) +
 		fmt.Sprintf("\nTRIGGER_ROLE: %s\nTRIGGER_VERDICT: %s\nTRIGGER_DETAIL: %s\n",
 			sourceForTrigger(job.Trigger), job.Trigger, job.Detail)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleArbiter), input)
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleArbiter, PromptData{}), input)
 
 	for {
 		res := o.runAgent(RoleArbiter, job.Ticket.N, ws, stdin, env)
@@ -201,7 +199,7 @@ func (o *Orchestrator) jobMerger(job Job) AgentResult {
 	input := o.buildAgentInput(RoleMerger, job.Ticket, mergerWSAbs) +
 		fmt.Sprintf("\nDIGGER_BRANCH: %s\nDIGGER_WORKTREE: %s\nMERGER_WORKTREE: %s\nTRUNK_HEAD: %s\n",
 			diggerBranch, diggerWSAbs, mergerWSAbs, trunkHead)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleMerger), input)
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleMerger, PromptData{}), input)
 
 	for {
 		res := o.runAgent(RoleMerger, job.Ticket.N, mergerWS, stdin, env)
@@ -225,9 +223,9 @@ func (o *Orchestrator) jobReplanner(job Job) AgentResult {
 	chat := strings.Join(job.ChatLog, "\n")
 
 	input := o.agentSelfBlock(RoleReplanner, 0) +
-		fmt.Sprintf("REPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nREPLAN_CHAT (all team-chat lines accumulated since the previous replanner run):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
-			triggers, chat, runsDir(o.Root), tasksDBPath(o.Root), job.Snapshot)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReplanner), input)
+		fmt.Sprintf("SUBAGENT: %s\n\nREPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):\n%s\nREPLAN_CHAT (all team-chat lines accumulated since the previous replanner run):\n%s\nRUNS_DIR: %s\nTASKS_DB: %s\n\n%s",
+			job.Subagent, triggers, chat, runsDir(o.Root), tasksDBPath(o.Root), job.Snapshot)
+	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleReplanner, PromptData{Subagent: job.Subagent}), input)
 
 	env := map[string]string{
 		"REPLAN_TRIGGERS": triggers,
@@ -246,41 +244,6 @@ func (o *Orchestrator) jobReplanner(job Job) AgentResult {
 		}
 
 		uiSys("🔄", "REPLANNER_RESPAWN", "unparsed JSON — retrying for clean output")
-	}
-}
-
-func (o *Orchestrator) jobOverseer(job Job) AgentResult {
-	ws := o.workspaceFor(job)
-
-	input := o.agentSelfBlock(RoleOverseer, 0) +
-		fmt.Sprintf("REASON: %s\n\nCURRENT_TASKS:\n%s\n", job.OverseerReason, job.Snapshot)
-	stdin := concatPromptInput(loadPrompt(o.Trunk, RoleOverseer), input)
-
-	env := map[string]string{
-		"REASON":     job.OverseerReason,
-		"TRUNK_PATH": o.Trunk,
-		"TRUNK_HASH": CurrentTrunkHash(o.Trunk),
-		"TASKS_DB":   tasksDBPath(o.Root),
-		"RUNS_DIR":   runsDir(o.Root),
-	}
-
-	for {
-		res := o.runAgent(RoleOverseer, 0, ws, stdin, env)
-		v, _ := lastVerdict(res.Events)
-
-		if v == VerdictGoalsAchieved || len(eventReplans(res.Events)) > 0 {
-			res.Workspace = ws
-
-			return res
-		}
-
-		if hasJSONInUnparsed(res.Events) {
-			uiSys("🔄", "OVERSEER_RESPAWN", "unparsed JSON — retrying")
-
-			continue
-		}
-
-		uiSys("🔄", "OVERSEER_RESPAWN", fmt.Sprintf("verdict=%q no replans", v))
 	}
 }
 

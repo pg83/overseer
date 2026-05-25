@@ -91,7 +91,6 @@ func summarizeRunJsonl(path string) string {
 	return fmt.Sprintf("VERDICT: %s: %s\n", verdict, detail)
 }
 
-
 // outputPriming is appended at the very end of every agent stdin. Research on
 // weak models (glm-4 family etc.) shows the last instruction before the
 // assistant turn has the strongest pull on the first emitted tokens — output
@@ -108,4 +107,3 @@ func concatPromptInput(prompt, input string) string {
 
 	return prompt + "\n\n" + input + outputPriming
 }
-

@@ -681,8 +681,6 @@ func roleStyle(r AgentRole) tcell.Style {
 		c = tcell.ColorTeal
 	case RoleReplanner:
 		c = tcell.ColorGreen
-	case RoleOverseer:
-		c = tcell.ColorRed
 	}
 
 	return tcell.StyleDefault.Foreground(c)

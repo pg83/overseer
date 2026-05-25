@@ -141,4 +141,3 @@ func classifyTransientNetworkFault(stderr, stdout string) (retryable bool, reaso
 func faultUnknown(f *agentFault) (bool, string) {
 	return false, fmt.Sprintf("exit=%d stderr=%q", f.exitCode, f.stderr)
 }
-

@@ -116,7 +116,6 @@ const (
 	RoleReviewer  AgentRole = "reviewer"
 	RoleMerger    AgentRole = "merger"
 	RoleReplanner AgentRole = "replanner"
-	RoleOverseer  AgentRole = "overseer"
 
 	// Arbiter is the cycle-internal escalation gate. When a digger →
 	// reviewer / merger cycle hits a disagreement (REWORK / DISCARD /
@@ -124,9 +123,9 @@ const (
 	// escalate to the full replanner.
 	RoleArbiter AgentRole = "arbiter"
 
-	// Operator is a synthetic source for nudges the human injects via the
-	// --overseer / --replan boot flags. Never dispatched (it has no pool); used
-	// only to label the directive in the replanner's trigger list.
+	// Operator is a synthetic source for nudges the coordinator injects: the human's
+	// --replan boot flag, plus boot / GOALS.md-change signals. Never dispatched (it
+	// has no pool); used only to label the directive in the replanner's trigger list.
 	RoleOperator AgentRole = "operator"
 
 	// Common names the shared prompt tail appended to every role. It has no pool;
@@ -221,12 +220,12 @@ type Job struct {
 	Reasons []ReplanReason
 	ChatLog []string
 
-	// Overseer context.
-	OverseerReason string
+	// Subagent selects the replanner's prompt template for this pass:
+	// start_project | end_project | algedonic | replan.
+	Subagent string
 
 	// Snapshot is CURRENT_TASKS, rendered by the coordinator (which owns o.Tickets)
-	// at dispatch time, for the replanner / overseer — so a worker never reads
-	// coordinator state.
+	// at dispatch time, for the replanner — so a worker never reads coordinator state.
 	Snapshot string
 }
 
@@ -262,11 +261,9 @@ type Orchestrator struct {
 	Jail      []string
 	ExtraRW   []string
 
-	// Boot directives from the operator (--overseer / --replan): when non-empty the
-	// coordinator force-runs that cycle once at startup with the text injected as a
-	// mandatory operator instruction in the agent's prompt.
-	bootOverseer string
-	bootReplan   string
+	// Boot directive from the operator (--replan): when non-empty the coordinator
+	// queues it as a mandatory operator nudge for the first replanner pass.
+	bootReplan string
 
 	// Bindings is the role → (harness, model) resolution table — see
 	// harnessModelForRole. "default" required; the rest optional overrides.
@@ -280,8 +277,8 @@ type Orchestrator struct {
 	nudges        []ReplanReason
 	replanChat    []string
 	replanOwned   []int
+	replanCtx     string
 	replannerBusy bool
-	overseerBusy  bool
 	mergerBusy    bool
 
 	jobs   map[AgentRole]chan Job
@@ -293,8 +290,8 @@ type Orchestrator struct {
 }
 
 // poolSizes is the fixed number of workers per role — total harness concurrency is
-// their sum (no shared semaphore). merger / replanner / overseer are serial; tune
-// digger to control implementation parallelism.
+// their sum (no shared semaphore). merger / replanner are serial; tune digger to
+// control implementation parallelism.
 var poolSizes = map[AgentRole]int{
 	RoleTasker:    2,
 	RoleDigger:    4,
@@ -302,5 +299,4 @@ var poolSizes = map[AgentRole]int{
 	RoleArbiter:   2,
 	RoleMerger:    1,
 	RoleReplanner: 1,
-	RoleOverseer:  1,
 }

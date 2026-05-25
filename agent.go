@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 )
 
@@ -36,7 +37,7 @@ func (o *Orchestrator) harnessModelForRole(role AgentRole) HarnessModel {
 	}
 
 	switch role {
-	case RoleTasker, RoleReplanner, RoleOverseer:
+	case RoleTasker, RoleReplanner:
 		if hm, ok := o.Bindings["think"]; ok {
 			return hm
 		}
@@ -675,11 +676,31 @@ func messageText(ev map[string]any) string {
 	return strings.TrimSpace(t)
 }
 
-func loadPrompt(repoRoot string, role AgentRole) string {
-	body := withRepoOverride(repoRoot, role, loadEmbedded("prompts/"+string(role)+".txt"))
+// PromptData is the template context for a role's prompt. Only the replanner uses it
+// today (Subagent selects which situation block renders); for other roles it is the
+// zero value and their prompts, having no template directives, render unchanged.
+type PromptData struct {
+	Subagent string
+}
+
+func loadPrompt(repoRoot string, role AgentRole, data PromptData) string {
+	body := withRepoOverride(repoRoot, role, renderPrompt(loadEmbedded("prompts/"+string(role)+".txt"), data))
 	common := withRepoOverride(repoRoot, RoleCommon, loadEmbedded("prompts/common.txt"))
 
 	return body + "\n\n" + common
+}
+
+// renderPrompt runs the embedded prompt through text/template with data. A prompt
+// with no template directives renders unchanged; a malformed template is our bug in a
+// checked-in prompt, so it throws rather than silently shipping a broken prompt.
+func renderPrompt(src string, data PromptData) string {
+	tmpl := Throw2(template.New("prompt").Parse(src))
+
+	var sb strings.Builder
+
+	Throw(tmpl.Execute(&sb, data))
+
+	return sb.String()
 }
 
 // withRepoOverride appends operator-supplied per-role prompt extensions to the
