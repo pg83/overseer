@@ -29,6 +29,11 @@ func wsPath(orchRoot, id string) string {
 
 func NewWorkspace(orchRoot, trunk string) string {
 	id := newWorkspaceID()
+
+	if simulate {
+		return id // no clone in sim — nothing reads the workspace dir
+	}
+
 	dst := wsPath(orchRoot, id)
 
 	Throw(os.MkdirAll(wsRoot(orchRoot), 0755))
@@ -51,6 +56,10 @@ func NewWorkspace(orchRoot, trunk string) string {
 }
 
 func FetchBranch(trunk, srcPath, branch string) {
+	if simulate {
+		return
+	}
+
 	refspec := branch + ":" + branch
 	cmd := exec.Command("git", "-C", trunk, "fetch", srcPath, refspec)
 	cmd.Stdout = os.Stderr
@@ -78,6 +87,10 @@ func readGoalsHash(trunk string) string {
 }
 
 func FfMergeBranch(trunk, branch string) (bool, string) {
+	if simulate {
+		return true, "[sim] ff-merge"
+	}
+
 	fmt.Fprintf(os.Stderr, "trunk: ff-merge %s into %s\n", branch, trunk)
 
 	cmd := exec.Command("git", "-C", trunk, "merge", "--ff-only", branch)
@@ -109,6 +122,10 @@ func CurrentTrunkHash(trunk string) string {
 // clone-time base (origin/HEAD or origin/master). 0 means the digger emitted READY
 // without committing anything; -1 means we couldn't determine (don't gate on that).
 func WorkspaceCommitsAhead(wsAbs string) int {
+	if simulate {
+		return -1 // no real clone in sim; -1 means "don't gate on commit count"
+	}
+
 	for _, base := range []string{"origin/HEAD", "origin/master"} {
 		cmd := exec.Command("git", "-C", wsAbs, "rev-list", "--count", base+"..HEAD")
 		out, err := cmd.Output()

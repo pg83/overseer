@@ -84,6 +84,10 @@ func (hm HarnessModel) resolveModel(role AgentRole) string {
 // `$WORKSPACE`, `$MERGER_WORKTREE`, etc. in bash tool calls. The same values appear
 // in the prose `stdin` for context.
 func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, env map[string]string) AgentResult {
+	if simulate {
+		return o.simulatedRun(role, ticket, wsID, stdin)
+	}
+
 	harness := o.harnessModelForRole(role).Harness
 
 	backoff := 5 * time.Second

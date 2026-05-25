@@ -80,6 +80,7 @@ func runMain(argv []string) {
 
 	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
 	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
+	simFlag := fs.Bool("sim", false, "simulator: synthesize agent verdicts instead of running real harnesses — stress-tests the state machine with no tokens, no real workspaces, no trunk writes")
 
 	var extraRW []string
 
@@ -91,6 +92,8 @@ func runMain(argv []string) {
 
 	Throw(fs.Parse(argv))
 
+	simulate = *simFlag
+
 	if *root == "" {
 		ThrowFmt("--root is required")
 	}
@@ -99,14 +102,19 @@ func runMain(argv []string) {
 		ThrowFmt("--trunk is required")
 	}
 
-	if *defaultHarness == "" {
+	if *defaultHarness == "" && !simulate {
 		ThrowFmt("--harness is required")
 	}
 
 	Throw(os.MkdirAll(*root, 0755))
 
-	bindings := map[string]HarnessModel{
-		"default": parseHarnessSpec("--harness", *defaultHarness),
+	bindings := map[string]HarnessModel{}
+
+	if *defaultHarness != "" {
+		bindings["default"] = parseHarnessSpec("--harness", *defaultHarness)
+	} else {
+		// sim with no --harness: a placeholder binding for agentSelfBlock, never executed
+		bindings["default"] = HarnessModel{Harness: SelectHarness("claude"), Model: "(sim)"}
 	}
 
 	for _, kv := range []struct {
@@ -135,6 +143,10 @@ func runMain(argv []string) {
 
 	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s bindings=[%s] jail=%s",
 		*root, *trunk, formatBindings(bindings), jailDescr))
+
+	if simulate {
+		uiSys("🧪", "SIMULATION", "synthesizing agent verdicts — no real harnesses, workspaces, or trunk writes")
+	}
 
 	o := NewOrchestrator(*root, *trunk, bindings, jail, extraRW)
 	o.bootOverseer = strings.TrimSpace(*overseerDirective)
