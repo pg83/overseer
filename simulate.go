@@ -59,7 +59,7 @@ func (simSpec) Set(v string) error {
 func (o *Orchestrator) simulatedRun(role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	time.Sleep(time.Duration(rand.Int63n(int64(2 * time.Second))))
 
-	res := AgentResult{Role: role, Ticket: ticket, Workspace: wsID, Stdin: stdin, Events: simEvents(role, ticket, stdin)}
+	res := AgentResult{Role: role, Ticket: ticket, Workspace: wsID, Stdin: stdin, Usage: simUsage(), Events: simEvents(role, ticket, stdin)}
 
 	for _, ev := range res.Events {
 		if t, _ := ev["type"].(string); t == "message" {
@@ -68,6 +68,8 @@ func (o *Orchestrator) simulatedRun(role AgentRole, ticket int, wsID, stdin stri
 			}
 		}
 	}
+
+	o.reportUsage(role, ticket, res.Usage)
 
 	return res
 }
@@ -103,6 +105,21 @@ func simEvents(role AgentRole, ticket int, stdin string) []map[string]any {
 	}
 
 	return []map[string]any{msg}
+}
+
+// simUsage fabricates a plausible per-run token tally so a sim run exercises the cost
+// meter (real harnesses report this; sim has to make it up). Synthetic USD, not real.
+func simUsage() RunUsage {
+	in := 2000 + rand.Intn(8000)
+	out := 500 + rand.Intn(2500)
+	cache := rand.Intn(40000)
+
+	return RunUsage{
+		Input:  in,
+		Cache:  cache,
+		Output: out,
+		USD:    float64(in)*3e-6 + float64(out)*15e-6 + float64(cache)*0.3e-6,
+	}
 }
 
 // simVerdict picks one verdict from (name, weight) pairs whose weights sum to ~1.

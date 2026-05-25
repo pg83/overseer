@@ -476,9 +476,16 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 		return
 	}
 
-	n := res.Ticket
+	// Usage is reported per completed run (including discarded respawns/retries), so it
+	// is tallied here rather than from the returned result — otherwise the returned run
+	// would be counted twice and respawned runs not at all.
+	if res.Kind == "usage" {
+		o.recordUsage(res)
 
-	o.recordUsage(res)
+		return
+	}
+
+	n := res.Ticket
 
 	for _, line := range eventReplans(res.Events) {
 		o.nudges = append(o.nudges, ReplanReason{Source: res.Role, Ticket: n, Workspace: res.Workspace, Reason: line})

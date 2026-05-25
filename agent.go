@@ -173,8 +173,25 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 		}
 
 		res.Stdin = stdin // the full prompt the agent received, for the ticket log
+		o.reportUsage(role, ticket, res.Usage)
 
 		return res
+	}
+}
+
+// reportUsage sends one completed run's token tally to the coordinator so it lands in
+// the cost meter even when the run is later discarded — a respawn or retry that never
+// returns a recognized verdict still spent real tokens. Emitted for every completed
+// run; the coordinator tallies it via the Kind=="usage" path and never double-counts,
+// because handleResult no longer charges the returned result itself.
+func (o *Orchestrator) reportUsage(role AgentRole, ticket int, u RunUsage) {
+	if u.tokens() == 0 {
+		return
+	}
+
+	select {
+	case o.Events <- AgentResult{Kind: "usage", Role: role, Ticket: ticket, Usage: u}:
+	case <-o.StopCtx.Done():
 	}
 }
 
