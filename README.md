@@ -79,7 +79,7 @@ The mental model is a stripped-down engineering team:
 |------------|----------------|--------------|
 | **overseer** | product owner / QA lead | Reads `GOALS.md`, decides whether the project is done. When done → emits `GOALS_ACHIEVED`, run terminates and writes `REPORT.md`. Otherwise nudges the replanner. |
 | **replanner** | planning lead | Owns the ticket database. Reads goals + ticket history + recent agent runs, emits `task` operations (`new` / `update` / `replace` / `cancel`) that the orchestrator validates and applies. Invoked on every `replan` nudge from any role. |
-| **tasker** | senior engineer writing specs | Gets a ticket in phase `PLAN`, researches the codebase, writes `plan.md` for it — the work order for the digger. |
+| **tasker** | senior engineer writing specs | Gets a `plan` ticket (phase `PLAN`), researches the codebase, writes `plan.md`. The ticket then terminates as `PLANNED`; dependent `code` tickets read that plan.md via their `deps`. |
 | **digger** | implementer | Reads `plan.md`, makes the changes in a per-ticket workspace, squashes + rebases onto trunk. Reports `READY` (work done), `CANT_DO` (this ticket can't, here's why → arbiter), or `ALGEDONIC` — the emergency cord (VSM algedonic signal) for *systemic* trouble: it bypasses review/merge/arbiter, escalates the ticket, and fires the overseer for a full re-think (the replanner holds off until the overseer's analysis lands). |
 | **reviewer** | code reviewer | Independently audits the digger's branch. Reports `APPROVE`, `REWORK` (needs revision), or `DISCARD` (kill the ticket). |
 | **merger** | release engineer | Serial (pool size 1). Runs tests on trunk (baseline), `git merge --no-ff` the digger's branch into a scratch worktree, re-runs tests. Reports `MERGED` or `MERGE_FAIL`; on `MERGED` the **coordinator** ff-merges that scratch branch into real trunk (the one place trunk is written). |
@@ -91,7 +91,7 @@ A single **coordinator** goroutine (`scheduler.go`) owns *all* ticket state — 
 
 Two state axes:
 
-- **`Phase`** (persisted) — what work a ticket needs next: `PLAN` → tasker, `IMPLEMENT` → digger, `REVIEW` → reviewer, `MERGE` → merger, `ARBITRATE` → arbiter, `ESCALATE` → replanner (also where an algedonic-screaming ticket lands; the replanner waits for the overseer's analysis before acting), plus terminal `MERGED` / `DISCARDED`. Written to the event log as `phase` events; a restart replays them and resumes mid-pipeline.
+- **`Phase`** (persisted) — what work a ticket needs next: `PLAN` → tasker, `IMPLEMENT` → digger, `REVIEW` → reviewer, `MERGE` → merger, `ARBITRATE` → arbiter, `ESCALATE` → replanner (also where an algedonic-screaming ticket lands; the replanner waits for the overseer's analysis before acting), plus terminal `PLANNED` (a plan ticket finished its plan.md), `MERGED`, `DISCARDED`. Written to the event log as `phase` events; a restart replays them and resumes mid-pipeline.
 - **`shadow`** (in-memory, coordinator-only) — `STOPPED` (dispatchable) or `SCHEDULED` (handed to a pool). Dispatch routes every `STOPPED` non-terminal ticket to `roleForPhase(phase)` and flips it to `SCHEDULED`; the returning result flips it back to `STOPPED`. That two-line rule *is* the scheduler.
 
 ### Pipeline: from a goal to a merged commit
@@ -169,7 +169,7 @@ Step by step, on one ticket:
 2. **Overseer evaluates.** Reads `GOALS.md`, ticket DB, recent agent runs. If goals aren't met → emits one or more `replan` events with reasons (the coordinator accumulates them as nudges). If met → `GOALS_ACHIEVED`, the run writes `REPORT.md` and shuts down.
 3. **Replanner reshapes the DB.** The coordinator hands the (serial) replanner one batched job covering all `ESCALATE` tickets + pending nudges. It emits `task` events; the coordinator validates them (no non-terminal→DISCARDED deps, no cycles), appends to `tasks.events.jsonl`, updates in-memory tickets. New tickets start in phase `PLAN`.
 4. **Dispatch picks the ticket up.** Every `STOPPED` non-terminal ticket whose deps are all terminal is routed to `roleForPhase(phase)`, sorted by ticket number `n ASC`, and flipped to `SCHEDULED`. A fresh ticket is phase `PLAN` → tasker.
-5. **Tasker writes the spec.** A tasker worker researches the codebase in a fresh workspace, writes `tickets/T-<N>/plan.md`, emits `{"type":"plan","path":"..."}`. The coordinator advances the ticket to phase `IMPLEMENT`.
+5. **Tasker writes the spec.** A tasker worker researches the codebase in a fresh workspace, writes `tickets/T-<N>/plan.md`, emits `{"type":"plan","path":"..."}`. The coordinator marks the plan ticket terminal `PLANNED`; dependent `code` tickets unblock and read its `plan.md` (via `DEPENDENCY_PLANS`). If nothing depends on it yet, the replanner is nudged to turn the plan into implementation tickets.
 6. **Digger implements.** A digger worker works in `workspaces/<ws-id>/` (a clone of trunk on branch `ovs/<ws-id>`, recorded as the ticket's branch workspace). On `READY` (clean rebase-able branch ahead of trunk) → phase `REVIEW`. On `CANT_DO` → phase `ARBITRATE`.
 7. **Reviewer audits.** A reviewer worker independently audits the same branch workspace. `APPROVE` → phase `MERGE`. `REWORK` / `DISCARD` → phase `ARBITRATE`.
 8. **Merger lands the change.** A single merger worker (pool size 1) runs the project's tests on trunk as a baseline; if baseline is red it declines (no landing into a broken trunk). Then `git merge --no-ff` into a scratch worktree, re-runs tests. On green → `MERGED`, and **the coordinator** ff-merges the scratch branch into real trunk (the only writer of trunk); ticket → terminal `MERGED`. On red / conflict, or a failed ff-merge → phase `ARBITRATE` with `RebaseTarget` (new trunk HEAD) + `MergeOut` so the next digger pass can rebase.
@@ -222,7 +222,7 @@ The **last** `verdict` event is authoritative — agents sometimes emit multiple
 {"n": 12, "phase": "REVIEW", "descr": "...", "deps": [3, 8]}
 ```
 
-- **`Phase`** is the persisted state: `PLAN` / `IMPLEMENT` / `REVIEW` / `MERGE` / `ARBITRATE` / `ESCALATE`, plus terminal `MERGED` (work landed) and `DISCARDED` (every other terminal close — cancelled by replanner, repeatedly bounced, reviewer-killed, etc.). The in-memory `shadow` (`STOPPED` / `SCHEDULED`) is the only ephemeral state and never persisted.
+- **`Phase`** is the persisted state: `PLAN` / `IMPLEMENT` / `REVIEW` / `MERGE` / `ARBITRATE` / `ESCALATE`, plus terminal `PLANNED` (a plan ticket finished its plan.md), `MERGED` (work landed), and `DISCARDED` (every other terminal close — cancelled by replanner, repeatedly bounced, reviewer-killed, etc.). The in-memory `shadow` (`STOPPED` / `SCHEDULED`) is the only ephemeral state and never persisted.
 - Dispatch order: ticket number `n ASC`.
 - A non-terminal ticket may not depend on a `DISCARDED` prerequisite — `ValidateTasks` enforces this on every replanner batch. A dependency is "satisfied" once the dep reaches a terminal phase.
 

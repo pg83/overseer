@@ -162,11 +162,6 @@ const (
 	// coordinator categorizes that absence as NO_PLAN for the arbiter's input.
 	VerdictNoPlan AgentVerdict = "NO_PLAN"
 
-	// VerdictPlanWritten is a synthetic trigger raised when a plan ticket's tasker
-	// pass produced a plan artifact and the arbiter must decide whether that artifact
-	// is good enough to wake the replanner or needs another tasker iteration.
-	VerdictPlanWritten AgentVerdict = "PLAN_WRITTEN"
-
 	// Arbiter verdicts.
 	VerdictContinue AgentVerdict = "CONTINUE"
 	VerdictEscalate AgentVerdict = "ESCALATE"

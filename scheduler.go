@@ -169,6 +169,25 @@ func (o *Orchestrator) nonTerminalCount() int {
 	return n
 }
 
+// hasOpenDependent reports whether any non-terminal ticket depends on n — used to
+// tell whether a freshly-completed plan ticket already has implementation work
+// queued against it (deps model) or needs the replanner to operationalize it.
+func (o *Orchestrator) hasOpenDependent(n int) bool {
+	for _, t := range o.Tickets {
+		if t.Phase.Terminal() {
+			continue
+		}
+
+		for _, d := range t.Deps {
+			if d == n {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // depsSatisfied reports whether every dependency of t has reached a terminal phase
 // (its work landed, or it was dropped — the replanner cleans dropped-prereq cases).
 func (o *Orchestrator) depsSatisfied(t Ticket) bool {
@@ -443,8 +462,20 @@ func (o *Orchestrator) onTasker(res AgentResult) {
 	uiTicket("📝", RoleTasker, n, "PLAN_WRITTEN", "")
 
 	if t.Type == TicketTypePlan {
-		o.arb[n] = arbCtx{trigger: VerdictPlanWritten, detail: "tasker produced plan", workspace: res.Workspace}
-		o.setPhase(n, PhaseArbitrate, "tasker PLAN_WRITTEN")
+		// A plan ticket is research: it terminates as PLANNED, and its plan.md is read
+		// by dependents via DEPENDENCY_PLANS. No arbiter relay, no discard. If nothing
+		// depends on it yet (the replanner couldn't break the work down until the plan
+		// existed), nudge the replanner to operationalize it into implementation tickets.
+		o.setPhase(n, PhasePlanned, "research plan complete")
+		uiTicket("📐", RoleTasker, n, "PLANNED", "")
+
+		if !o.hasOpenDependent(n) {
+			o.nudges = append(o.nudges, ReplanReason{
+				Source: RoleTasker,
+				Ticket: n,
+				Reason: fmt.Sprintf("T-%d produced its research plan (plan.md; full text in its tasker run under RUNS_DIR). Operationalize it: create the implementation ticket(s) it calls for and depend them on T-%d. T-%d is already complete (PLANNED) — do not cancel it.", n, n, n),
+			})
+		}
 
 		return
 	}
@@ -579,11 +610,11 @@ func (o *Orchestrator) onArbiter(res AgentResult) {
 		o.recordEvent(n, "ARBITER_CONTINUE", detail)
 		uiTicket("➡️", RoleArbiter, n, "CONTINUE", detail)
 
-		// Tasker plan/no-plan tickets loop back to planning; everything else routes
-		// into implementation. The MERGE_FAIL rebase
-		// context stays in o.arb so the next digger Job rebases; other triggers drop it
-		// (the digger reads the reviewer/CANT_DO feedback from log.md).
-		if c.trigger == VerdictNoPlan || c.trigger == VerdictPlanWritten {
+		// A tasker no-plan ticket loops back to planning; everything else routes into
+		// implementation. The MERGE_FAIL rebase context stays in o.arb so the next
+		// digger Job rebases; other triggers drop it (the digger reads the
+		// reviewer/CANT_DO feedback from log.md).
+		if c.trigger == VerdictNoPlan {
 			delete(o.arb, n)
 			o.setPhase(n, PhasePlan, "arbiter continue (re-plan)")
 

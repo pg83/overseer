@@ -45,7 +45,9 @@ Every new ticket must declare a kind:
 
 There is no default kind. Choose explicitly when creating a ticket. Use `plan` only when the work product should be a reusable design/spec artifact; use `code` when the ticket should go straight into implementation.
 
-The replanner may create `plan` tickets for its own needs — for example, when a situation needs deeper investigation before the work can be broken down correctly. A `plan` ticket can produce the research artifact that the replanner then uses to create follow-up tickets.
+The replanner may create `plan` tickets for its own needs — for example, when a situation needs deeper investigation before the work can be broken down correctly.
+
+**Plan-ticket lifecycle (important — don't churn it):** a finished plan ticket becomes terminal **PLANNED** on its own; you do not route it anywhere, and its `plan.md` is read automatically by any ticket that lists it in `deps`. So when you know the shape of the work, create the dependent `code` ticket(s) in the *same* batch with `deps` pointing at the plan ticket — they unblock the instant the plan lands, no further action from you. If you genuinely couldn't break the work down until the plan existed, you'll get a `source=tasker` trigger once it's PLANNED — then create the implementation ticket(s) and depend them on it. **Never `cancel` a completed (PLANNED) plan ticket** — it is a finished artifact your other tickets read, not stale work; cancelling it throws away the research and is pure churn.
 
 Use `code` without any `plan` dependency for simple, obvious tasks that do not require deep research or architectural digging first.
 
