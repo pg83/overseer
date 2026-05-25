@@ -20,6 +20,8 @@ Every non-blank line of stdout is one JSON object with a non-empty `type` field.
 
 Wrap thinking, status updates, "let me check X" as `message` events. Each event fits on a single line — escape newlines as `\n`, double quotes as `\"`.
 
+**Your run's outcome is a `verdict` event — a JSON line, not prose.** Don't end by narrating what you did; put that summary in the verdict's `detail`. The verdict is the last line you emit.
+
 Common events available to every role:
 
     {"type": "message", "text": "<one-line note for the team chat>"}
