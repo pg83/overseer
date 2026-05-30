@@ -55,9 +55,18 @@ func (simSpec) Set(v string) error {
 
 // simulatedRun fabricates one agent result: a random think-time, always at least one
 // message (for tracking), then role-appropriate events the coordinator consumes
-// exactly as if a real harness had produced them.
+// exactly as if a real harness had produced them. The replanner thinks markedly longer
+// than the worker roles — true in reality (a big planning model, minutes), and it widens
+// the window in which a ticket it planned against advances under it, so the optimistic
+// staleness guard actually gets exercised.
 func (o *Orchestrator) simulatedRun(role AgentRole, ticket int, wsID, stdin string) AgentResult {
-	time.Sleep(time.Duration(rand.Int63n(int64(2 * time.Second))))
+	think := time.Duration(rand.Int63n(int64(2 * time.Second)))
+
+	if role == RoleReplanner {
+		think += 2 * time.Second
+	}
+
+	time.Sleep(think)
 
 	res := AgentResult{Role: role, Ticket: ticket, Workspace: wsID, Stdin: stdin, Usage: simUsage(), Events: simEvents(role, ticket, stdin)}
 
@@ -144,9 +153,12 @@ func simVerdict(pairs ...any) map[string]any {
 // simReplanOps tops the open-ticket count back up toward a target, so a sim run keeps
 // a steady, bounded backlog churning through the pipeline. A fresh code ticket
 // occasionally depends on a plan ticket created in the same batch, to exercise the
-// plan -> PLANNED -> dependent-unblocks path. With --sim=N it stops creating once the
-// project hits N tickets; when the backlog then drains in end_project it declares
-// GOALS_ACHIEVED, exercising the run's stop path.
+// plan -> PLANNED -> dependent-unblocks path. It also occasionally mutates an existing
+// open ticket (cancel / update / replace) so those state-machine branches — and the
+// optimistic-concurrency staleness guard, which fires when the chosen ticket advanced
+// during the pass's think-time — get exercised, not just `new`. With --sim=N it stops
+// creating once the project hits N tickets; when the backlog then drains in end_project
+// it declares GOALS_ACHIEVED, exercising the run's stop path.
 func simReplanOps(stdin string) []map[string]any {
 	const target = 12
 
@@ -167,7 +179,7 @@ func simReplanOps(stdin string) []map[string]any {
 	if need <= 0 {
 		// Backlog drained with the ticket cap exhausted → the simulated project is
 		// done; declare it so the stop path (GOALS_ACHIEVED → StopCancel) runs.
-		if simMaxTickets > 0 && simStrAfter(stdin, "SUBAGENT:") == "end_project" {
+		if simMaxTickets > 0 && simSubagent(stdin) == "end_project" {
 			return []map[string]any{{"type": "verdict", "verdict": "GOALS_ACHIEVED", "detail": fmt.Sprintf("[sim] %d-ticket cap reached, backlog drained", simMaxTickets)}}
 		}
 
@@ -175,6 +187,24 @@ func simReplanOps(stdin string) []map[string]any {
 	}
 
 	var ops []map[string]any
+
+	// Occasionally mutate an existing open ticket. The target comes from this pass's
+	// snapshot; by apply time the inner loop may have advanced it, so this is what drives
+	// the staleness-guard path (gen mismatch → whole batch deferred) in addition to the
+	// cancel / update / replace op handlers themselves.
+	if open := simOpenTickets(stdin); len(open) >= 4 && rand.Float64() < 0.35 {
+		v := open[rand.Intn(len(open))]
+
+		switch r := rand.Float64(); {
+		case r < 0.5:
+			ops = append(ops, map[string]any{"type": "task", "op": "cancel", "n": v, "reason": "[sim] cancel for coverage"})
+		case r < 0.8:
+			ops = append(ops, map[string]any{"type": "task", "op": "update", "n": v, "deps": []int{}})
+		default:
+			ops = append(ops, map[string]any{"type": "task", "op": "replace", "from": v, "to": open[rand.Intn(len(open))]})
+		}
+	}
+
 	lastPlan := 0
 
 	for i := 0; i < need; i++ {
@@ -214,22 +244,23 @@ func parseMaxTicketN(stdin string) int {
 	return simIntAfter(stdin, "MAX_TICKET_N:")
 }
 
-// simStrAfter returns the whitespace-delimited token following key (e.g. the SUBAGENT
-// value the coordinator wrote into the replanner input), "" if key is absent.
-func simStrAfter(s, key string) string {
-	i := strings.Index(s, key)
+// simSubagent extracts the replanner's subagent context from the rendered prompt — the
+// backticked value in replanner.txt's `SUBAGENT = `<ctx>`` heading. "" if absent.
+func simSubagent(stdin string) string {
+	const key = "SUBAGENT = `"
+	i := strings.Index(stdin, key)
 
 	if i < 0 {
 		return ""
 	}
 
-	rest := strings.TrimSpace(s[i+len(key):])
+	rest := stdin[i+len(key):]
 
-	if j := strings.IndexAny(rest, " \t\r\n"); j >= 0 {
-		rest = rest[:j]
+	if j := strings.IndexByte(rest, '`'); j >= 0 {
+		return rest[:j]
 	}
 
-	return rest
+	return ""
 }
 
 func simIntAfter(s, key string) int {
@@ -261,4 +292,31 @@ func simOpenCount(stdin string) int {
 	}
 
 	return strings.Count(seg, "\"descr\"")
+}
+
+// simOpenTickets pulls the open-ticket numbers out of the snapshot's OPEN_TICKETS
+// section (each ticket's pretty JSON carries one `"n": N` line), so the sim replanner
+// can target a real existing ticket for a cancel / update / replace op.
+func simOpenTickets(stdin string) []int {
+	a := strings.Index(stdin, "OPEN_TICKETS")
+
+	if a < 0 {
+		return nil
+	}
+
+	seg := stdin[a:]
+
+	if b := strings.Index(seg, "CLOSED_DEPS"); b >= 0 {
+		seg = seg[:b]
+	}
+
+	var out []int
+
+	for _, line := range strings.Split(seg, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "\"n\":") {
+			out = append(out, simIntAfter(line, "\"n\":"))
+		}
+	}
+
+	return out
 }
