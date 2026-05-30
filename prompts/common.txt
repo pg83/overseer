@@ -43,17 +43,10 @@ ROLE: {{.ROLE}}
 MODEL: {{.MODEL}}
 HARNESS: {{.HARNESS}}
 MESSAGES_LOG: {{.MESSAGES_LOG}}
-{{if .TICKET}}TICKET: {{.TICKET}}
-DESCR: {{.DESCR}}
-DEPS: {{.DEPS}}
-WORKSPACE: {{.WORKSPACE}}
-TRUNK_PATH: {{.TRUNK_PATH}}
-TRUNK_HASH: {{.TRUNK_HASH}}
+{{if .TICKET}}You are working ticket T-{{.TICKET}} — {{.DESCR}} (deps: {{.DEPS}}).
+{{.WORKSPACE}} — the absolute path to this ticket's git workspace; your branch is checked out there. Use it for every git / source / file op (see "CWD vs WORKSPACE" above).
+{{.TRUNK_PATH}} — the trunk checkout whose master is the integration target, currently at HEAD {{.TRUNK_HASH}}.
 {{if .PREV_WORKSPACE}}{{.PREV_WORKSPACE}} — the filesystem path to your previous attempt on this ticket (the same path as WORKSPACE), with your prior branch and files intact. This run is a continuation: pick up from the state already on disk, do not re-clone or restart from scratch.
-{{end -}}
-{{if .TRIGGER_ROLE}}TRIGGER_ROLE: {{.TRIGGER_ROLE}}
-TRIGGER_VERDICT: {{.TRIGGER_VERDICT}}
-TRIGGER_DETAIL: {{.TRIGGER_DETAIL}}
 {{end -}}
 {{if .DIGGER_BRANCH}}DIGGER_BRANCH: {{.DIGGER_BRANCH}}
 DIGGER_WORKTREE: {{.DIGGER_WORKTREE}}
