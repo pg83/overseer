@@ -375,7 +375,7 @@ func (o *Orchestrator) dispatchReplanner() {
 	o.replannerBusy = true
 
 	uiSys("📤", "REPLANNER", fmt.Sprintf("%s — %d reason(s), %d escalated, %d plan(s)", subagent, len(reasons), len(escalate), len(o.replanPlans)))
-	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Params: map[string]string{"Subagent": subagent, "Plans": o.closedPlansText()}, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
+	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Params: map[string]string{"Subagent": subagent, "ReplannerPlans": o.closedPlansText()}, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
 }
 
 // buildJob assembles the Job for a ticket's phase: which workspace the worker uses

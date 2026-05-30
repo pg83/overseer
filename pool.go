@@ -196,7 +196,7 @@ func (o *Orchestrator) jobReplanner(job Job) AgentResult {
 
 	p := o.selfParams(RoleReplanner)
 	p["Subagent"] = job.Params["Subagent"]
-	p["Plans"] = job.Params["Plans"]
+	p["ReplannerPlans"] = job.Params["ReplannerPlans"]
 	p["REPLAN_TRIGGERS"] = formatReplanTriggers(job.Reasons)
 	p["REPLAN_CHAT"] = strings.Join(job.ChatLog, "\n")
 	p["RUNS_DIR"] = runsDir(o.Root)

@@ -40,12 +40,12 @@ Then act decisively this pass:
 {{else}}
 **Routine replan.** Work the accumulated triggers below as one batch; if all are stale, emit nothing.
 {{end}}
-{{if .Plans}}
+{{if .ReplannerPlans}}
 ## Completed plan artifacts (prior research — read and build on these, don't re-derive)
 
 These are the `plan.md` outputs of every finished `plan` ticket. When you operationalize a plan into code tickets, or scope new work, use what's already been investigated here.
 
-{{.Plans}}
+{{.ReplannerPlans}}
 {{end}}
 
 ## How to spot a stuck ticket
