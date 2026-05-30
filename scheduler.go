@@ -319,63 +319,146 @@ func (o *Orchestrator) publishTasks() {
 	uiOut.tasks(snap)
 }
 
-// dispatchReplanner hands the (serial) replanner pool one batched Job covering every
-// STOPPED ESCALATE ticket plus all pending global nudges. Only the coordinator writes
-// the replanner queue; replannerBusy keeps one in flight at a time. The Job carries a
-// subagent context (start_project / end_project / algedonic / replan) that selects the
-// replanner's prompt — the most urgent pending one wins (see wantReplan). A special
-// context dispatches a pass even with no nudges or escalations (e.g. end_project must
-// run to check the goals when the queue has drained).
+// dispatchReplanner hands the (serial) replanner pool ONE Job for ONE subagent context.
+// The pending work — escalated tickets + global nudges — is partitioned by context
+// (algedonic / start_project / end_project / escalate / replan), and a single pass takes
+// only the most urgent non-empty context's items; the rest wait for the next dispatch
+// (replannerBusy keeps one in flight, so the contexts run as separate serial passes).
+// This is deliberate: a heterogeneous batch must never be forced under one ill-fitting
+// context — each pass sees a coherent set of work matching its prompt. A whole-project
+// context (start/end via o.replanCtx) dispatches even with no nudges or escalations.
 func (o *Orchestrator) dispatchReplanner() {
 	if o.replannerBusy {
 		return
 	}
 
-	var escalate []int
+	// Escalated tickets waiting for the replanner, grouped by what escalated them: the
+	// digger's algedonic cord vs a routine escalate (arbiter / repeated rework). Derived
+	// from each ticket's event history at dispatch — nothing stored, nothing to clean up.
+	escByCtx := map[string][]int{}
+	algedonic := map[int]bool{}
 
 	for _, t := range o.Tickets {
 		if t.Phase == PhaseEscalate && o.shadow[t.N] == ShadowStopped {
-			escalate = append(escalate, t.N)
+			c := o.escalContext(t.N)
+			escByCtx[c] = append(escByCtx[c], t.N)
+
+			if c == "algedonic" {
+				algedonic[t.N] = true
+			}
 		}
 	}
 
-	if o.replanCtx == "" && len(escalate) == 0 && len(o.nudges) == 0 {
+	// Nudges grouped by context: a nudge tied to an algedonic ticket joins its algedonic
+	// pass; everything else is routine replan.
+	nudgeByCtx := map[string][]ReplanReason{}
+
+	for _, r := range o.nudges {
+		nudgeByCtx[nudgeReplanCtx(r, algedonic)] = append(nudgeByCtx[nudgeReplanCtx(r, algedonic)], r)
+	}
+
+	ctx := o.pickReplanCtx(escByCtx, nudgeByCtx)
+
+	if ctx == "" {
 		return
 	}
 
-	subagent := o.replanCtx
+	reasons := append([]ReplanReason{}, nudgeByCtx[ctx]...)
+	mentioned := map[int]bool{}
 
-	if subagent == "" {
-		if len(escalate) > 0 {
-			subagent = "escalate"
-		} else {
-			subagent = "replan"
+	for _, r := range reasons {
+		if r.Ticket != 0 {
+			mentioned[r.Ticket] = true
 		}
 	}
 
-	reasons := append([]ReplanReason{}, o.nudges...)
-	chatLog := append([]string{}, o.replanChat...)
+	owned := escByCtx[ctx]
 
-	for _, n := range escalate {
-		t, _ := o.findTicket(n)
-		reasons = append(reasons, ReplanReason{
-			Source:    RoleArbiter,
-			Ticket:    n,
-			Workspace: o.ticketWorkspaceHint(n),
-			Reason:    "escalated ticket — re-scope it or cancel it: " + t.Descr,
-		})
+	for _, n := range owned {
+		if !mentioned[n] {
+			t, _ := o.findTicket(n)
+			reasons = append(reasons, ReplanReason{
+				Source:    RoleArbiter,
+				Ticket:    n,
+				Workspace: o.ticketWorkspaceHint(n),
+				Reason:    "escalated ticket — re-scope it or cancel it: " + t.Descr,
+			})
+		}
+
 		o.shadow[n] = ShadowScheduled
 	}
 
-	o.nudges = nil
+	// Keep nudges of other contexts for the next pass.
+	var rest []ReplanReason
+
+	for _, r := range o.nudges {
+		if nudgeReplanCtx(r, algedonic) != ctx {
+			rest = append(rest, r)
+		}
+	}
+
+	o.nudges = rest
+
+	chatLog := append([]string{}, o.replanChat...)
 	o.replanChat = nil
-	o.replanCtx = ""
-	o.replanOwned = escalate
+
+	if o.replanCtx == ctx {
+		o.replanCtx = ""
+	}
+
+	o.replanOwned = owned
 	o.replanPlans = o.plannedPlanTickets()
 	o.replannerBusy = true
 
-	uiSys("📤", "REPLANNER", fmt.Sprintf("%s — %d reason(s), %d escalated, %d plan(s)", subagent, len(reasons), len(escalate), len(o.replanPlans)))
-	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Params: map[string]string{"Subagent": subagent, "ReplannerPlans": o.closedPlansText()}, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
+	uiSys("📤", "REPLANNER", fmt.Sprintf("%s — %d reason(s), %d escalated, %d plan(s)", ctx, len(reasons), len(owned), len(o.replanPlans)))
+	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Params: map[string]string{"Subagent": ctx, "ReplannerPlans": o.closedPlansText()}, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
+}
+
+// escalContext derives which replanner context an escalated ticket belongs to, from its
+// event history: the digger's algedonic cord (ALGEDONIC) vs a routine escalate (arbiter
+// ARBITER_ESCALATE, or repeated rework). The most recent of the two wins.
+func (o *Orchestrator) escalContext(n int) string {
+	t, ok := o.findTicket(n)
+
+	if !ok {
+		return "escalate"
+	}
+
+	ctx := "escalate"
+
+	for _, e := range t.Events {
+		switch e.Kind {
+		case "ALGEDONIC":
+			ctx = "algedonic"
+		case "ARBITER_ESCALATE":
+			ctx = "escalate"
+		}
+	}
+
+	return ctx
+}
+
+// nudgeReplanCtx classifies a nudge: one tied to an algedonic-escalated ticket joins that
+// algedonic pass, otherwise it's routine replan.
+func nudgeReplanCtx(r ReplanReason, algedonic map[int]bool) string {
+	if r.Ticket != 0 && algedonic[r.Ticket] {
+		return "algedonic"
+	}
+
+	return "replan"
+}
+
+// pickReplanCtx returns the most urgent subagent context that has pending work, or "".
+// start_project / end_project are whole-project signals carried by o.replanCtx; the rest
+// come from the escalated-ticket and nudge groupings.
+func (o *Orchestrator) pickReplanCtx(escByCtx map[string][]int, nudgeByCtx map[string][]ReplanReason) string {
+	for _, c := range []string{"algedonic", "start_project", "end_project", "escalate", "replan"} {
+		if len(escByCtx[c]) > 0 || len(nudgeByCtx[c]) > 0 || o.replanCtx == c {
+			return c
+		}
+	}
+
+	return ""
 }
 
 // buildJob assembles the Job for a ticket's phase: which workspace the worker uses
@@ -637,15 +720,13 @@ func (o *Orchestrator) onDigger(res AgentResult) {
 		o.setPhase(n, PhaseArbitrate, detail)
 		uiTicket("🛑", RoleDigger, n, "CANT_DO", detail)
 	case VerdictAlgedonic:
-		// Emergency cord: escalate the ticket and wake the replanner in its algedonic
-		// context (bypassing review / merge / arbiter). The escalated ticket and the
-		// digger's cry are both in the next replanner batch, so one pass does the full
-		// analysis and the re-scope.
+		// Emergency cord: escalate the ticket (bypassing review / merge / arbiter). The
+		// ALGEDONIC event marks it; dispatchReplanner derives the algedonic context from
+		// that event and routes this ticket + its nudge into a dedicated algedonic pass.
 		o.recordEvent(n, "ALGEDONIC", detail)
 		o.setPhase(n, PhaseEscalate, detail)
 		uiTicket("🚨", RoleDigger, n, "ALGEDONIC", detail)
 		o.nudges = append(o.nudges, ReplanReason{Source: RoleDigger, Ticket: n, Workspace: res.Workspace, Reason: algedonicReason(n, detail)})
-		o.wantReplan("algedonic")
 	}
 }
 
