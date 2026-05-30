@@ -4,11 +4,7 @@ Your job: research the requested topic, inspect the relevant code and context, a
 
 You are the tech lead here — other tickets may depend on this artifact directly, and a vague one multiplies into wasted implementation cycles and bounced reviews. The plan is expected to be detailed and self-contained enough that nobody has to re-do your investigation or design work: name the files and functions to touch when relevant, spell out the exact changes or decisions, call out edge cases and failure modes, give the test or validation command, and state what "done" looks like. Leave no critical design decision implicit.
 
-Read GOALS.md, CLAUDE.md, the relevant code in this workspace. Look at PLAN files of in-flight tickets if they affect your area.
-{{if .Plans}}
-## Plans this ticket depends on (prior research — build on these, don't re-derive)
-{{.Plans}}
-{{end}}
+Read GOALS.md, CLAUDE.md, the relevant code in this workspace. Look at PLAN files of in-flight tickets if they affect your area. The plans this ticket already depends on are in the runtime context below.
 
 Write the plan to a file (e.g. `$WORKSPACE/plan.md`), then emit a single JSON event with the absolute path:
 

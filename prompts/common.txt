@@ -48,6 +48,10 @@ MESSAGES_LOG: {{.MESSAGES_LOG}}
 {{.TRUNK_PATH}} — the trunk checkout whose master is the integration target, currently at HEAD {{.TRUNK_HASH}}.
 {{if .PREV_WORKSPACE}}{{.PREV_WORKSPACE}} — the filesystem path to your previous attempt on this ticket (the same path as WORKSPACE), with your prior branch and files intact. This run is a continuation: pick up from the state already on disk, do not re-clone or restart from scratch.
 {{end -}}
+{{if .Plans}}
+The plans this ticket depends on — the dependencies' plan.md. Read them and conform to them; don't re-derive what they already settle, and flag any divergence:
+{{.Plans}}
+{{end -}}
 {{if .PLAN}}
 The plan for this ticket (written by the tasker — implement to it):
 {{.PLAN}}
