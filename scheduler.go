@@ -171,6 +171,27 @@ func (o *Orchestrator) ticketWorkspaceHint(n int) string {
 	return ""
 }
 
+// eventCount returns how many times a ticket has recorded a history event of the
+// given kind. Read straight from the replayed event log on the in-memory ticket, so
+// it reflects the persisted DB and survives a restart.
+func (o *Orchestrator) eventCount(n int, kind string) int {
+	t, ok := o.findTicket(n)
+
+	if !ok {
+		return 0
+	}
+
+	c := 0
+
+	for _, e := range t.Events {
+		if e.Kind == kind {
+			c++
+		}
+	}
+
+	return c
+}
+
 func (o *Orchestrator) nonTerminalCount() int {
 	n := 0
 
@@ -325,7 +346,11 @@ func (o *Orchestrator) dispatchReplanner() {
 	subagent := o.replanCtx
 
 	if subagent == "" {
-		subagent = "replan"
+		if len(escalate) > 0 {
+			subagent = "escalate"
+		} else {
+			subagent = "replan"
+		}
 	}
 
 	reasons := append([]ReplanReason{}, o.nudges...)
@@ -638,8 +663,20 @@ func (o *Orchestrator) onReviewer(res AgentResult) {
 		o.setPhase(n, PhaseMerge, detail)
 		uiTicket("👍", RoleReviewer, n, "APPROVE", detail)
 	case VerdictRework:
-		o.arb[n] = arbCtx{trigger: VerdictRework, detail: detail, workspace: res.Workspace}
 		o.recordEvent(n, "REVIEWER_REWORK", detail)
+
+		// First rework → the cheap arbiter decides whether another local pass is worth
+		// it. Second rework and beyond → the inner loop is demonstrably stuck; skip the
+		// arbiter and escalate straight to the replanner, which reads the full history
+		// and decides progress-vs-replan.
+		if o.eventCount(n, "REVIEWER_REWORK") >= 2 {
+			o.setPhase(n, PhaseEscalate, "repeated REWORK — escalate to replanner")
+			uiTicket("⤴️", RoleReviewer, n, "ESCALATE", detail)
+
+			return
+		}
+
+		o.arb[n] = arbCtx{trigger: VerdictRework, detail: detail, workspace: res.Workspace}
 		o.setPhase(n, PhaseArbitrate, detail)
 		uiTicket("🔁", RoleReviewer, n, "REWORK", detail)
 	case VerdictDiscard:
