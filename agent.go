@@ -37,7 +37,7 @@ func (o *Orchestrator) harnessModelForRole(role AgentRole) HarnessModel {
 	}
 
 	switch role {
-	case RoleTasker, RoleReplanner:
+	case RoleTasker, RoleLead:
 		if hm, ok := o.Bindings["think"]; ok {
 			return hm
 		}
@@ -321,7 +321,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 	uiTicket("🔧", role, ticket, "EXEC", fmt.Sprintf("%s prompt_len=%d", strings.Join(argsCopy, " "), len(stdin)))
 
 	// Single jsonl writer for the whole run; no other persistence path. All readers
-	// (priorRunsForTicket, replanner mining, operator) consume only this file.
+	// (priorRunsForTicket, lead mining, operator) consume only this file.
 	Throw(os.MkdirAll(runsDir(o.Root), 0755))
 	runID := fmt.Sprintf("T-%d-%s-%s-%s",
 		ticket, time.Now().UTC().Format("20060102-150405.000000000"), role, wsID)
@@ -527,7 +527,7 @@ func summarizeToolInput(toolName string, input map[string]any) string {
 //
 // The collected leftovers surface at the end as a single synthetic
 // `{"type":"unparsed","text":"<joined>"}` event so the UI, run logs, and
-// replanner mining still see what the agent emitted. Role-specific helpers
+// lead mining still see what the agent emitted. Role-specific helpers
 // ignore the synthetic type and respawn naturally when no verdict arrived.
 func parseEvents(stdout string) []map[string]any {
 	var out []map[string]any
@@ -706,7 +706,7 @@ func messageText(ev map[string]any) string {
 
 // loadPrompt builds the full stdin for a role: concatenate the embedded role prompt
 // and common.txt, then run ONE templating pass over the whole with params — common.txt
-// carries the per-run context block (TICKET / WORKSPACE / PLAN / … or the replanner's
+// carries the per-run context block (TICKET / WORKSPACE / PLAN / … or the lead's
 // SUBAGENT / triggers / snapshot), so there is no separate "input" anymore. Operator
 // overrides are appended afterwards, un-templated, so their prose can't trip the parser.
 func loadPrompt(repoRoot string, role AgentRole, params map[string]string) string {

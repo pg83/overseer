@@ -16,13 +16,13 @@ import (
 // startup and never mutated, so all goroutines read it lock-free.
 var simulate bool
 
-// simMaxTickets caps how many tickets the simulated replanner will ever create
+// simMaxTickets caps how many tickets the simulated lead will ever create
 // (0 = unbounded). A finite cap lets a sim run wind down — the backlog drains and
 // stays drained — so the stop path (end_project -> GOALS_ACHIEVED) gets exercised.
 var simMaxTickets int
 
-// simTicketN hands out fresh ticket numbers for the simulated replanner. Seeded once
-// (lazily) above any pre-existing N; only the serial replanner pool touches it.
+// simTicketN hands out fresh ticket numbers for the simulated lead. Seeded once
+// (lazily) above any pre-existing N; only the serial lead pool touches it.
 var simTicketN atomic.Int64
 
 // simSpec parses the --sim flag. Bare --sim (or --sim=0) enables an open-ended sim;
@@ -55,14 +55,14 @@ func (simSpec) Set(v string) error {
 
 // simulatedRun fabricates one agent result: a random think-time, always at least one
 // message (for tracking), then role-appropriate events the coordinator consumes
-// exactly as if a real harness had produced them. The replanner thinks markedly longer
+// exactly as if a real harness had produced them. The lead thinks markedly longer
 // than the worker roles — true in reality (a big planning model, minutes), and it widens
 // the window in which a ticket it planned against advances under it, so the optimistic
 // staleness guard actually gets exercised.
 func (o *Orchestrator) simulatedRun(role AgentRole, ticket int, wsID, stdin string) AgentResult {
 	think := time.Duration(rand.Int63n(int64(2 * time.Second)))
 
-	if role == RoleReplanner {
+	if role == RoleLead {
 		think += 2 * time.Second
 	}
 
@@ -106,7 +106,7 @@ func simEvents(role AgentRole, ticket int, stdin string) []map[string]any {
 		// Can't-plan: a replan event is what lets jobTasker stop waiting for a plan;
 		// onTasker then reads the absent plan as NO_PLAN and routes to the arbiter.
 		return []map[string]any{msg, {"type": "replan", "reason": fmt.Sprintf("[sim] cannot plan T-%d", ticket)}}
-	case RoleReplanner:
+	case RoleLead:
 		// Handles every subagent context (start/end/algedonic/replan) the same way:
 		// top the backlog up toward the target, which keeps a sim run churning
 		// open-endedly (end_project never declares GOALS_ACHIEVED in sim).
@@ -244,8 +244,8 @@ func parseMaxTicketN(stdin string) int {
 	return simIntAfter(stdin, "MAX_TICKET_N:")
 }
 
-// simSubagent extracts the replanner's subagent context from the rendered prompt — the
-// backticked value in replanner.txt's `SUBAGENT = `<ctx>`` heading. "" if absent.
+// simSubagent extracts the lead's subagent context from the rendered prompt — the
+// backticked value in lead.txt's `SUBAGENT = `<ctx>`` heading. "" if absent.
 func simSubagent(stdin string) string {
 	const key = "SUBAGENT = `"
 	i := strings.Index(stdin, key)
@@ -295,7 +295,7 @@ func simOpenCount(stdin string) int {
 }
 
 // simOpenTickets pulls the open-ticket numbers out of the snapshot's OPEN_TICKETS
-// section (each ticket's pretty JSON carries one `"n": N` line), so the sim replanner
+// section (each ticket's pretty JSON carries one `"n": N` line), so the sim lead
 // can target a real existing ticket for a cancel / update / replace op.
 func simOpenTickets(stdin string) []int {
 	a := strings.Index(stdin, "OPEN_TICKETS")

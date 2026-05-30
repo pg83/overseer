@@ -679,7 +679,7 @@ func roleStyle(r AgentRole) tcell.Style {
 		c = tcell.ColorFuchsia
 	case RoleMerger:
 		c = tcell.ColorTeal
-	case RoleReplanner:
+	case RoleLead:
 		c = tcell.ColorGreen
 	}
 

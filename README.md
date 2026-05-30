@@ -4,7 +4,7 @@ A small Go framework for describing multi-agent dialogs over heterogeneous CLI a
 
 The framework itself is one file (`harness.go`) declaring the `Harness` interface. Each backend implements it in one file (`claude.go`, `codex.go`, `opencode.go`, `gemini.go`). Each *orchestrator* — a recipe for how agents talk to each other — is another file that consumes `Harness` generically. Two orchestrators ship today, plus the sandbox primitive:
 
-- `overseer run` — full code-modification orchestrator. A single coordinator goroutine drives a git working tree toward `GOALS.md` using six roles (replanner / tasker / digger / reviewer / merger / arbiter), each served by a fixed-size pool of harness workers. `--ui=log` (default) streams the classic colored lines; `--ui=tui` runs an interactive tcell front-end (tabs: log / agents / tasks / stats; ←/→ switch, ↑/↓ move, enter opens a detail log, q quits). Inspection sub-commands operate on a finished/running root: `overseer run cost [--ticket N] <root>` (dollar cost from the run logs) and `overseer run tickets --path <tasks.events.jsonl>` (open-ticket dump).
+- `overseer run` — full code-modification orchestrator. A single coordinator goroutine drives a git working tree toward `GOALS.md` using six roles (lead / tasker / digger / reviewer / merger / arbiter), each served by a fixed-size pool of harness workers. `--ui=log` (default) streams the classic colored lines; `--ui=tui` runs an interactive tcell front-end (tabs: log / agents / tasks / stats; ←/→ switch, ↑/↓ move, enter opens a detail log, q quits). Inspection sub-commands operate on a finished/running root: `overseer run cost [--ticket N] <root>` (dollar cost from the run logs) and `overseer run tickets --path <tasks.events.jsonl>` (open-ticket dump).
 - `overseer plan` — synchronous two-agent debate. PUPA (solver) and LUPA (critic) iterate over a free-form question on stdin until LUPA accepts. Output: prose plan / forecast / analysis / code — whatever the question called for.
 - `overseer jail` — the sandbox itself. Used implicitly by `run` and `plan`; also callable standalone like `overseer jail --rw=/tmp -- <cmd>`.
 
@@ -18,7 +18,7 @@ go build ./...
 
 Self-contained binary. Prompts in `prompts/*.txt` are baked in via `embed.FS`; no runtime files outside the working directory.
 
-Per-role prompt overrides: drop a `<ROLE>.md` file in the repo root (the trunk for `run`, the cwd for `plan`) and its contents are appended to that role's baked-in prompt — `MERGER.md` extends the merger, `COMMON.md` extends the tail shared by every role, `PUPA.md` / `LUPA.md` extend the plan-mode debaters, and so on for `DIGGER` / `REVIEWER` / `TASKER` / `REPLANNER` / `ARBITER`. The same per-role extensions can also be collected into a single `PROMPTS.md`, one `### ROLE` section per role (header matched case-insensitively, body runs to the next `### ` header). When both exist the `<ROLE>.md` file is appended first, then the `PROMPTS.md` section. Missing files and sections are simply ignored.
+Per-role prompt overrides: drop a `<ROLE>.md` file in the repo root (the trunk for `run`, the cwd for `plan`) and its contents are appended to that role's baked-in prompt — `MERGER.md` extends the merger, `COMMON.md` extends the tail shared by every role, `PUPA.md` / `LUPA.md` extend the plan-mode debaters, and so on for `DIGGER` / `REVIEWER` / `TASKER` / `LEAD` / `ARBITER`. The same per-role extensions can also be collected into a single `PROMPTS.md`, one `### ROLE` section per role (header matched case-insensitively, body runs to the next `### ` header). When both exist the `<ROLE>.md` file is appended first, then the `PROMPTS.md` section. Missing files and sections are simply ignored.
 
 ## Core concepts
 
@@ -77,12 +77,12 @@ The mental model is a stripped-down engineering team:
 
 | Agent role | Human analogue | What it does |
 |------------|----------------|--------------|
-| **replanner** | planning lead + product owner | The single planning and steering authority (there is no separate overseer). Owns the ticket database and judges the project against `GOALS.md`. Reads goals + ticket history + recent agent runs, emits `task` operations (`new` / `update` / `replace` / `cancel`), or `GOALS_ACHIEVED` when the goals are met (→ run terminates, writes `REPORT.md`). Each pass runs in a **subagent context** that selects its prompt: `start_project` (empty DB → seed), `end_project` (queue drained → judge goals), `algedonic` (digger emergency → full re-scope), `replan` (routine). Invoked on every `replan` nudge from any role. |
+| **lead** | planning lead + product owner | The single planning and steering authority (there is no separate overseer). Owns the ticket database and judges the project against `GOALS.md`. Reads goals + ticket history + recent agent runs, emits `task` operations (`new` / `update` / `replace` / `cancel`), or `GOALS_ACHIEVED` when the goals are met (→ run terminates, writes `REPORT.md`). Each pass runs in a **subagent context** that selects its prompt: `start_project` (empty DB → seed), `end_project` (queue drained → judge goals), `algedonic` (digger emergency → full re-scope), `replan` (routine). Invoked on every `replan` nudge from any role. |
 | **tasker** | senior engineer writing specs | Gets a `plan` ticket (phase `PLAN`), researches the codebase, writes `plan.md`. The ticket then terminates as `PLANNED`; dependent `code` tickets read that plan.md via their `deps`. |
-| **digger** | implementer | Reads `plan.md`, makes the changes in a per-ticket workspace, squashes + rebases onto trunk. Reports `READY` (work done), `CANT_DO` (this ticket can't, here's why → arbiter), or `ALGEDONIC` — the emergency cord (VSM algedonic signal) for *systemic* trouble: it bypasses review/merge/arbiter, escalates the ticket, and wakes the replanner in its `algedonic` context for a full root-cause re-think. |
+| **digger** | implementer | Reads `plan.md`, makes the changes in a per-ticket workspace, squashes + rebases onto trunk. Reports `READY` (work done), `CANT_DO` (this ticket can't, here's why → arbiter), or `ALGEDONIC` — the emergency cord (VSM algedonic signal) for *systemic* trouble: it bypasses review/merge/arbiter, escalates the ticket, and wakes the lead in its `algedonic` context for a full root-cause re-think. |
 | **reviewer** | code reviewer | Independently audits the digger's branch. Reports `APPROVE`, `REWORK` (needs revision), or `DISCARD` (kill the ticket). |
 | **merger** | release engineer | Serial (pool size 1). Runs tests on trunk (baseline), `git merge --no-ff` the digger's branch into a scratch worktree, re-runs tests. Reports `MERGED` or `MERGE_FAIL`; on `MERGED` the **coordinator** ff-merges that scratch branch into real trunk (the one place trunk is written). |
-| **arbiter** | tech lead breaking ties | Invoked on every disagreement (`REWORK` / `DISCARD` / `MERGE_FAIL` / `NO_PLAN`). Decides `CONTINUE` (keep iterating with the same role) or `ESCALATE` (kick to the replanner). |
+| **arbiter** | tech lead breaking ties | Invoked on every disagreement (`REWORK` / `DISCARD` / `MERGE_FAIL` / `NO_PLAN`). Decides `CONTINUE` (keep iterating with the same role) or `ESCALATE` (kick to the lead). |
 
 ### Architecture: one coordinator, role pools
 
@@ -90,7 +90,7 @@ A single **coordinator** goroutine (`scheduler.go`) owns *all* ticket state — 
 
 Two state axes:
 
-- **`Phase`** (persisted) — what work a ticket needs next: `PLAN` → tasker, `IMPLEMENT` → digger, `REVIEW` → reviewer, `MERGE` → merger, `ARBITRATE` → arbiter, `ESCALATE` → replanner (also where an algedonic-screaming ticket lands, waking the replanner in its `algedonic` context), plus terminal `PLANNED` (a plan ticket finished its plan.md) → `CONSUMED` (the replanner has read it), `MERGED`, `DISCARDED`. Written to the event log as `phase` events; a restart replays them and resumes mid-pipeline.
+- **`Phase`** (persisted) — what work a ticket needs next: `PLAN` → tasker, `IMPLEMENT` → digger, `REVIEW` → reviewer, `MERGE` → merger, `ARBITRATE` → arbiter, `ESCALATE` → lead (also where an algedonic-screaming ticket lands, waking the lead in its `algedonic` context), plus terminal `PLANNED` (a plan ticket finished its plan.md) → `CONSUMED` (the lead has read it), `MERGED`, `DISCARDED`. Written to the event log as `phase` events; a restart replays them and resumes mid-pipeline.
 - **`shadow`** (in-memory, coordinator-only) — `STOPPED` (dispatchable) or `SCHEDULED` (handed to a pool). Dispatch routes every `STOPPED` non-terminal ticket to `roleForPhase(phase)` and flips it to `SCHEDULED`; the returning result flips it back to `STOPPED`. That two-line rule *is* the scheduler.
 
 ### Pipeline: from a goal to a merged commit
@@ -101,7 +101,7 @@ The loop is **continuous and parallel**, not sequential. Multiple tickets are in
                                             GOALS.md  (operator's input)
                                                 │
                                                 ▼
-                                  ┌─────────  replanner  ──────────┐
+                                  ┌─────────  lead  ──────────┐
                                   │  plans + steers (no overseer):  │
                                   │  start_project / replan /       │
                                   │  algedonic → rewrite ticket DB  │
@@ -157,26 +157,26 @@ The loop is **continuous and parallel**, not sequential. Multiple tickets are in
                                    ff-merges into trunk)  arbiter ──▶ CONTINUE digger
                                        │                          (with rebase target +
                                        │                           merge-fail output)
-                                       │                     or ESCALATE replanner
+                                       │                     or ESCALATE lead
                                        ▼
-                          replanner re-evaluates (end_project)
+                          lead re-evaluates (end_project)
                           ("open queue drained — are we done?")
 ```
 
 Step by step, on one ticket:
 
-1. **Boot.** The coordinator loads `tasks.events.jsonl` (the ticket DB), marks every non-terminal ticket `STOPPED`, and kicks one replanner pass: `start_project` on an empty DB, `end_project` if every ticket is terminal, else a routine `replan` over the open plan.
-2. **Replanner plans / steers.** Reads `GOALS.md`, ticket DB, recent agent runs in its subagent context. It emits `task` ops (the coordinator validates + applies them) — or, in `end_project` when the goals are demonstrably met, `GOALS_ACHIEVED`, and the run writes `REPORT.md` and shuts down.
-3. **Replanner reshapes the DB.** The coordinator hands the (serial) replanner one batched job covering all `ESCALATE` tickets + pending nudges. It emits `task` events; the coordinator validates them (no non-terminal→DISCARDED deps, no cycles), appends to `tasks.events.jsonl`, updates in-memory tickets. New tickets start in phase `PLAN`.
+1. **Boot.** The coordinator loads `tasks.events.jsonl` (the ticket DB), marks every non-terminal ticket `STOPPED`, and kicks one lead pass: `start_project` on an empty DB, `end_project` if every ticket is terminal, else a routine `replan` over the open plan.
+2. **Lead plans / steers.** Reads `GOALS.md`, ticket DB, recent agent runs in its subagent context. It emits `task` ops (the coordinator validates + applies them) — or, in `end_project` when the goals are demonstrably met, `GOALS_ACHIEVED`, and the run writes `REPORT.md` and shuts down.
+3. **Lead reshapes the DB.** The coordinator hands the (serial) lead one batched job covering all `ESCALATE` tickets + pending nudges. It emits `task` events; the coordinator validates them (no non-terminal→DISCARDED deps, no cycles), appends to `tasks.events.jsonl`, updates in-memory tickets. New tickets start in phase `PLAN`.
 4. **Dispatch picks the ticket up.** Every `STOPPED` non-terminal ticket whose deps are all terminal is routed to `roleForPhase(phase)`, sorted by ticket number `n ASC`, and flipped to `SCHEDULED`. A fresh ticket is phase `PLAN` → tasker.
-5. **Tasker writes the spec.** A tasker worker researches the codebase in a fresh workspace, writes `tickets/T-<N>/plan.md`, emits `{"type":"plan","path":"..."}`. The coordinator marks the plan ticket terminal `PLANNED`; dependent `code` tickets unblock and read its `plan.md` (injected into the digger/reviewer prompt as `{{.Plans}}`). If nothing depends on it yet, the replanner is nudged to turn the plan into implementation tickets — it's shown all `PLANNED` plans, and each flips to `CONSUMED` once read so it isn't re-fed.
+5. **Tasker writes the spec.** A tasker worker researches the codebase in a fresh workspace, writes `tickets/T-<N>/plan.md`, emits `{"type":"plan","path":"..."}`. The coordinator marks the plan ticket terminal `PLANNED`; dependent `code` tickets unblock and read its `plan.md` (injected into the digger/reviewer prompt as `{{.Plans}}`). If nothing depends on it yet, the lead is nudged to turn the plan into implementation tickets — it's shown all `PLANNED` plans, and each flips to `CONSUMED` once read so it isn't re-fed.
 6. **Digger implements.** A digger worker works in `workspaces/<ws-id>/` (a clone of trunk on branch `ovs/<ws-id>`, recorded as the ticket's branch workspace). On `READY` (clean rebase-able branch ahead of trunk) → phase `REVIEW`. On `CANT_DO` → phase `ARBITRATE`.
 7. **Reviewer audits.** A reviewer worker independently audits the same branch workspace. `APPROVE` → phase `MERGE`. `REWORK` / `DISCARD` → phase `ARBITRATE`.
 8. **Merger lands the change.** A single merger worker (pool size 1) runs the project's tests on trunk as a baseline; if baseline is red it declines (no landing into a broken trunk). Then `git merge --no-ff` into a scratch worktree, re-runs tests. On green → `MERGED`, and **the coordinator** ff-merges the scratch branch into real trunk (the only writer of trunk); ticket → terminal `MERGED`. On red / conflict, or a failed ff-merge → phase `ARBITRATE` with `RebaseTarget` (new trunk HEAD) + `MergeOut` so the next digger pass can rebase.
-9. **Arbiter resolves disagreements.** Runs for every `ARBITRATE` ticket — trigger was REWORK, DISCARD, MERGE_FAIL, CANT_DO, or NO_PLAN. `CONTINUE` → back to `IMPLEMENT` (or `PLAN` for NO_PLAN); `ESCALATE` → phase `ESCALATE`, which the coordinator feeds to the replanner. After a replanner pass, an escalated ticket returns to `PLAN`.
-10. **Replanner re-evaluates** (`end_project`) on boot and whenever the open (non-terminal) count drops to zero, asking "are the goals met now?". When yes → `GOALS_ACHIEVED` terminates the run; otherwise it seeds the work that closes the remaining gap.
+9. **Arbiter resolves disagreements.** Runs for every `ARBITRATE` ticket — trigger was REWORK, DISCARD, MERGE_FAIL, CANT_DO, or NO_PLAN. `CONTINUE` → back to `IMPLEMENT` (or `PLAN` for NO_PLAN); `ESCALATE` → phase `ESCALATE`, which the coordinator feeds to the lead. After a lead pass, an escalated ticket returns to `PLAN`.
+10. **Lead re-evaluates** (`end_project`) on boot and whenever the open (non-terminal) count drops to zero, asking "are the goals met now?". When yes → `GOALS_ACHIEVED` terminates the run; otherwise it seeds the work that closes the remaining gap.
 
-Any agent can emit `{"type":"replan","reason":"..."}` mid-run to signal «the ticket DB itself looks wrong, not just this one task» — the coordinator collects these as nudges and folds them into the next replanner batch, without short-circuiting the current role's verdict.
+Any agent can emit `{"type":"replan","reason":"..."}` mid-run to signal «the ticket DB itself looks wrong, not just this one task» — the coordinator collects these as nudges and folds them into the next lead batch, without short-circuiting the current role's verdict.
 
 ### Workspaces
 
@@ -194,7 +194,7 @@ Each ticket gets a dedicated workspace under `<root>/workspaces/<ws-id>/` — a 
 | `workspaces/<ws-id>/` | per-ticket git clone | Branch `ovs/<ws-id>`. RO after terminal close. |
 | `runs/T-<N>-<ts>-<role>-<ws>.jsonl` | per-invocation stream | start / stdin / harness events / stderr / finish. The forensic record. |
 | `messages.txt` | team chat | Every `{"type":"message","text":...}` from any agent, appended in real time. Readable by humans and replayed in the next agent's PRIOR_RUNS context. |
-| `REPORT.md` | done marker | Written by the replanner on `GOALS_ACHIEVED`. |
+| `REPORT.md` | done marker | Written by the lead on `GOALS_ACHIEVED`. |
 
 ### Communication protocol
 
@@ -206,14 +206,14 @@ Every agent's stdout is parsed as a JSON-line event stream by `parseEvents` in `
 {"type": "replan", "reason": "why the task DB needs adjustment"}
 ```
 
-Role-specific events on top: tasker emits `{"type":"plan","path":"..."}`; replanner emits `{"type":"task","op":"new",...}` / `{"type":"task","op":"update","deps":[...]}` / `{"type":"task","op":"replace","from":...,"to":...}` / `{"type":"task","op":"cancel",...}`.
+Role-specific events on top: tasker emits `{"type":"plan","path":"..."}`; lead emits `{"type":"task","op":"new",...}` / `{"type":"task","op":"update","deps":[...]}` / `{"type":"task","op":"replace","from":...,"to":...}` / `{"type":"task","op":"cancel",...}`.
 
 The **last** `verdict` event is authoritative — agents sometimes emit multiple. `message` events post to `messages.txt` and surface in the UI. `replan` events become coordinator nudges regardless of which role they came from.
 
 ### Concurrency
 
-- **Fixed per-role worker pools** (`poolSizes` in `types.go`) cap parallelism — total harness concurrency is their sum, *not* a shared semaphore. Defaults: digger 4, tasker / reviewer / arbiter 2, merger / replanner 1. Tune `digger` to control implementation parallelism (and, transitively, how fast the merge queue fills).
-- **Merger / replanner are serial** (pool size 1). The merger because tests + the trunk ff-merge must not race; the replanner because it rewrites the shared ticket DB and is also the single global steering/decision authority.
+- **Fixed per-role worker pools** (`poolSizes` in `types.go`) cap parallelism — total harness concurrency is their sum, *not* a shared semaphore. Defaults: digger 4, tasker / reviewer / arbiter 2, merger / lead 1. Tune `digger` to control implementation parallelism (and, transitively, how fast the merge queue fills).
+- **Merger / lead are serial** (pool size 1). The merger because tests + the trunk ff-merge must not race; the lead because it rewrites the shared ticket DB and is also the single global steering/decision authority.
 - **One coordinator, no locks.** All ticket state (`Phase`, `shadow`, branch workspaces, arbiter context, pending nudges) is owned by the single `scheduler.go` coordinate goroutine. Pools communicate with it only by channel (`Job` in, `AgentResult` out), so there is nothing to lock.
 
 ### Tickets
@@ -222,9 +222,9 @@ The **last** `verdict` event is authoritative — agents sometimes emit multiple
 {"n": 12, "phase": "REVIEW", "descr": "...", "deps": [3, 8]}
 ```
 
-- **`Phase`** is the persisted state: `PLAN` / `IMPLEMENT` / `REVIEW` / `MERGE` / `ARBITRATE` / `ESCALATE`, plus terminal `PLANNED` (a plan ticket finished its plan.md) → `CONSUMED` (the replanner has read it), `MERGED` (work landed), and `DISCARDED` (every other terminal close — cancelled by replanner, repeatedly bounced, reviewer-killed, etc.). The in-memory `shadow` (`STOPPED` / `SCHEDULED`) is the only ephemeral state and never persisted.
+- **`Phase`** is the persisted state: `PLAN` / `IMPLEMENT` / `REVIEW` / `MERGE` / `ARBITRATE` / `ESCALATE`, plus terminal `PLANNED` (a plan ticket finished its plan.md) → `CONSUMED` (the lead has read it), `MERGED` (work landed), and `DISCARDED` (every other terminal close — cancelled by lead, repeatedly bounced, reviewer-killed, etc.). The in-memory `shadow` (`STOPPED` / `SCHEDULED`) is the only ephemeral state and never persisted.
 - Dispatch order: ticket number `n ASC`.
-- A non-terminal ticket may not depend on a `DISCARDED` prerequisite — `ValidateTasks` enforces this on every replanner batch. A dependency is "satisfied" once the dep reaches a terminal phase.
+- A non-terminal ticket may not depend on a `DISCARDED` prerequisite — `ValidateTasks` enforces this on every lead batch. A dependency is "satisfied" once the dep reaches a terminal phase.
 
 ### Example invocation
 
@@ -250,14 +250,14 @@ overseer run \
     --rw=/etc/ssl/certs
 ```
 
-The orchestrator runs in the foreground, streaming a structured log to stderr (BOOT / EXEC / verdict transitions / inter-role chat) until either `GOALS_ACHIEVED` arrives or you send SIGINT / SIGTERM. To resume after an interrupt, run the same command again with the same `--root` — ticket state and workspaces persist; the run boots, the replanner re-evaluates, and the pipeline picks up where it left off.
+The orchestrator runs in the foreground, streaming a structured log to stderr (BOOT / EXEC / verdict transitions / inter-role chat) until either `GOALS_ACHIEVED` arrives or you send SIGINT / SIGTERM. To resume after an interrupt, run the same command again with the same `--root` — ticket state and workspaces persist; the run boots, the lead re-evaluates, and the pipeline picks up where it left off.
 
 ### Harness binding flags
 
 The default harness is required (`--harness`). Per-role and per-group overrides layer on top. Resolution precedence (highest wins) — see `agent.go::harnessModelForRole`:
 
-1. `--<role>-harness` — `--tasker-harness`, `--digger-harness`, `--reviewer-harness`, `--merger-harness`, `--replanner-harness`, `--arbiter-harness`
-2. `--think-harness` (covers tasker / replanner) or `--work-harness` (covers digger / reviewer / merger / arbiter)
+1. `--<role>-harness` — `--tasker-harness`, `--digger-harness`, `--reviewer-harness`, `--merger-harness`, `--lead-harness`, `--arbiter-harness`
+2. `--think-harness` (covers tasker / lead) or `--work-harness` (covers digger / reviewer / merger / arbiter)
 3. `--harness` (the default)
 
 Each flag takes `<bin>` or `<bin>:<model>`. The binary path is PATH-resolved; the harness implementation is picked by basename (must contain `claude`, `opencode`, `codex`, or `gemini`).
@@ -274,7 +274,7 @@ If neither `--jail-bin` nor `--no-jail` is given, the built-in `overseer jail` i
 
 ### Termination
 
-`overseer run` exits when the replanner emits `GOALS_ACHIEVED` — it writes `REPORT.md` and cancels the run context. `SIGINT` / `SIGTERM` also cause clean shutdown. Workspaces and tickets persist across restarts; re-running with the same `--root` resumes the pipeline.
+`overseer run` exits when the lead emits `GOALS_ACHIEVED` — it writes `REPORT.md` and cancels the run context. `SIGINT` / `SIGTERM` also cause clean shutdown. Workspaces and tickets persist across restarts; re-running with the same `--root` resumes the pipeline.
 
 ---
 

@@ -17,7 +17,7 @@ func eventsLogPath(orchRoot string) string {
 	return filepath.Join(orchRoot, eventsLogFile)
 }
 
-// tasksDBPath retains the legacy name (some prompts and replanner inputs reference
+// tasksDBPath retains the legacy name (some prompts and lead inputs reference
 // it as `TASKS_DB`). It points at the events log, which IS the database.
 func tasksDBPath(orchRoot string) string {
 	return eventsLogPath(orchRoot)
@@ -200,7 +200,7 @@ func (o *Orchestrator) appendLog(ev LogEvent) {
 	o.Tickets = applyLogEvent(o.Tickets, ev)
 
 	// Bump the ticket's generation on an actionable mutation (phase transition or deps
-	// change) so the replanner's optimistic-concurrency check can detect a stale batch.
+	// change) so the lead's optimistic-concurrency check can detect a stale batch.
 	// Plain history records (event / ws / usage) don't change what a replan decision
 	// hinges on, so they don't bump.
 	if k, _ := ev["k"].(string); k == "phase" || k == "update" {
@@ -250,7 +250,7 @@ func (o *Orchestrator) recordUsage(res AgentResult) {
 	}
 }
 
-// SerializeTasks renders the in-memory tickets for the replanner's CURRENT_TASKS
+// SerializeTasks renders the in-memory tickets for the lead's CURRENT_TASKS
 // input. OPEN_TICKETS = every non-terminal ticket (pretty JSON incl. phase);
 // CLOSED_DEPS = compact JSON blocks for terminal tickets that are direct deps of a
 // non-terminal one. Sorted by N.
@@ -299,7 +299,7 @@ func SerializeTasks(tickets []Ticket) string {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "MAX_TICKET_N: %d\n\n", maxN)
-	sb.WriteString("OPEN_TICKETS (non-terminal — replanner may cancel/update these):\n")
+	sb.WriteString("OPEN_TICKETS (non-terminal — lead may cancel/update these):\n")
 
 	if open.Len() == 0 {
 		sb.WriteString("(none)\n")
@@ -321,7 +321,7 @@ func SerializeTasks(tickets []Ticket) string {
 }
 
 // ValidateTasks checks structural invariants on a candidate ticket list. Run on the
-// replanner-batch sandbox before committing.
+// lead-batch sandbox before committing.
 func ValidateTasks(tickets []Ticket) {
 	seen := map[int]bool{}
 	known := map[int]bool{}

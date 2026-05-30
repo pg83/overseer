@@ -11,7 +11,7 @@ import (
 // harness to a recognized verdict, and reply with an AgentResult on o.Events. A
 // worker never touches ticket state — everything it needs is in the Job (a ticket
 // snapshot, the workspace, role-specific context). Total harness concurrency is the
-// sum of pool sizes; merger / replanner are size 1 (serial).
+// sum of pool sizes; merger / lead are size 1 (serial).
 
 func (o *Orchestrator) startPools() {
 	for role, size := range poolSizes {
@@ -60,8 +60,8 @@ func (o *Orchestrator) runJob(job Job) AgentResult {
 		return o.jobMerger(job)
 	case RoleArbiter:
 		return o.jobArbiter(job)
-	case RoleReplanner:
-		return o.jobReplanner(job)
+	case RoleLead:
+		return o.jobLead(job)
 	}
 
 	ThrowFmt("runJob: unknown role %q", job.Role)
@@ -191,22 +191,22 @@ func (o *Orchestrator) jobMerger(job Job) AgentResult {
 	}
 }
 
-func (o *Orchestrator) jobReplanner(job Job) AgentResult {
+func (o *Orchestrator) jobLead(job Job) AgentResult {
 	ws := o.workspaceFor(job)
 
-	p := o.selfParams(RoleReplanner)
+	p := o.selfParams(RoleLead)
 	p["Subagent"] = job.Params["Subagent"]
-	p["ReplannerPlans"] = job.Params["ReplannerPlans"]
+	p["LeadPlans"] = job.Params["LeadPlans"]
 	p["REPLAN_TRIGGERS"] = formatReplanTriggers(job.Reasons)
 	p["REPLAN_CHAT"] = strings.Join(job.ChatLog, "\n")
 	p["RUNS_DIR"] = runsDir(o.Root)
 	p["TASKS_DB"] = tasksDBPath(o.Root)
 	p["SNAPSHOT"] = job.Snapshot
 
-	stdin, env := loadPrompt(o.Trunk, RoleReplanner, p), envFrom(p)
+	stdin, env := loadPrompt(o.Trunk, RoleLead, p), envFrom(p)
 
 	for {
-		res := o.runAgent(RoleReplanner, 0, ws, stdin, env)
+		res := o.runAgent(RoleLead, 0, ws, stdin, env)
 
 		if !hasJSONInUnparsed(res.Events) {
 			res.Workspace = ws
@@ -214,7 +214,7 @@ func (o *Orchestrator) jobReplanner(job Job) AgentResult {
 			return res
 		}
 
-		uiSys("🔄", "REPLANNER_RESPAWN", "unparsed JSON — retrying for clean output")
+		uiSys("🔄", "LEAD_RESPAWN", "unparsed JSON — retrying for clean output")
 	}
 }
 
@@ -337,7 +337,7 @@ func replaceDepRefs(deps []int, from, to int) ([]int, bool) {
 	return out, changed
 }
 
-// formatReplanTriggers renders the batch of nudges a replanner Job carries — one
+// formatReplanTriggers renders the batch of nudges a lead Job carries — one
 // numbered line per trigger (source role, ticket, optional workspace, reason).
 func formatReplanTriggers(reasons []ReplanReason) string {
 	var sb strings.Builder
@@ -401,9 +401,9 @@ func taskerPlanContent(events []map[string]any) string {
 	return content
 }
 
-// replannerTaskOps pulls every `task` event out of the replanner's stream, in
+// leadTaskOps pulls every `task` event out of the lead's stream, in
 // emission order. No other role emits task events.
-func replannerTaskOps(events []map[string]any) []map[string]any {
+func leadTaskOps(events []map[string]any) []map[string]any {
 	var out []map[string]any
 
 	for _, ev := range events {
@@ -440,7 +440,7 @@ func hasJSONInUnparsed(events []map[string]any) bool {
 	return false
 }
 
-// opAffectedTickets returns the existing tickets whose prior state a replanner op
+// opAffectedTickets returns the existing tickets whose prior state a lead op
 // depends on — the ones whose generation must still match the planning snapshot. `new`
 // only creates (its number didn't exist in the snapshot), so it affects nothing existing.
 func opAffectedTickets(ev map[string]any) []int {
@@ -454,7 +454,7 @@ func opAffectedTickets(ev map[string]any) []int {
 	return nil
 }
 
-// applyTaskOp applies one replanner `task` event to a ticket-list sandbox, throwing
+// applyTaskOp applies one lead `task` event to a ticket-list sandbox, throwing
 // on any schema violation. Ops apply in emission order; the caller validates the
 // cumulative result before committing.
 func applyTaskOp(tickets []Ticket, ev map[string]any) []Ticket {

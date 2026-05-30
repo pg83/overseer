@@ -110,7 +110,7 @@ type messageLogEntry struct {
 // appendMessage appends one MESSAGE line to <root>/messages.txt — the team's shared chat
 // across all roles and tickets. Format: "<ts>\t<role>\t<ticket>\t<msg>\n", no truncation.
 // A single writer goroutine serializes appends so concurrent agents don't interleave.
-// Returns the exact line written so the coordinator can reuse it for replanner context.
+// Returns the exact line written so the coordinator can reuse it for lead context.
 func appendMessage(orchRoot string, role AgentRole, ticket int, msg string) string {
 	line := fmt.Sprintf("%s\t%s\tT-%d\t%s\n",
 		time.Now().UTC().Format(time.RFC3339Nano), role, ticket, msg)

@@ -14,9 +14,9 @@ const (
 	PhaseReview    Phase = "REVIEW"    // needs a reviewer
 	PhaseMerge     Phase = "MERGE"     // needs the merger
 	PhaseArbitrate Phase = "ARBITRATE" // needs the arbiter (a disagreement surfaced)
-	PhaseEscalate  Phase = "ESCALATE"  // needs the replanner (arbiter escalated, or a digger's algedonic cord)
-	PhasePlanned   Phase = "PLANNED"   // terminal: plan written, awaiting replanner consumption
-	PhaseConsumed  Phase = "CONSUMED"  // terminal: plan read & operationalized by the replanner
+	PhaseEscalate  Phase = "ESCALATE"  // needs the lead (arbiter escalated, or a digger's algedonic cord)
+	PhasePlanned   Phase = "PLANNED"   // terminal: plan written, awaiting lead consumption
+	PhaseConsumed  Phase = "CONSUMED"  // terminal: plan read & operationalized by the lead
 	PhaseMerged    Phase = "MERGED"    // terminal: code landed in trunk
 	PhaseDiscarded Phase = "DISCARDED" // terminal: dropped
 )
@@ -40,7 +40,7 @@ func roleForPhase(p Phase) AgentRole {
 	case PhaseArbitrate:
 		return RoleArbiter
 	case PhaseEscalate:
-		return RoleReplanner
+		return RoleLead
 	}
 
 	return ""
@@ -116,17 +116,17 @@ const (
 	RoleDigger    AgentRole = "digger"
 	RoleReviewer  AgentRole = "reviewer"
 	RoleMerger    AgentRole = "merger"
-	RoleReplanner AgentRole = "replanner"
+	RoleLead AgentRole = "lead"
 
 	// Arbiter is the cycle-internal escalation gate. When a digger →
 	// reviewer / merger cycle hits a disagreement (REWORK / DISCARD /
 	// MERGE_FAIL), the arbiter decides: keep iterating in the cycle, or
-	// escalate to the full replanner.
+	// escalate to the full lead.
 	RoleArbiter AgentRole = "arbiter"
 
 	// Operator is a synthetic source for nudges the coordinator injects: the human's
 	// --replan boot flag, plus boot / GOALS.md-change signals. Never dispatched (it
-	// has no pool); used only to label the directive in the replanner's trigger list.
+	// has no pool); used only to label the directive in the lead's trigger list.
 	RoleOperator AgentRole = "operator"
 
 	// Common names the shared prompt tail appended to every role. It has no pool;
@@ -188,9 +188,9 @@ type AgentResult struct {
 	Events []map[string]any
 }
 
-// ReplanReason is one nudge to the replanner — either an escalated ticket or a
+// ReplanReason is one nudge to the lead — either an escalated ticket or a
 // global signal (overseer guidance, post-merge fallout, GOALS.md change). The
-// coordinator accumulates these and batches them into a single replanner Job.
+// coordinator accumulates these and batches them into a single lead Job.
 type ReplanReason struct {
 	Source    AgentRole
 	Ticket    int
@@ -211,7 +211,7 @@ type Job struct {
 	WS    string
 	NewWS bool
 
-	// Replanner context (PhaseEscalate tickets + global nudges, batched).
+	// Lead context (PhaseEscalate tickets + global nudges, batched).
 	Reasons []ReplanReason
 	ChatLog []string
 
@@ -223,7 +223,7 @@ type Job struct {
 	Params map[string]string
 
 	// Snapshot is CURRENT_TASKS, rendered by the coordinator (which owns o.Tickets)
-	// at dispatch time, for the replanner — so a worker never reads coordinator state.
+	// at dispatch time, for the lead — so a worker never reads coordinator state.
 	Snapshot string
 }
 
@@ -260,7 +260,7 @@ type Orchestrator struct {
 	ExtraRW   []string
 
 	// Boot directive from the operator (--replan): when non-empty the coordinator
-	// queues it as a mandatory operator nudge for the first replanner pass.
+	// queues it as a mandatory operator nudge for the first lead pass.
 	bootReplan string
 
 	// Bindings is the role → (harness, model) resolution table — see
@@ -275,8 +275,8 @@ type Orchestrator struct {
 	nudges        []ReplanReason
 
 	// ticketGen[n] bumps on every actionable mutation of ticket n (phase / deps). The
-	// replanner deliberates for minutes on a snapshot; replanGen records the gen of each
-	// ticket at the moment that snapshot was handed out, so applyReplannerOps can reject a
+	// lead deliberates for minutes on a snapshot; replanGen records the gen of each
+	// ticket at the moment that snapshot was handed out, so applyLeadOps can reject a
 	// batch whose target tickets have since changed (optimistic concurrency, not a lock).
 	ticketGen map[int]int
 	replanGen map[int]int
@@ -284,7 +284,7 @@ type Orchestrator struct {
 	replanOwned   []int
 	replanPlans   []int
 	replanCtx     string
-	replannerBusy bool
+	leadBusy bool
 	mergerBusy    bool
 
 	jobs   map[AgentRole]chan Job
@@ -296,7 +296,7 @@ type Orchestrator struct {
 }
 
 // poolSizes is the fixed number of workers per role — total harness concurrency is
-// their sum (no shared semaphore). merger / replanner are serial; tune digger to
+// their sum (no shared semaphore). merger / lead are serial; tune digger to
 // control implementation parallelism.
 var poolSizes = map[AgentRole]int{
 	RoleTasker:    2,
@@ -304,5 +304,5 @@ var poolSizes = map[AgentRole]int{
 	RoleReviewer:  2,
 	RoleArbiter:   2,
 	RoleMerger:    1,
-	RoleReplanner: 1,
+	RoleLead: 1,
 }

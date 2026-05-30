@@ -90,9 +90,9 @@ func (o *Orchestrator) Run() {
 
 // bootDirectives kicks off exactly one agent at startup. Operator flags take
 // precedence: --replan queues a mandatory operator nudge with mandatory framing.
-// Then the boot depends on the task DB — an empty DB runs the replanner in its
+// Then the boot depends on the task DB — an empty DB runs the lead in its
 // start_project context to read GOALS.md and seed direction; an existing plan gets
-// one routine replanner pass to re-evaluate it against the goals before work resumes.
+// one routine lead pass to re-evaluate it against the goals before work resumes.
 func (o *Orchestrator) bootDirectives() {
 	if o.bootReplan != "" {
 		o.nudges = append(o.nudges, ReplanReason{
@@ -208,7 +208,7 @@ func (o *Orchestrator) nonTerminalCount() int {
 
 // hasOpenDependent reports whether any non-terminal ticket depends on n — used to
 // tell whether a freshly-completed plan ticket already has implementation work
-// queued against it (deps model) or needs the replanner to operationalize it.
+// queued against it (deps model) or needs the lead to operationalize it.
 func (o *Orchestrator) hasOpenDependent(n int) bool {
 	for _, t := range o.Tickets {
 		if t.Phase.Terminal() {
@@ -226,7 +226,7 @@ func (o *Orchestrator) hasOpenDependent(n int) bool {
 }
 
 // depsSatisfied reports whether every dependency of t has reached a terminal phase
-// (its work landed, or it was dropped — the replanner cleans dropped-prereq cases).
+// (its work landed, or it was dropped — the lead cleans dropped-prereq cases).
 func (o *Orchestrator) depsSatisfied(t Ticket) bool {
 	for _, d := range t.Deps {
 		dt, ok := o.findTicket(d)
@@ -253,7 +253,7 @@ func (o *Orchestrator) checkGoals() {
 }
 
 // dispatch routes every STOPPED non-terminal ticket to the pool its phase calls
-// for, in ticket-number order, then batches the replanner. Pure function of the
+// for, in ticket-number order, then batches the lead. Pure function of the
 // coordinator-owned state; pool sizes (not a shared semaphore) cap concurrency.
 func (o *Orchestrator) dispatch() {
 	ready := append([]Ticket{}, o.Tickets...)
@@ -268,7 +268,7 @@ func (o *Orchestrator) dispatch() {
 
 		role := roleForPhase(t.Phase)
 
-		if role == "" || role == RoleReplanner {
+		if role == "" || role == RoleLead {
 			continue
 		}
 
@@ -295,7 +295,7 @@ func (o *Orchestrator) dispatch() {
 		uiTicket("📤", role, t.N, "DISPATCH", string(t.Phase))
 	}
 
-	o.dispatchReplanner()
+	o.dispatchLead()
 	o.publishTasks()
 }
 
@@ -321,20 +321,20 @@ func (o *Orchestrator) publishTasks() {
 	uiOut.tasks(snap)
 }
 
-// dispatchReplanner hands the (serial) replanner pool ONE Job for ONE subagent context.
+// dispatchLead hands the (serial) lead pool ONE Job for ONE subagent context.
 // The pending work — escalated tickets + global nudges — is partitioned by context
 // (algedonic / start_project / end_project / escalate / replan), and a single pass takes
 // only the most urgent non-empty context's items; the rest wait for the next dispatch
-// (replannerBusy keeps one in flight, so the contexts run as separate serial passes).
+// (leadBusy keeps one in flight, so the contexts run as separate serial passes).
 // This is deliberate: a heterogeneous batch must never be forced under one ill-fitting
 // context — each pass sees a coherent set of work matching its prompt. A whole-project
 // context (start/end via o.replanCtx) dispatches even with no nudges or escalations.
-func (o *Orchestrator) dispatchReplanner() {
-	if o.replannerBusy {
+func (o *Orchestrator) dispatchLead() {
+	if o.leadBusy {
 		return
 	}
 
-	// Escalated tickets waiting for the replanner, grouped by what escalated them: the
+	// Escalated tickets waiting for the lead, grouped by what escalated them: the
 	// digger's algedonic cord vs a routine escalate (arbiter / repeated rework). Derived
 	// from each ticket's event history at dispatch — nothing stored, nothing to clean up.
 	escByCtx := map[string][]int{}
@@ -411,21 +411,21 @@ func (o *Orchestrator) dispatchReplanner() {
 	o.replanOwned = owned
 	o.replanPlans = o.plannedPlanTickets()
 
-	// Record the generation of every ticket as of this snapshot; applyReplannerOps compares
-	// against it to reject a batch whose targets changed while the replanner deliberated.
+	// Record the generation of every ticket as of this snapshot; applyLeadOps compares
+	// against it to reject a batch whose targets changed while the lead deliberated.
 	o.replanGen = map[int]int{}
 
 	for _, t := range o.Tickets {
 		o.replanGen[t.N] = o.ticketGen[t.N]
 	}
 
-	o.replannerBusy = true
+	o.leadBusy = true
 
-	uiSys("📤", "REPLANNER", fmt.Sprintf("%s — %d reason(s), %d escalated, %d plan(s)", ctx, len(reasons), len(owned), len(o.replanPlans)))
-	o.jobs[RoleReplanner] <- Job{Role: RoleReplanner, NewWS: true, Params: map[string]string{"Subagent": ctx, "ReplannerPlans": o.closedPlansText()}, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
+	uiSys("📤", "LEAD", fmt.Sprintf("%s — %d reason(s), %d escalated, %d plan(s)", ctx, len(reasons), len(owned), len(o.replanPlans)))
+	o.jobs[RoleLead] <- Job{Role: RoleLead, NewWS: true, Params: map[string]string{"Subagent": ctx, "LeadPlans": o.closedPlansText()}, Reasons: reasons, ChatLog: chatLog, Snapshot: SerializeTasks(o.Tickets)}
 }
 
-// escalContext derives which replanner context an escalated ticket belongs to, from its
+// escalContext derives which lead context an escalated ticket belongs to, from its
 // event history: the digger's algedonic cord (ALGEDONIC) vs a routine escalate (arbiter
 // ARBITER_ESCALATE, or repeated rework). The most recent of the two wins.
 func (o *Orchestrator) escalContext(n int) string {
@@ -533,8 +533,8 @@ func (o *Orchestrator) promptParams(role AgentRole, t Ticket) map[string]string 
 }
 
 // plannedPlanTickets lists the plan tickets sitting in PLANNED — written but not yet
-// read by the replanner. After a replanner pass consumes them they flip to CONSUMED
-// and drop out, so each plan is shown to the replanner exactly once.
+// read by the lead. After a lead pass consumes them they flip to CONSUMED
+// and drop out, so each plan is shown to the lead exactly once.
 func (o *Orchestrator) plannedPlanTickets() []int {
 	var ns []int
 
@@ -548,7 +548,7 @@ func (o *Orchestrator) plannedPlanTickets() []int {
 }
 
 // closedPlansText concatenates the plan.md of every PLANNED (not-yet-consumed) plan
-// ticket, so the replanner can build on prior research instead of re-deriving it.
+// ticket, so the lead can build on prior research instead of re-deriving it.
 func (o *Orchestrator) closedPlansText() string {
 	var sb strings.Builder
 
@@ -563,7 +563,7 @@ func (o *Orchestrator) closedPlansText() string {
 	return strings.TrimSpace(sb.String())
 }
 
-// replanCtxRank orders the replanner's wake-up contexts by urgency so the most
+// replanCtxRank orders the lead's wake-up contexts by urgency so the most
 // important one wins when several pend before the next dispatch.
 func replanCtxRank(c string) int {
 	switch c {
@@ -578,9 +578,9 @@ func replanCtxRank(c string) int {
 	return 0
 }
 
-// wantReplan records that the replanner should run, keeping the most urgent pending
-// context; dispatchReplanner turns it into one Job. Replaces the former overseer
-// trigger — the replanner now does the overseer's job under that context.
+// wantReplan records that the lead should run, keeping the most urgent pending
+// context; dispatchLead turns it into one Job. Replaces the former overseer
+// trigger — the lead now does the overseer's job under that context.
 func (o *Orchestrator) wantReplan(ctx string) {
 	if replanCtxRank(ctx) >= replanCtxRank(o.replanCtx) {
 		o.replanCtx = ctx
@@ -619,10 +619,10 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 		appendTicketPrompt(o.Root, n, res.Role, res.Stdin)
 	}
 
-	// Per-ticket result for an already-terminal ticket (replanner cancelled it
+	// Per-ticket result for an already-terminal ticket (lead cancelled it
 	// mid-flight): drop it, just clear the shadow. A merger landing here never
 	// reaches onMerger, so free the merge slot explicitly or it deadlocks.
-	if res.Role != RoleReplanner {
+	if res.Role != RoleLead {
 		if t, ok := o.findTicket(n); ok && t.Phase.Terminal() {
 			if res.Role == RoleMerger {
 				o.mergerBusy = false
@@ -651,8 +651,8 @@ func (o *Orchestrator) handleResult(res AgentResult) {
 	case RoleArbiter:
 		o.shadow[n] = ShadowStopped
 		o.onArbiter(res)
-	case RoleReplanner:
-		o.onReplanner(res)
+	case RoleLead:
+		o.onLead(res)
 	}
 }
 
@@ -682,8 +682,8 @@ func (o *Orchestrator) onTasker(res AgentResult) {
 	if t.Type == TicketTypePlan {
 		// A plan ticket is research: it terminates as PLANNED, and its plan.md is read
 		// by dependents via DEPENDENCY_PLANS. No arbiter relay, no discard. If nothing
-		// depends on it yet (the replanner couldn't break the work down until the plan
-		// existed), nudge the replanner to operationalize it into implementation tickets.
+		// depends on it yet (the lead couldn't break the work down until the plan
+		// existed), nudge the lead to operationalize it into implementation tickets.
 		o.setPhase(n, PhasePlanned, "research plan complete")
 		uiTicket("📐", RoleTasker, n, "PLANNED", "")
 
@@ -732,7 +732,7 @@ func (o *Orchestrator) onDigger(res AgentResult) {
 		uiTicket("🛑", RoleDigger, n, "CANT_DO", detail)
 	case VerdictAlgedonic:
 		// Emergency cord: escalate the ticket (bypassing review / merge / arbiter). The
-		// ALGEDONIC event marks it; dispatchReplanner derives the algedonic context from
+		// ALGEDONIC event marks it; dispatchLead derives the algedonic context from
 		// that event and routes this ticket + its nudge into a dedicated algedonic pass.
 		o.recordEvent(n, "ALGEDONIC", detail)
 		o.setPhase(n, PhaseEscalate, detail)
@@ -759,10 +759,10 @@ func (o *Orchestrator) onReviewer(res AgentResult) {
 
 		// First rework → the cheap arbiter decides whether another local pass is worth
 		// it. Second rework and beyond → the inner loop is demonstrably stuck; skip the
-		// arbiter and escalate straight to the replanner, which reads the full history
+		// arbiter and escalate straight to the lead, which reads the full history
 		// and decides progress-vs-replan.
 		if o.eventCount(n, "REVIEWER_REWORK") >= 2 {
-			o.setPhase(n, PhaseEscalate, "repeated REWORK — escalate to replanner")
+			o.setPhase(n, PhaseEscalate, "repeated REWORK — escalate to lead")
 			uiTicket("⤴️", RoleReviewer, n, "ESCALATE", detail)
 
 			return
@@ -862,10 +862,10 @@ func (o *Orchestrator) onArbiter(res AgentResult) {
 	}
 }
 
-func (o *Orchestrator) onReplanner(res AgentResult) {
-	o.replannerBusy = false
+func (o *Orchestrator) onLead(res AgentResult) {
+	o.leadBusy = false
 
-	// GOALS_ACHIEVED ends the run — the replanner now owns this top-level call (it was
+	// GOALS_ACHIEVED ends the run — the lead now owns this top-level call (it was
 	// the overseer's). Reached mainly from the end_project context.
 	if verdict, detail := lastVerdict(res.Events); verdict == VerdictGoalsAchieved {
 		uiSys("🎯", "GOALS_ACHIEVED", detail)
@@ -875,12 +875,12 @@ func (o *Orchestrator) onReplanner(res AgentResult) {
 		return
 	}
 
-	ops := replannerTaskOps(res.Events)
+	ops := leadTaskOps(res.Events)
 
 	if len(ops) > 0 {
-		o.applyReplannerOps(res, ops)
+		o.applyLeadOps(res, ops)
 	} else {
-		uiSys("💤", "REPLANNER_NO_OPS", "no task events")
+		uiSys("💤", "LEAD_NO_OPS", "no task events")
 	}
 
 	// Release the escalated tickets this pass owned: a re-scope (update) leaves them
@@ -889,7 +889,7 @@ func (o *Orchestrator) onReplanner(res AgentResult) {
 	// pick them up.
 	for _, n := range o.replanOwned {
 		if t, ok := o.findTicket(n); ok && t.Phase == PhaseEscalate {
-			o.setPhase(n, resumePhaseAfterReplan(t), "replanner pass — resume by ticket type")
+			o.setPhase(n, resumePhaseAfterReplan(t), "lead pass — resume by ticket type")
 		}
 
 		o.shadow[n] = ShadowStopped
@@ -902,8 +902,8 @@ func (o *Orchestrator) onReplanner(res AgentResult) {
 	// disk for dependents (dependencyPlans reads the file regardless of phase).
 	for _, n := range o.replanPlans {
 		if t, ok := o.findTicket(n); ok && t.Phase == PhasePlanned {
-			o.recordEvent(n, "CONSUMED", "read & processed by replanner")
-			o.setPhase(n, PhaseConsumed, "consumed by replanner")
+			o.recordEvent(n, "CONSUMED", "read & processed by lead")
+			o.setPhase(n, PhaseConsumed, "consumed by lead")
 		}
 	}
 
@@ -911,7 +911,7 @@ func (o *Orchestrator) onReplanner(res AgentResult) {
 }
 
 // afterTerminal fires the post-terminal bookkeeping: a fallout replan nudge plus an
-// end_project replanner pass (check the goals) when the open queue reaches zero.
+// end_project lead pass (check the goals) when the open queue reaches zero.
 func (o *Orchestrator) afterTerminal(n int, reason, workspace string) {
 	o.nudges = append(o.nudges, ReplanReason{
 		Source:    RoleMerger,
@@ -925,16 +925,16 @@ func (o *Orchestrator) afterTerminal(n int, reason, workspace string) {
 	}
 }
 
-// applyReplannerOps validates the batch on a sandbox, then commits each op to the
+// applyLeadOps validates the batch on a sandbox, then commits each op to the
 // log: new → a fresh PLAN ticket, update → field changes, cancel → DISCARDED. On a
 // schema violation the whole batch is rejected and re-queued as a feedback nudge.
-func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) {
-	// Stale-snapshot guard (optimistic concurrency). The replanner deliberates for minutes
+func (o *Orchestrator) applyLeadOps(res AgentResult, ops []map[string]any) {
+	// Stale-snapshot guard (optimistic concurrency). The lead deliberates for minutes
 	// on the snapshot it was handed; by the time its batch applies, the inner loop may have
 	// advanced a ticket the batch targets. Applying a stale op is a race — it discards an
 	// almost-done ticket out from under a running agent and spawns a duplicate replacement.
 	// So for every ticket a batch touches, require its generation to still match the one in
-	// the replanner's snapshot; if any differs, reject the WHOLE batch atomically (a partial
+	// the lead's snapshot; if any differs, reject the WHOLE batch atomically (a partial
 	// apply would still create the duplicate) and re-queue so the next pass works fresh
 	// state. Tickets escalated TO this pass don't change between snapshot and apply (the
 	// pass holds them), so their gen matches and re-scoping them is unaffected.
@@ -944,7 +944,7 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 				op, _ := ev["op"].(string)
 				uiSys("⏳", "REPLAN_STALE", fmt.Sprintf("op=%s T-%d — ticket changed since your snapshot; batch deferred to next pass", op, n))
 				o.nudges = append(o.nudges, ReplanReason{
-					Source: RoleReplanner,
+					Source: RoleLead,
 					Reason: fmt.Sprintf("your previous batch tried to %s T-%d, but that ticket changed (another role advanced it) after the snapshot you planned against, so NOTHING from the batch was applied. Re-read the current ticket DB and re-issue only the ops still warranted.", op, n),
 				})
 
@@ -967,8 +967,8 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 	if exc != nil {
 		uiSys("❌", "REPLAN_REJECTED", exc.Error())
 		o.nudges = append(o.nudges, ReplanReason{
-			Source: RoleReplanner,
-			Reason: fmt.Sprintf("previous replanner output invalid: %s\n\nREJECTED_OUTPUT:\n%s", exc.Error(), res.Stdout),
+			Source: RoleLead,
+			Reason: fmt.Sprintf("previous lead output invalid: %s\n\nREJECTED_OUTPUT:\n%s", exc.Error(), res.Stdout),
 		})
 
 		return
@@ -987,8 +987,8 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 			ticketType := jsonTicketType(ev["ticket_type"])
 
 			o.appendLog(LogEvent{"k": "create", "n": n, "type": string(ticketType), "descr": descr, "deps": deps})
-			o.recordEvent(n, "TASK_NEW", "by=replanner descr="+descr)
-			uiTicket("🆕", RoleReplanner, n, "NEW", descr)
+			o.recordEvent(n, "TASK_NEW", "by=lead descr="+descr)
+			uiTicket("🆕", RoleLead, n, "NEW", descr)
 		case "update":
 			change := LogEvent{"k": "update", "n": n}
 			summaryParts := []string{}
@@ -1001,13 +1001,13 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 
 			summary := strings.Join(summaryParts, " ")
 			o.appendLog(change)
-			o.recordEvent(n, "TASK_UPDATE", "by=replanner "+summary)
-			uiTicket("✏️", RoleReplanner, n, "UPDATE", summary)
+			o.recordEvent(n, "TASK_UPDATE", "by=lead "+summary)
+			uiTicket("✏️", RoleLead, n, "UPDATE", summary)
 		case "cancel":
 			reason, _ := ev["reason"].(string)
-			o.setPhase(n, PhaseDiscarded, "by=replanner reason="+reason)
-			o.recordEvent(n, "DISCARDED", "by=replanner reason="+reason)
-			uiTicket("🛑", RoleReplanner, n, "DISCARDED", reason)
+			o.setPhase(n, PhaseDiscarded, "by=lead reason="+reason)
+			o.recordEvent(n, "DISCARDED", "by=lead reason="+reason)
+			uiTicket("🛑", RoleLead, n, "DISCARDED", reason)
 			o.nudges = append(o.nudges, ReplanReason{
 				Source:    RoleMerger,
 				Ticket:    n,
@@ -1031,8 +1031,8 @@ func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) 
 				}
 
 				o.appendLog(LogEvent{"k": "update", "n": t.N, "deps": deps})
-				o.recordEvent(t.N, "TASK_UPDATE", fmt.Sprintf("by=replanner replace=%d->%d deps=%v", from, to, deps))
-				uiTicket("✏️", RoleReplanner, t.N, "UPDATE", fmt.Sprintf("replace %d->%d deps=%v", from, to, deps))
+				o.recordEvent(t.N, "TASK_UPDATE", fmt.Sprintf("by=lead replace=%d->%d deps=%v", from, to, deps))
+				uiTicket("✏️", RoleLead, t.N, "UPDATE", fmt.Sprintf("replace %d->%d deps=%v", from, to, deps))
 			}
 		}
 	}

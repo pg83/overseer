@@ -63,16 +63,16 @@ func runMain(argv []string) {
 	trunk := fs.String("trunk", "", "path to git working tree being modified")
 
 	defaultHarness := fs.String("harness", "", "default harness:model spec — '<bin>' or '<bin>:<model>'. Required.")
-	thinkHarness := fs.String("think-harness", "", "harness:model for tasker / replanner / overseer (overrides --harness)")
+	thinkHarness := fs.String("think-harness", "", "harness:model for tasker / lead / overseer (overrides --harness)")
 	workHarness := fs.String("work-harness", "", "harness:model for digger / reviewer (overrides --harness)")
 	taskerHarness := fs.String("tasker-harness", "", "harness:model for tasker (overrides --think-harness)")
 	diggerHarness := fs.String("digger-harness", "", "harness:model for digger (overrides --work-harness)")
 	reviewerHarness := fs.String("reviewer-harness", "", "harness:model for reviewer (overrides --work-harness)")
 	mergerHarness := fs.String("merger-harness", "", "harness:model for merger (overrides --harness)")
-	replannerHarness := fs.String("replanner-harness", "", "harness:model for replanner (overrides --think-harness)")
+	leadHarness := fs.String("lead-harness", "", "harness:model for lead (overrides --think-harness)")
 	arbiterHarness := fs.String("arbiter-harness", "", "harness:model for arbiter (overrides --think-harness)")
 
-	replanDirective := fs.String("replan", "", "operator directive: force one replanner pass at boot, injected as a mandatory instruction")
+	replanDirective := fs.String("replan", "", "operator directive: force one lead pass at boot, injected as a mandatory instruction")
 
 	uiMode := fs.String("ui", "log", "ui mode: log (scrolling lines) | tui (interactive tcell tabs)")
 
@@ -124,7 +124,7 @@ func runMain(argv []string) {
 		{"--digger-harness", string(RoleDigger), *diggerHarness},
 		{"--reviewer-harness", string(RoleReviewer), *reviewerHarness},
 		{"--merger-harness", string(RoleMerger), *mergerHarness},
-		{"--replanner-harness", string(RoleReplanner), *replannerHarness},
+		{"--lead-harness", string(RoleLead), *leadHarness},
 		{"--arbiter-harness", string(RoleArbiter), *arbiterHarness},
 	} {
 		if kv.val == "" {
@@ -234,7 +234,7 @@ func formatBindings(b map[string]HarnessModel) string {
 	order := []string{
 		"default", "think", "work",
 		string(RoleTasker), string(RoleDigger), string(RoleReviewer),
-		string(RoleMerger), string(RoleReplanner), string(RoleArbiter),
+		string(RoleMerger), string(RoleLead), string(RoleArbiter),
 	}
 
 	var parts []string
