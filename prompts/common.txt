@@ -48,36 +48,20 @@ MESSAGES_LOG: {{.MESSAGES_LOG}}
 {{.TRUNK_PATH}} — the trunk checkout whose master is the integration target, currently at HEAD {{.TRUNK_HASH}}.
 {{if .PREV_WORKSPACE}}{{.PREV_WORKSPACE}} — the filesystem path to your previous attempt on this ticket (the same path as WORKSPACE), with your prior branch and files intact. This run is a continuation: pick up from the state already on disk, do not re-clone or restart from scratch.
 {{end -}}
-{{if .DIGGER_BRANCH}}DIGGER_BRANCH: {{.DIGGER_BRANCH}}
-DIGGER_WORKTREE: {{.DIGGER_WORKTREE}}
-MERGER_WORKTREE: {{.MERGER_WORKTREE}}
-TRUNK_HEAD: {{.TRUNK_HEAD}}
-{{end -}}
 {{if .PLAN}}
-PLAN:
+The plan for this ticket (written by the tasker — implement to it):
 {{.PLAN}}
 {{end -}}
 {{if .LOG}}
-LOG (phase transitions for this ticket, append-only):
+This ticket's phase-transition history, append-only:
 {{.LOG}}
 {{end -}}
 {{if .TICKET_CHAT}}
-TICKET_CHAT (lines from MESSAGES_LOG mentioning this ticket):
+Team-chat lines mentioning this ticket:
 {{.TICKET_CHAT}}
 {{end -}}
 {{if .PRIOR_RUNS}}
-PRIOR_RUNS (compact summaries — Read each LOG_FILE for the full reasoning stream):
+Compact summaries of this ticket's prior agent runs — Read each LOG_FILE for the full reasoning stream:
 {{.PRIOR_RUNS}}
 {{end -}}
-{{end -}}
-{{if .Subagent}}SUBAGENT: {{.Subagent}}
-
-REPLAN_TRIGGERS (every nudge accumulated since the last replanner run — address them together as one batch; some may be duplicates or already handled, check TASKS_DB before acting):
-{{.REPLAN_TRIGGERS}}
-REPLAN_CHAT (all team-chat lines accumulated since the previous replanner run):
-{{.REPLAN_CHAT}}
-RUNS_DIR: {{.RUNS_DIR}}
-TASKS_DB: {{.TASKS_DB}}
-
-{{.SNAPSHOT}}
 {{end -}}
