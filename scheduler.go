@@ -431,7 +431,7 @@ func (o *Orchestrator) promptParams(role AgentRole, t Ticket) map[string]string 
 	p := map[string]string{}
 
 	switch role {
-	case RoleDigger, RoleReviewer:
+	case RoleTasker, RoleDigger, RoleReviewer:
 		p["Plans"] = dependencyPlans(o.Root, t.Deps)
 	}
 
