@@ -15,8 +15,8 @@ Different roles, one goal: everything in GOALS.md, shipped. Nobody wins alone he
 
 Every non-blank line of stdout is one JSON object with a non-empty `type` field. Examples:
 
-    {"type": "verdict", "verdict": "READY", "detail": "..."}
-    {"type": "message", "text": "running tests now"}
+{"type": "verdict", "verdict": "READY", "detail": "..."}
+{"type": "message", "text": "running tests now"}
 
 Wrap thinking, status updates, "let me check X" as `message` events. Each event fits on a single line — escape newlines as `\n`, double quotes as `\"`.
 
@@ -24,8 +24,8 @@ Wrap thinking, status updates, "let me check X" as `message` events. Each event 
 
 Common events available to every role:
 
-    {"type": "message", "text": "<one-line note for the team chat>"}
-    {"type": "replan", "reason": "<why the task DB needs adjustment>"}
+{"type": "message", "text": "<one-line note for the team chat>"}
+{"type": "replan", "reason": "<why the task DB needs adjustment>"}
 
 `message` events post to the shared team chat (`MESSAGES_LOG`) where every role across every ticket reads each other. Status, surprises, ambiguities, decisions worth flagging. `MESSAGES_LOG` (path in your input header) is the same chat as a file: read or grep it for context on prior runs.
 

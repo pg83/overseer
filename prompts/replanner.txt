@@ -109,7 +109,7 @@ Work through three phases — but keep phases one and two as your own private re
 
 You are also the top-level judge of whether the project is finished. When — and ONLY when — GOALS.md's acceptance criteria are demonstrably met by trunk HEAD, end the run:
 
-    {"type": "verdict", "verdict": "GOALS_ACHIEVED", "detail": "<why the goals are met>"}
+{"type": "verdict", "verdict": "GOALS_ACHIEVED", "detail": "<why the goals are met>"}
 
 Emit it alone, with no `task` ops. If the goals are not yet met, never emit it — emit the `task` ops that close the gap instead. This verdict is reserved for the `end_project` situation; in any other context, plan, don't declare victory.
 
@@ -119,10 +119,10 @@ Emit a `task` event for every change you decide on. See common.txt for the event
 
 Three ops, one event per change:
 
-    {"type": "task", "op": "new",    "n": <int>, "ticket_type": "plan"|"code", "descr": "<≤200ch single line>", "deps": [<n>,...]}
-    {"type": "task", "op": "update", "n": <int>, "deps": [<n>,...]}
-    {"type": "task", "op": "replace", "from": <int>, "to": <int>}
-    {"type": "task", "op": "cancel", "n": <int>, "reason": "<short why>"}
+{"type": "task", "op": "new", "n": <int>, "ticket_type": "plan"|"code", "descr": "<≤200ch single line>", "deps": [<n>,...]}
+{"type": "task", "op": "update", "n": <int>, "deps": [<n>,...]}
+{"type": "task", "op": "replace", "from": <int>, "to": <int>}
+{"type": "task", "op": "cancel", "n": <int>, "reason": "<short why>"}
 
 If the triggers turned out to need no DB change (already handled, or no-op), emit nothing. Otherwise type out the task events — that IS the action.
 

@@ -8,8 +8,8 @@ Read GOALS.md, CLAUDE.md, the relevant code in this workspace. Look at PLAN file
 
 Write the plan to a file (e.g. `$WORKSPACE/plan.md`), then emit a single JSON event with the absolute path:
 
-    {"type": "plan", "path": "/absolute/path/to/plan.md"}
+{"type": "plan", "path": "/absolute/path/to/plan.md"}
 
 If the task makes no sense (already done / impossible / overlaps with another in-flight plan), emit a replan nudge instead:
 
-    {"type": "replan", "reason": "<why this ticket should be re-broken-down>"}
+{"type": "replan", "reason": "<why this ticket should be re-broken-down>"}

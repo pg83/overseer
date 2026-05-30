@@ -32,5 +32,5 @@ You may emit a `replan` event if you notice systemic issues (consistent test gap
 
 Emit exactly one verdict event as your final structured output:
 
-    {"type": "verdict", "verdict": "MERGED",     "detail": "<short summary>"}
-    {"type": "verdict", "verdict": "MERGE_FAIL", "detail": "<reason>"}
+{"type": "verdict", "verdict": "MERGED", "detail": "<short summary>"}
+{"type": "verdict", "verdict": "MERGE_FAIL", "detail": "<reason>"}
