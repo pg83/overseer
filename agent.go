@@ -253,6 +253,15 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 		wsAbs = wsPath(o.Root, wsID)
 		tmpdir = filepath.Join(wsAbs, ".tmp")
 		Throw(os.MkdirAll(tmpdir, 0755))
+
+		// Sweep oversized files this run left behind (graph dumps, build artifacts)
+		// on every exit path — success, fault, or post-terminal kill — so accumulating
+		// workspaces don't fill the disk. Skips .git; see sweepLargeFiles.
+		defer func() {
+			for _, p := range sweepLargeFiles(wsAbs) {
+				uiTicket("🧹", role, ticket, "SWEEP", p)
+			}
+		}()
 	}
 
 	home := os.Getenv("HOME")

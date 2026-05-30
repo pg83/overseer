@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,52 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// maxWorkspaceFileBytes is the size above which a file left in a workspace after an
+// agent run is swept (see sweepLargeFiles). Agents routinely dump multi-GB graph
+// snapshots / build artifacts into their workspace; left around, they fill the disk
+// across the run's accumulating workspaces.
+const maxWorkspaceFileBytes = 100 << 20
+
+// sweepLargeFiles deletes every regular file under wsAbs larger than maxWorkspaceFileBytes,
+// skipping the .git directory (its pack files can legitimately exceed the threshold and
+// the workspace clone is reused across digger attempts). Returns the paths removed.
+// Best-effort: an unreadable tree or a failed unlink is logged by the caller, never fatal.
+func sweepLargeFiles(wsAbs string) []string {
+	var removed []string
+
+	filepath.WalkDir(wsAbs, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+
+			return nil
+		}
+
+		if !d.Type().IsRegular() {
+			return nil
+		}
+
+		info, err := d.Info()
+
+		if err != nil || info.Size() <= maxWorkspaceFileBytes {
+			return nil
+		}
+
+		if os.Remove(path) == nil {
+			removed = append(removed, path)
+		}
+
+		return nil
+	})
+
+	return removed
+}
 
 var wsCounter uint64
 
