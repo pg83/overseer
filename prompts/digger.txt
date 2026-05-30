@@ -14,7 +14,9 @@ The reviewer bounced this ticket back for rework: {{.REWORK}}
 Address the feedback directly on top of your existing commit. The full review is in the REVIEWER_REWORK entry of the LOG above.
 {{end}}
 {{if .MERGE_FAIL_OUTPUT}}
-Your prior squashed commit didn't apply cleanly to current trunk. Fetch trunk's master via TRUNK_PATH, rebase your single commit onto REBASE_TARGET / FETCH_HEAD, resolve conflicts, and re-test before declaring READY again.
+Your prior squashed commit didn't apply cleanly to current trunk. {{.REBASE_TARGET}} is the current trunk HEAD to rebase onto: fetch trunk's master via TRUNK_PATH, rebase your single commit onto it (FETCH_HEAD), resolve conflicts, and re-test before declaring READY again. The failed merge reported:
+
+{{.MERGE_FAIL_OUTPUT}}
 {{end}}
 
 ## Final ritual before declaring READY
