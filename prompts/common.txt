@@ -49,7 +49,7 @@ DEPS: {{.DEPS}}
 WORKSPACE: {{.WORKSPACE}}
 TRUNK_PATH: {{.TRUNK_PATH}}
 TRUNK_HASH: {{.TRUNK_HASH}}
-{{if .PREV_WORKSPACE}}PREV_WORKSPACE: {{.PREV_WORKSPACE}}
+{{if .PREV_WORKSPACE}}{{.PREV_WORKSPACE}} — the filesystem path to your previous attempt on this ticket (the same path as WORKSPACE), with your prior branch and files intact. This run is a continuation: pick up from the state already on disk, do not re-clone or restart from scratch.
 {{end -}}
 {{if .TRIGGER_ROLE}}TRIGGER_ROLE: {{.TRIGGER_ROLE}}
 TRIGGER_VERDICT: {{.TRIGGER_VERDICT}}

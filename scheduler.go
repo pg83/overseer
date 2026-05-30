@@ -368,9 +368,12 @@ func (o *Orchestrator) buildJob(t Ticket, role AgentRole) Job {
 			j.NewWS = true
 		}
 
-		if c := o.arb[t.N]; c.mergeOut != "" {
+		switch c := o.arb[t.N]; c.trigger {
+		case VerdictMergeFail:
 			j.Params["MERGE_FAIL_OUTPUT"] = c.mergeOut
 			j.Params["REBASE_TARGET"] = c.rebaseTarget
+		case VerdictRework:
+			j.Params["REWORK"] = c.detail
 		}
 	case RoleReviewer:
 		j.WS = o.branchWS[t.N]
@@ -718,10 +721,9 @@ func (o *Orchestrator) onArbiter(res AgentResult) {
 			return
 		}
 
-		if c.trigger != VerdictMergeFail {
-			delete(o.arb, n)
-		}
-
+		// Keep o.arb[n] so the next digger Job can read its feedback (the rework
+		// detail via {{.REWORK}}, or the merge-fail rebase context); onDigger clears
+		// it once the digger has run. NoPlan returned above — its context was dropped.
 		o.setPhase(n, PhaseImplement, "arbiter continue (re-implement)")
 	case VerdictEscalate:
 		delete(o.arb, n)

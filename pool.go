@@ -104,7 +104,13 @@ func (o *Orchestrator) jobDigger(job Job) AgentResult {
 	for {
 		// Rebuilt per attempt so PRIOR_RUNS includes the just-failed try.
 		p := o.ticketParams(RoleDigger, job, wsAbs)
-		p["PREV_WORKSPACE"] = wsAbs
+
+		// PREV_WORKSPACE drives the digger's "this is a continuation" block: set it only
+		// when we reused an existing branch workspace (a real prior attempt), not on a
+		// fresh first-dispatch clone, so {{if .PREV_WORKSPACE}} means what it says.
+		if !job.NewWS {
+			p["PREV_WORKSPACE"] = wsAbs
+		}
 
 		res := o.runAgent(RoleDigger, job.Ticket.N, ws, loadPrompt(o.Trunk, RoleDigger, p), envFrom(p))
 		v, _ := lastVerdict(res.Events)
