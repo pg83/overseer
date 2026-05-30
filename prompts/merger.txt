@@ -33,4 +33,9 @@ You may emit a `replan` event if you notice systemic issues (consistent test gap
 Emit exactly one verdict event as your final structured output:
 
 {"type": "verdict", "verdict": "MERGED", "detail": "<short summary>"}
+
+MERGED — the digger's branch merged onto current trunk and the merged tree introduces no new test failures and no regressed metrics. Leave the merge commit on your branch.
+
 {"type": "verdict", "verdict": "MERGE_FAIL", "detail": "<reason>"}
+
+MERGE_FAIL — the merge conflicts unresolvably, or the merged tree regresses a test that was green or a target metric. Name the specific regressed tests / metrics in `detail`.

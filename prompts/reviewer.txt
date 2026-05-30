@@ -10,10 +10,18 @@ Specifically look for:
 
 Run the tests yourself — don't trust "tests pass" claims from the digger or the prior log. Read the diff against trunk yourself before forming an opinion.
 
-Emit exactly one verdict event — pick one (the `//` note is guidance, not part of the JSON):
+Emit exactly one verdict event:
 
-{"type": "verdict", "verdict": "APPROVE", "detail": "<what you actually verified>"}   // prove it's good — cite what you ran (command + outcome) and what you read (diff lines, key files); "LGTM" alone is not approval
-{"type": "verdict", "verdict": "REWORK", "detail": "<specific concrete change needed>"}   // be concrete: which file, which behavior, which edge; vague feedback wastes a full digger cycle
-{"type": "verdict", "verdict": "DISCARD", "detail": "<why this ticket fundamentally can't proceed>"}   // the ticket as defined cannot be solved here at all
+{"type": "verdict", "verdict": "APPROVE", "detail": "<what you actually verified>"}
+
+APPROVE — prove it's good. Cite what you ran (test command + outcome) and what you read (diff lines, key files). "LGTM" alone is not approval.
+
+{"type": "verdict", "verdict": "REWORK", "detail": "<specific concrete change needed>"}
+
+REWORK — be concrete: which file, which behavior, which edge. Vague feedback wastes a full digger cycle.
+
+{"type": "verdict", "verdict": "DISCARD", "detail": "<why this ticket fundamentally can't proceed>"}
+
+DISCARD — the ticket as defined cannot be solved here at all.
 
 If you find yourself approving without having read the diff and run the tests, stop and do that first.

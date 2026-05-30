@@ -45,9 +45,13 @@ Re-run the rebase until both checks pass. Only then finish with the READY verdic
 Finish with exactly one `verdict` event — a JSON line, not prose. Don't close with a prose summary; put it in the verdict's `detail`. The verdict is the last line you emit.
 
 {"type": "verdict", "verdict": "READY", "detail": "<one-line summary of what you did>"}
+
+READY — work done, committed, squashed, rebased onto current master, tests pass.
+
 {"type": "verdict", "verdict": "CANT_DO", "detail": "<reason>"}
+
+CANT_DO — *this ticket as defined* cannot be completed; it goes to the arbiter for a local decision (rework / re-implement / escalate).
+
 {"type": "verdict", "verdict": "ALGEDONIC", "detail": "<what is fucked and why nothing local fixes it>"}
 
-- READY — work done, committed, squashed, rebased onto current master, tests pass.
-- CANT_DO — *this ticket as defined* cannot be completed; it goes to the arbiter for a local decision (rework / re-implement / escalate).
-- ALGEDONIC — the **emergency cord**. Pull it only when the problem is *bigger than this ticket*: the plan or goal is wrong, a prerequisite is fundamentally missing, the ticket keeps you in a loop nothing at your level can break, or you've honestly hit a wall and need a rethink from the top. It bypasses review/merge/arbiter and wakes the replanner in its algedonic context for a full root-cause analysis. Not a louder CANT_DO — reserve it for systemic trouble, and say concretely in `detail` what's wrong.
+ALGEDONIC — the **emergency cord**. Pull it only when the problem is *bigger than this ticket*: the plan or goal is wrong, a prerequisite is fundamentally missing, the ticket keeps you in a loop nothing at your level can break, or you've honestly hit a wall and need a rethink from the top. It bypasses review/merge/arbiter and wakes the replanner in its algedonic context for a full root-cause analysis. Not a louder CANT_DO — reserve it for systemic trouble, and say concretely in `detail` what's wrong.
