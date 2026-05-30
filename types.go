@@ -273,6 +273,13 @@ type Orchestrator struct {
 	branchWS      map[int]string
 	arb           map[int]arbCtx
 	nudges        []ReplanReason
+
+	// ticketGen[n] bumps on every actionable mutation of ticket n (phase / deps). The
+	// replanner deliberates for minutes on a snapshot; replanGen records the gen of each
+	// ticket at the moment that snapshot was handed out, so applyReplannerOps can reject a
+	// batch whose target tickets have since changed (optimistic concurrency, not a lock).
+	ticketGen map[int]int
+	replanGen map[int]int
 	replanChat    []string
 	replanOwned   []int
 	replanPlans   []int

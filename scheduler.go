@@ -30,6 +30,8 @@ func NewOrchestrator(root, trunk string, bindings map[string]HarnessModel, jail,
 		shadow:     map[int]Shadow{},
 		branchWS:   map[int]string{},
 		arb:        map[int]arbCtx{},
+		ticketGen:  map[int]int{},
+		replanGen:  map[int]int{},
 		jobs:       map[AgentRole]chan Job{},
 		Events:     make(chan AgentResult, 1000),
 		StopCtx:    ctx,
@@ -408,6 +410,15 @@ func (o *Orchestrator) dispatchReplanner() {
 
 	o.replanOwned = owned
 	o.replanPlans = o.plannedPlanTickets()
+
+	// Record the generation of every ticket as of this snapshot; applyReplannerOps compares
+	// against it to reject a batch whose targets changed while the replanner deliberated.
+	o.replanGen = map[int]int{}
+
+	for _, t := range o.Tickets {
+		o.replanGen[t.N] = o.ticketGen[t.N]
+	}
+
 	o.replannerBusy = true
 
 	uiSys("📤", "REPLANNER", fmt.Sprintf("%s — %d reason(s), %d escalated, %d plan(s)", ctx, len(reasons), len(owned), len(o.replanPlans)))
@@ -918,29 +929,23 @@ func (o *Orchestrator) afterTerminal(n int, reason, workspace string) {
 // log: new → a fresh PLAN ticket, update → field changes, cancel → DISCARDED. On a
 // schema violation the whole batch is rejected and re-queued as a feedback nudge.
 func (o *Orchestrator) applyReplannerOps(res AgentResult, ops []map[string]any) {
-	// In-flight guard. The replanner deliberates for minutes on a snapshot taken at
-	// dispatch; by now the inner loop may have advanced and re-dispatched a ticket this
-	// batch wants to cancel/update. Applying that stale op is a race — it discards an
-	// almost-done ticket out from under a running agent (and usually spawns a duplicate
-	// replacement). If any op targets a ticket another role is actively working right now
-	// (SCHEDULED and not escalated TO this pass), reject the WHOLE batch atomically — a
-	// partial apply would still create the duplicate — and re-queue so the replanner
-	// re-evaluates next pass against fresh state.
-	owned := map[int]bool{}
-
-	for _, n := range o.replanOwned {
-		owned[n] = true
-	}
-
+	// Stale-snapshot guard (optimistic concurrency). The replanner deliberates for minutes
+	// on the snapshot it was handed; by the time its batch applies, the inner loop may have
+	// advanced a ticket the batch targets. Applying a stale op is a race — it discards an
+	// almost-done ticket out from under a running agent and spawns a duplicate replacement.
+	// So for every ticket a batch touches, require its generation to still match the one in
+	// the replanner's snapshot; if any differs, reject the WHOLE batch atomically (a partial
+	// apply would still create the duplicate) and re-queue so the next pass works fresh
+	// state. Tickets escalated TO this pass don't change between snapshot and apply (the
+	// pass holds them), so their gen matches and re-scoping them is unaffected.
 	for _, ev := range ops {
-		if op, _ := ev["op"].(string); op == "cancel" || op == "update" {
-			n := jsonInt(ev["n"])
-
-			if o.shadow[n] == ShadowScheduled && !owned[n] {
-				uiSys("⏳", "REPLAN_DEFERRED", fmt.Sprintf("op=%s T-%d — ticket is in-flight (another role is working it); batch deferred to next pass", op, n))
+		for _, n := range opAffectedTickets(ev) {
+			if o.ticketGen[n] != o.replanGen[n] {
+				op, _ := ev["op"].(string)
+				uiSys("⏳", "REPLAN_STALE", fmt.Sprintf("op=%s T-%d — ticket changed since your snapshot; batch deferred to next pass", op, n))
 				o.nudges = append(o.nudges, ReplanReason{
 					Source: RoleReplanner,
-					Reason: fmt.Sprintf("your previous batch tried to %s T-%d, but at that moment another role was actively working that ticket, so NOTHING from the batch was applied. Re-read T-%d's current state in the DB and re-issue only the ops still warranted.", op, n, n),
+					Reason: fmt.Sprintf("your previous batch tried to %s T-%d, but that ticket changed (another role advanced it) after the snapshot you planned against, so NOTHING from the batch was applied. Re-read the current ticket DB and re-issue only the ops still warranted.", op, n),
 				})
 
 				return

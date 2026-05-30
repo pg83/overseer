@@ -440,6 +440,20 @@ func hasJSONInUnparsed(events []map[string]any) bool {
 	return false
 }
 
+// opAffectedTickets returns the existing tickets whose prior state a replanner op
+// depends on — the ones whose generation must still match the planning snapshot. `new`
+// only creates (its number didn't exist in the snapshot), so it affects nothing existing.
+func opAffectedTickets(ev map[string]any) []int {
+	switch op, _ := ev["op"].(string); op {
+	case "cancel", "update":
+		return []int{jsonInt(ev["n"])}
+	case "replace":
+		return []int{jsonInt(ev["from"]), jsonInt(ev["to"])}
+	}
+
+	return nil
+}
+
 // applyTaskOp applies one replanner `task` event to a ticket-list sandbox, throwing
 // on any schema violation. Ops apply in emission order; the caller validates the
 // cumulative result before committing.

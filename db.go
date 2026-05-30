@@ -198,6 +198,14 @@ func (o *Orchestrator) appendLog(ev LogEvent) {
 	Throw2(f.Write(append(b, '\n')))
 
 	o.Tickets = applyLogEvent(o.Tickets, ev)
+
+	// Bump the ticket's generation on an actionable mutation (phase transition or deps
+	// change) so the replanner's optimistic-concurrency check can detect a stale batch.
+	// Plain history records (event / ws / usage) don't change what a replan decision
+	// hinges on, so they don't bump.
+	if k, _ := ev["k"].(string); k == "phase" || k == "update" {
+		o.ticketGen[jsonInt(ev["n"])]++
+	}
 }
 
 // setPhase persists a phase transition and mirrors a human-readable line into the
