@@ -13,7 +13,7 @@ import (
 func main() {
 	exc := Try(func() {
 		if len(os.Args) < 2 {
-			ThrowFmt("usage: overseer {run|plan|jail} [args...]")
+			ThrowFmt("usage: overseer {run|plan|jail|subreaper} [args...]")
 		}
 
 		sub := os.Args[1]
@@ -26,8 +26,10 @@ func main() {
 			planMain(args)
 		case "jail":
 			jailMain(args)
+		case "subreaper":
+			subreaperMain(args)
 		default:
-			ThrowFmt("unknown subcommand %q (expected: run, plan, jail)", sub)
+			ThrowFmt("unknown subcommand %q (expected: run, plan, jail, subreaper)", sub)
 		}
 	})
 
@@ -78,6 +80,7 @@ func runMain(argv []string) {
 
 	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
 	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
+	noSubreaper := fs.Bool("no-subreaper", false, "do not wrap agents in `overseer subreaper` (the reaping mini-init that kills leaked agent subprocesses); independent of --no-jail")
 	fs.Var(simSpec{}, "sim", "simulator: synthesize agent verdicts instead of running real harnesses (no tokens, no real workspaces, no trunk writes). Bare --sim or --sim=0 runs open-ended; --sim=N caps the project at N tickets so it winds down and exercises stop conditions")
 
 	var extraRW []string
@@ -136,8 +139,8 @@ func runMain(argv []string) {
 
 	jail, jailDescr := resolveJail(*jailBin, *noJail)
 
-	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s bindings=[%s] jail=%s",
-		*root, *trunk, formatBindings(bindings), jailDescr))
+	uiSys("🟢", "BOOT", fmt.Sprintf("root=%s trunk=%s bindings=[%s] jail=%s subreaper=%t",
+		*root, *trunk, formatBindings(bindings), jailDescr, !*noSubreaper))
 
 	if simulate {
 		scope := "open-ended"
@@ -151,6 +154,7 @@ func runMain(argv []string) {
 
 	o := NewOrchestrator(*root, *trunk, bindings, jail, extraRW)
 	o.bootReplan = strings.TrimSpace(*replanDirective)
+	o.Subreaper = !*noSubreaper
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
@@ -159,6 +163,11 @@ func runMain(argv []string) {
 		s := <-sigs
 		uiSys("🛑", "SIGNAL", "received "+s.String()+" — stopping")
 		o.StopCancel()
+
+		// Agents each run in their own process group (Setpgid), so a terminal Ctrl-C
+		// doesn't reach them through ours — group-kill the in-flight ones explicitly so
+		// they don't keep running (and billing) past shutdown.
+		killAllAgents()
 	}()
 
 	if strings.EqualFold(*uiMode, "tui") {

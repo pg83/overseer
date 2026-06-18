@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"text/template"
 	"time"
 )
@@ -298,9 +300,15 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 	model := hm.resolveModel(role)
 
 	bin, args := wrapJail(o.Jail, rwArgs, harness.Bin(), harness.Args(model, wsAbs))
+	bin, args = wrapSubreaper(o.Subreaper, bin, args)
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(stdin)
+
+	// Own process group, so a force-kill (the liveness guard below) can signal the
+	// whole group — jail stages, harness, and its children — not just the outer
+	// process. Setpgid makes pgid == pid, so killAgentProcess targets -pid.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if wsAbs != "" {
 		cmd.Dir = wsAbs
@@ -362,6 +370,9 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 
 	Throw(cmd.Start())
 
+	registerAgent(cmd.Process.Pid)
+	defer unregisterAgent(cmd.Process.Pid)
+
 	var finalText strings.Builder
 	var rawStream bytes.Buffer
 	var streamFault streamErr
@@ -398,7 +409,7 @@ func (o *Orchestrator) runAgentOnce(role AgentRole, ticket int, wsID, stdin stri
 
 		if harness.IsDone(ev) {
 			if killTimer == nil {
-				killTimer = time.AfterFunc(harnessExitGrace, func() { _ = cmd.Process.Kill() })
+				killTimer = time.AfterFunc(harnessExitGrace, func() { killAgentProcess(cmd) })
 			} else {
 				killTimer.Reset(harnessExitGrace)
 			}
@@ -461,6 +472,65 @@ func (s *streamErr) record(msg string) {
 	if !s.set {
 		s.set = true
 		s.msg = msg
+	}
+}
+
+// liveAgents tracks the group-leader pid of every in-flight agent invocation.
+// Because each agent now runs in its OWN process group (Setpgid), a terminal
+// Ctrl-C no longer reaches the harnesses through the orchestrator's group — so on
+// shutdown we group-kill them explicitly. The map holds OS pids, not ticket state,
+// so its own small lock is orthogonal to the coordinator's no-lock invariant.
+var (
+	liveAgentsMu sync.Mutex
+	liveAgents   = map[int]bool{}
+)
+
+func registerAgent(pid int) {
+	liveAgentsMu.Lock()
+	liveAgents[pid] = true
+	liveAgentsMu.Unlock()
+}
+
+func unregisterAgent(pid int) {
+	liveAgentsMu.Lock()
+	delete(liveAgents, pid)
+	liveAgentsMu.Unlock()
+}
+
+// killAllAgents group-kills every in-flight agent invocation. Called from the
+// orchestrator's shutdown path (SIGINT / SIGTERM) so in-flight harnesses are torn
+// down instead of outliving the run. Each group-kill also takes down that agent's
+// subreaper; setsid-detached strays can survive (same accepted gap as the liveness
+// guard's force path), but the common subtree dies.
+func killAllAgents() {
+	liveAgentsMu.Lock()
+	pids := make([]int, 0, len(liveAgents))
+
+	for pid := range liveAgents {
+		pids = append(pids, pid)
+	}
+
+	liveAgentsMu.Unlock()
+
+	for _, pid := range pids {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}
+}
+
+// killAgentProcess force-kills a running agent invocation. The command is started
+// as its own process-group leader (Setpgid in runAgentOnce), so signalling the
+// negative pid takes down the entire group — the subreaper, jail stages, the
+// harness, and its non-detached children — in one shot rather than only the outer
+// process. setsid-detached daemons can still escape the group; on a natural exit
+// the subreaper's /proc-walk catches those, but this is the force path. Falls back
+// to a single-process kill if the group signal fails.
+func killAgentProcess(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
 	}
 }
 
