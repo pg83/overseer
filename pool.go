@@ -232,7 +232,7 @@ func (o *Orchestrator) jobLead(job Job) AgentResult {
 // is serial (pool size 1) and is the slowest stage; when the change can be judged
 // deterministically there is no need to spend an agent on it. So when the trunk
 // ships an executable ./acceptance AND the digger's branch merges into trunk with
-// no conflicts, it runs `./acceptance <trunk> <digger-workspace>` from the trunk:
+// no conflicts, it runs `./acceptance <trunk> <merged-tree>` from the trunk:
 //
 //   - exit 0 → land directly. The prepared merge commit already sits on mergerWS's
 //     branch, so a synthetic MERGED is returned and the coordinator ff-merges it
@@ -240,8 +240,13 @@ func (o *Orchestrator) jobLead(job Job) AgentResult {
 //   - any other outcome (no script, merge conflict, non-zero exit) → mergerWS is
 //     left as a clean trunk clone and the caller falls through to the merger agent.
 //
-// The script's combined stdout+stderr is posted to the team chat as one message.
-// Disabled under --sim (no real git / scripts in a simulated run).
+// The NEW tree handed to acceptance is the MERGED worktree (current trunk + the
+// digger's branch), NOT the digger's standalone workspace: that workspace was
+// cloned off an older trunk and, judged alone, looks like a regression whenever
+// trunk has advanced under it — but what actually lands is the merge. So acceptance
+// must judge the merge, mirroring exactly what the merger agent compares (trunk
+// baseline vs merged tree). The script's combined stdout+stderr is posted to the
+// team chat as one message. Disabled under --sim (no real git / scripts).
 func (o *Orchestrator) mergerFastGate(ticket int, mergerWS, mergerWorktree, diggerBranch, diggerWorktree string) (AgentResult, bool) {
 	if simulate {
 		return AgentResult{}, false
@@ -261,10 +266,12 @@ func (o *Orchestrator) mergerFastGate(ticket int, mergerWS, mergerWorktree, digg
 		return AgentResult{}, false
 	}
 
-	acceptArgs := []string{acceptancePath(o.Trunk), o.Trunk, diggerWorktree}
+	// Judge the MERGED tree (the actual landing candidate), not the digger's
+	// possibly-stale standalone workspace.
+	acceptArgs := []string{acceptancePath(o.Trunk), o.Trunk, mergerWorktree}
 	uiTicket("🔧", RoleMerger, ticket, "GATE_EXEC", strings.Join(acceptArgs, " "))
 
-	out, code := runAcceptance(o.Trunk, diggerWorktree)
+	out, code := runAcceptance(o.Trunk, mergerWorktree)
 	o.noteMessage(RoleMerger, ticket, mergerGateMessage(code, out))
 
 	verdict := VerdictMerged
