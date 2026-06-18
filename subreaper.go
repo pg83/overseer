@@ -3,155 +3,75 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// Built-in `overseer subreaper` — a mini-init that wraps one agent invocation so
-// nothing it spawns can leak. The jail gives the harness a fresh user+mount
-// namespace but NOT a PID namespace, so a background process the harness forks
-// (a dev server, a language server, a test daemon) survives the harness and
-// reparents to init, accumulating across a long run. The subreaper sits as the
-// immediate parent of the wrapped command and:
-//
-//   - marks itself a child subreaper (PR_SET_CHILD_SUBREAPER), so every orphaned
-//     descendant — including setsid-detached daemons — reparents to it instead of
-//     to init;
-//   - reaps those orphans as they exit, keeping the process table free of zombies;
-//   - when the tracked (direct) child exits, SIGKILLs whatever is left of the
-//     subtree before propagating the child's exit code.
-//
-// CLI: overseer subreaper <cmd> [args...] — everything after the keyword is the
-// command. No `--` separator: a nested jail `--` belongs to the jail and is
-// passed straight through. It is the OUTERMOST wrapper — the final agent exec is
-//   overseer subreaper  overseer jail --rw=… --  <harness> <harness-args…>
-// composed by wrapSubreaper(wrapJail(...)).
-func subreaperMain(args []string) {
-	if len(args) == 0 {
-		ThrowFmt("subreaper: missing command (usage: subreaper CMD [ARGS...])")
-	}
+// The orchestrator process makes ITSELF a "child subreaper" (PR_SET_CHILD_SUBREAPER)
+// at startup, so every process spawned anywhere beneath it — a harness, something the
+// harness forks, a daemon that double-forks to detach — reparents to the orchestrator
+// instead of to init when its own parent exits. The jail gives each harness a fresh
+// user+mount namespace but NOT a PID namespace, so without this such strays escape to
+// init and leak past the run. On exit (normal, GOALS_ACHIEVED, signal, or fatal) the
+// orchestrator SIGKILLs its whole descendant subtree, so nothing it ever started
+// outlives it. No per-agent wrappers, process groups, or registries — one flag on the
+// parent and one sweep at the end.
 
+// becomeChildSubreaper marks this process so orphaned descendants reparent to it
+// rather than to init. Best-effort: a failure only weakens the exit-time sweep (some
+// re-parented grandchildren may escape), so it warns rather than aborting.
+func becomeChildSubreaper() {
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, uintptr(1), 0, 0, 0); err != nil {
-		ThrowFmt("subreaper: PR_SET_CHILD_SUBREAPER: %v", err)
-	}
-
-	bin, err := exec.LookPath(args[0])
-
-	if err != nil {
-		ThrowFmt("subreaper: lookup %s: %v", args[0], err)
-	}
-
-	cmd := exec.Command(bin, args[1:]...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-
-	// Backstop: if the subreaper itself dies, drag the tracked child down too.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
-
-	Throw(cmd.Start())
-
-	child := cmd.Process.Pid
-
-	// Forward graceful termination signals to the tracked child (best-effort).
-	// SIGKILL can't be caught, so an orchestrator group-kill bypasses this and
-	// takes us down with the group — that's the intended force path.
-	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-
-	go func() {
-		for s := range sigs {
-			if sg, ok := s.(syscall.Signal); ok {
-				_ = syscall.Kill(child, sg)
-			}
-		}
-	}()
-
-	code := subreaperWait(child)
-	subreaperKillTree()
-
-	os.Exit(code)
-}
-
-// subreaperWait blocks reaping ANY child until the tracked child exits, then
-// returns its exit code (128+signal when it was killed by a signal). Orphan
-// zombies reaped along the way are what keeps the process table clean.
-func subreaperWait(child int) int {
-	for {
-		var ws syscall.WaitStatus
-
-		pid, err := syscall.Wait4(-1, &ws, 0, nil)
-
-		if err == syscall.EINTR {
-			continue
-		}
-
-		// No children left at all — the tracked child is already gone.
-		if err == syscall.ECHILD {
-			return 0
-		}
-
-		if err != nil {
-			return 1
-		}
-
-		if pid == child {
-			return waitStatusCode(ws)
-		}
-
-		// Reaped an orphan zombie — keep waiting for the tracked child.
+		uiSys("⚠️", "SUBREAPER", "PR_SET_CHILD_SUBREAPER failed: "+err.Error())
 	}
 }
 
-func waitStatusCode(ws syscall.WaitStatus) int {
-	switch {
-	case ws.Exited():
-		return ws.ExitStatus()
-	case ws.Signaled():
-		return 128 + int(ws.Signal())
-	}
-
-	return 0
-}
-
-// subreaperKillTree SIGKILLs every remaining descendant after the tracked child
-// has exited. Because we are the child subreaper, any orphan (including a
-// setsid-detached daemon that left the original process group) reparents to us —
-// so scanning /proc for processes whose ppid is us, killing them, and looping
-// until none remain catches the whole subtree, not merely the process group. A
-// blocking wait between scans drains the just-killed processes (their own
-// children then reparent to us and surface on the next scan) without busy-spin.
-func subreaperKillTree() {
+// killAllDescendants SIGKILLs every process still parented to us and reaps it, looping
+// until none remain. Because we are the child subreaper, a grandchild orphaned when its
+// own parent dies reparents to us and shows up on the next scan — so this tears down the
+// entire subtree (setsid-detached daemons included), not just direct children. Bounded
+// (~4s) so a stuck uninterruptible process can't hang shutdown forever.
+func killAllDescendants() {
 	self := os.Getpid()
 
-	for {
+	for round := 0; round < 200; round++ {
 		kids := childPids(self)
+
+		if len(kids) == 0 {
+			reapZombies()
+
+			return
+		}
 
 		for _, pid := range kids {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 
-		var ws syscall.WaitStatus
-
-		_, err := syscall.Wait4(-1, &ws, 0, nil)
-
-		if err == syscall.ECHILD {
-			return
-		}
-
-		// EINTR or a reaped child: loop and re-scan for newly-reparented orphans.
+		reapZombies()
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
-// childPids returns the pids of every process whose parent is `parent`, read
-// straight from /proc. Best-effort — a process that exits mid-scan just drops out.
+// reapZombies reaps every already-dead child without blocking, so killed processes
+// leave the table (and their own children reparent to us for the next sweep round).
+func reapZombies() {
+	for {
+		var ws syscall.WaitStatus
+
+		pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
+
+		if pid <= 0 || err != nil {
+			return
+		}
+	}
+}
+
+// childPids returns the pids of every process whose parent is `parent`, read straight
+// from /proc. Best-effort — a process that exits mid-scan just drops out.
 func childPids(parent int) []int {
 	entries, err := os.ReadDir("/proc")
 
@@ -176,9 +96,9 @@ func childPids(parent int) []int {
 	return out
 }
 
-// ppidOf reads the parent pid out of /proc/<pid>/stat. The comm field (field 2)
-// is wrapped in parens and may itself contain spaces and ')', so the fields after
-// it are located from the LAST ')': state, then ppid. -1 if unreadable.
+// ppidOf reads the parent pid out of /proc/<pid>/stat. The comm field (field 2) is
+// wrapped in parens and may itself contain spaces and ')', so the fields after it are
+// located from the LAST ')': state, then ppid. -1 if unreadable.
 func ppidOf(pid int) int {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 
@@ -206,39 +126,4 @@ func ppidOf(pid int) int {
 	}
 
 	return ppid
-}
-
-var (
-	selfExeOnce sync.Once
-	selfExePath string
-)
-
-// selfExe is the absolute path to this overseer binary, cached. Used to compose
-// the `overseer subreaper …` / `overseer jail …` self-recursing wrappers.
-func selfExe() string {
-	selfExeOnce.Do(func() {
-		p, err := os.Executable()
-
-		if err != nil {
-			ThrowFmt("subreaper: os.Executable: %v", err)
-		}
-
-		selfExePath = p
-	})
-
-	return selfExePath
-}
-
-// wrapSubreaper makes the agent exec recurse through `overseer subreaper` when
-// enabled, so the harness runs under a reaping mini-init. It is the outermost
-// layer — call it on the (bin, args) wrapJail already produced. A no-op when
-// disabled (--no-subreaper).
-func wrapSubreaper(enabled bool, bin string, args []string) (string, []string) {
-	if !enabled {
-		return bin, args
-	}
-
-	out := append([]string{"subreaper", bin}, args...)
-
-	return selfExe(), out
 }

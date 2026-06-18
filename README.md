@@ -7,7 +7,8 @@ The framework itself is one file (`harness.go`) declaring the `Harness` interfac
 - `overseer run` — full code-modification orchestrator. A single coordinator goroutine drives a git working tree toward `GOALS.md` using six roles (lead / tasker / digger / reviewer / merger / arbiter), each served by a fixed-size pool of harness workers. `--ui=log` (default) streams the classic colored lines; `--ui=tui` runs an interactive tcell front-end (tabs: log / agents / tasks / stats; ←/→ switch, ↑/↓ move, enter opens a detail log, q quits). Inspection sub-commands operate on a finished/running root: `overseer run cost [--ticket N] <root>` (dollar cost from the run logs) and `overseer run tickets --path <tasks.events.jsonl>` (open-ticket dump).
 - `overseer plan` — synchronous two-agent debate. PUPA (solver) and LUPA (critic) iterate over a free-form question on stdin until LUPA accepts. Output: prose plan / forecast / analysis / code — whatever the question called for.
 - `overseer jail` — the sandbox itself. Used implicitly by `run` and `plan`; also callable standalone like `overseer jail --rw=/tmp -- <cmd>`.
-- `overseer subreaper` — a reaping mini-init that wraps every agent invocation (outside the jail) so background processes a harness leaves behind can't leak. Marks itself a child subreaper, reaps orphaned descendants, and kills whatever is left of the subtree when the tracked process exits. Default for both `run` and `plan` (`--no-subreaper` to disable); also callable standalone like `overseer subreaper <cmd> [args...]`.
+
+`run` and `plan` make their own process a Linux **child subreaper** (`PR_SET_CHILD_SUBREAPER`) at startup, so any process a harness spawns or detaches reparents to the orchestrator instead of to init; on exit (normal, `GOALS_ACHIEVED`, signal, or fatal) the orchestrator `SIGKILL`s its entire descendant subtree, so nothing it ever started outlives it. See "Process containment" below.
 
 Adding a new orchestrator = write another `.go` against `Harness`. Adding a new backend = implement `Harness` in one more file; `SelectHarness` in `harness.go` picks the impl by basename of the binary.
 
@@ -269,7 +270,6 @@ Each flag takes `<bin>` or `<bin>:<model>`. The binary path is PATH-resolved; th
 |------|---------|
 | `--jail-bin <bin>` | External jail binary, PATH-resolved. Same CLI shape as built-in. |
 | `--no-jail` | Run harnesses directly, no sandbox. Trusted environments only. |
-| `--no-subreaper` | Don't wrap agents in `overseer subreaper`. Leaked harness subprocesses are then no longer reaped/killed on exit. Independent of `--no-jail`. |
 | `--rw <PATH>` | Extra path to bind read-write inside the jail. Repeatable. Stacks on top of workspace / harness defaults / per-task TMPDIR. Ignored with `--no-jail`. |
 
 If neither `--jail-bin` nor `--no-jail` is given, the built-in `overseer jail` is used (`os.Executable() + " jail"`).
@@ -397,25 +397,14 @@ Internals: see `jail.go`. Two re-execs (`top → --__stage=mount → --__stage=d
 
 ---
 
-## `overseer subreaper` — leak-proof agent supervision
+## Process containment — child subreaper
 
-The jail gives each harness a fresh user+mount namespace but **not** a PID namespace, so a background process the harness forks — a dev server, a language server, a test daemon, a runaway tool — outlives the harness, reparents to init (or the orchestrator), and accumulates across a long run. `overseer subreaper` closes that gap. It is the **outermost** wrapper of every agent exec (`subreaper → jail → harness`, composed by `wrapSubreaper(wrapJail(...))`), sitting as the immediate parent of one invocation:
+The jail gives each harness a fresh user+mount namespace but **not** a PID namespace, so a background process the harness forks — a dev server, a language server, a test daemon, a runaway tool — can outlive the harness, reparent to init, and accumulate across a long run. The orchestrator (`run` and `plan`) closes that gap with one mechanism on its own process, not per-agent wrappers:
 
-- **`PR_SET_CHILD_SUBREAPER`** — every orphaned descendant (including `setsid`-detached daemons that left the original process group) reparents to the subreaper instead of to init.
-- **Reaps** those orphans as they exit, so no zombies pile up.
-- On the **tracked child's exit**, tears down whatever is left of the subtree, then propagates the child's exit code (`128+signal` when it was signalled) so `Harness.ClassifyFault` still sees the real result.
+- At startup it calls `PR_SET_CHILD_SUBREAPER` (`becomeChildSubreaper`), so every orphaned descendant — including `setsid`-detached daemons — reparents to the orchestrator instead of to init.
+- On **every** exit path — normal, `GOALS_ACHIEVED`, `SIGINT`/`SIGTERM`, or `fatal()` — it runs `killAllDescendants`: walk `/proc` for any process whose parent is the orchestrator, `SIGKILL` it, reap, and loop until none remain. Because orphans keep reparenting up, this brings down the *entire* subtree, not just direct children. It is wired as a `defer` in `runMain`/`planMain` (covers normal, signal, and panic-unwind) and called explicitly in `fatal()` (which `os.Exit`s past defers). Bounded (~4s) so a stuck process can't hang shutdown.
 
-Two teardown paths, by who initiates the kill:
-
-- **Natural exit** (the common case): the subreaper itself does the thorough cleanup — it walks `/proc` for any process whose parent is the subreaper, `SIGKILL`s them, and loops until `wait4` returns `ECHILD`. Because orphans keep reparenting to it, this catches the *entire* subtree, not just one process group.
-- **Force-kill** (the orchestrator's liveness guard, after a harness hangs past its terminal event): each agent runs as its own process-group leader (`Setpgid`), so the orchestrator signals the whole group at once (`kill(-pgid, SIGKILL)`) — subreaper, jail stages, harness, and its non-detached children together. A `setsid`-detached daemon can still escape this path; the natural-exit `/proc`-walk is the thorough one.
-
-CLI shape: `overseer subreaper <cmd> [args...]` — everything after the keyword is the command. No `--` separator (a nested jail `--` belongs to the jail and is passed straight through). Internals: see `subreaper.go`.
-
-```sh
-overseer subreaper sleep 10        # reaps/kills anything `sleep` leaves behind on exit
-overseer subreaper overseer jail --rw=/tmp -- <cmd>   # the shape run/plan compose
-```
+That's the whole design: one flag on the parent, one sweep at the end. No per-agent process groups, no live-process registry, no signal forwarding. Individual harness invocations are still force-killed by the liveness guard if they hang past their terminal stream event (`cmd.Process.Kill()`); anything they leaked behind is caught by the exit-time sweep. Internals: see `subreaper.go`.
 
 ---
 

@@ -36,7 +36,6 @@ type planAgent struct {
 	jail      []string
 	extraRW   []string
 	cwd       string
-	subreaper bool
 }
 
 func planMain(args []string) {
@@ -46,7 +45,6 @@ func planMain(args []string) {
 	lupaSpec := fs.String("lupa-harness", "", "harness:model for LUPA (critic). Required.")
 	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
 	noJail := fs.Bool("no-jail", false, "run harness directly with no jail wrapper (trusted env only)")
-	noSubreaper := fs.Bool("no-subreaper", false, "do not wrap agents in `overseer subreaper` (the reaping mini-init that kills leaked agent subprocesses); independent of --no-jail")
 	outPath := fs.String("out", "", "optional path: write the accepted final PUPA result (no marker line) here")
 	maxRounds := fs.Int("max-rounds", 0, "stop after N rounds (one round = PUPA turn + LUPA turn); 0 = no cap")
 
@@ -93,10 +91,13 @@ func planMain(args []string) {
 	fmt.Fprintf(os.Stderr, "🟢 plan: pupa=%s lupa=%s cwd=%s jail=%s max_rounds=%d\n",
 		planBindingDescr(pupaBinding), planBindingDescr(lupaBinding), cwd, jailDescr, *maxRounds)
 
-	subreaper := !*noSubreaper
+	// Become a child subreaper and kill the whole agent subtree on the way out, so
+	// nothing PUPA/LUPA spawned (or detached) outlives this command.
+	becomeChildSubreaper()
+	defer killAllDescendants()
 
-	pupa := &planAgent{name: "PUPA", role: RolePupa, binding: pupaBinding, jail: jail, extraRW: extraRW, cwd: cwd, subreaper: subreaper}
-	lupa := &planAgent{name: "LUPA", role: RoleLupa, binding: lupaBinding, jail: jail, extraRW: extraRW, cwd: cwd, subreaper: subreaper}
+	pupa := &planAgent{name: "PUPA", role: RolePupa, binding: pupaBinding, jail: jail, extraRW: extraRW, cwd: cwd}
+	lupa := &planAgent{name: "LUPA", role: RoleLupa, binding: lupaBinding, jail: jail, extraRW: extraRW, cwd: cwd}
 
 	pupaPrompt := strings.TrimRight(withRepoOverride(cwd, RolePupa, loadEmbedded("prompts/pupa.txt")), "\n")
 	lupaPrompt := strings.TrimRight(withRepoOverride(cwd, RoleLupa, loadEmbedded("prompts/lupa.txt")), "\n")
@@ -224,7 +225,6 @@ func (a *planAgent) turnOnce(prompt string) (string, bool, *agentFault) {
 	}
 
 	bin, fullArgs := wrapJail(a.jail, rwArgs, harness.Bin(), args)
-	bin, fullArgs = wrapSubreaper(a.subreaper, bin, fullArgs)
 
 	fmt.Fprintf(os.Stderr, "🔧 %s exec: %s %s (prompt %d bytes, session=%q)\n",
 		a.name, bin, strings.Join(fullArgs, " "), len(prompt), a.sessionID)

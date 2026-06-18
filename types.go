@@ -259,11 +259,6 @@ type Orchestrator struct {
 	Jail      []string
 	ExtraRW   []string
 
-	// Subreaper wraps every agent invocation in `overseer subreaper` so leaked
-	// harness subprocesses are reaped and killed when the run ends (--no-subreaper
-	// to disable). Independent of the jail.
-	Subreaper bool
-
 	// Boot directive from the operator (--replan): when non-empty the coordinator
 	// queues it as a mandatory operator nudge for the first lead pass.
 	bootReplan string
