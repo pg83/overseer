@@ -154,6 +154,67 @@ func FfMergeBranch(trunk, branch string) (bool, string) {
 	return true, string(out)
 }
 
+// acceptancePath is the optional operator-supplied fast-merge gate at the trunk
+// root. When present and executable, the merger pool runs it before the LLM
+// merger (see mergerFastGate).
+func acceptancePath(trunk string) string {
+	return filepath.Join(trunk, "acceptance")
+}
+
+// hasAcceptanceGate reports whether the trunk ships an executable ./acceptance.
+func hasAcceptanceGate(trunk string) bool {
+	info, err := os.Stat(acceptancePath(trunk))
+
+	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+}
+
+// MergeBranchInto fetches `branch` from srcWorktree and `git merge --no-ff`s it
+// into the branch currently checked out in worktree. Returns true on a clean
+// merge (leaving the merge commit in place), false on conflict (after aborting,
+// so the worktree is left clean). Mirrors what the merger agent does mechanically.
+func MergeBranchInto(worktree, srcWorktree, branch string) bool {
+	if simulate {
+		return true
+	}
+
+	fetch := exec.Command("git", "-C", worktree, "fetch", srcWorktree, branch)
+	fetch.Stdout = os.Stderr
+	fetch.Stderr = os.Stderr
+
+	if fetch.Run() != nil {
+		return false
+	}
+
+	merge := exec.Command("git", "-C", worktree, "merge", "--no-ff", "-m", "merge "+branch+" (acceptance gate)", "FETCH_HEAD")
+	out, err := merge.CombinedOutput()
+	os.Stderr.Write(out)
+
+	if err != nil {
+		_ = exec.Command("git", "-C", worktree, "merge", "--abort").Run()
+
+		return false
+	}
+
+	return true
+}
+
+// ResetHardToOrigin discards everything in worktree back to the clone base
+// (origin/HEAD, falling back to origin/master) — used to undo a gate merge that
+// acceptance rejected so the merger agent starts from a clean trunk clone.
+func ResetHardToOrigin(worktree string) {
+	if simulate {
+		return
+	}
+
+	for _, ref := range []string{"origin/HEAD", "origin/master"} {
+		cmd := exec.Command("git", "-C", worktree, "reset", "--hard", ref)
+
+		if cmd.Run() == nil {
+			return
+		}
+	}
+}
+
 func CurrentTrunkHash(trunk string) string {
 	cmd := exec.Command("git", "-C", trunk, "rev-parse", "HEAD")
 	out, err := cmd.Output()

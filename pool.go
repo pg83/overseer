@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -167,10 +168,19 @@ func (o *Orchestrator) jobMerger(job Job) AgentResult {
 	diggerWS := job.WS
 	mergerWS := NewWorkspace(o.Root, o.Trunk)
 
-	p := o.ticketParams(RoleMerger, job, wsPath(o.Root, mergerWS))
-	p["DIGGER_BRANCH"] = "ovs/" + diggerWS
-	p["DIGGER_WORKTREE"] = wsPath(o.Root, diggerWS)
-	p["MERGER_WORKTREE"] = wsPath(o.Root, mergerWS)
+	diggerBranch := "ovs/" + diggerWS
+	diggerWorktree := wsPath(o.Root, diggerWS)
+	mergerWorktree := wsPath(o.Root, mergerWS)
+
+	// Fast gate: when it lands the change deterministically, skip the LLM merger.
+	if res, ok := o.mergerFastGate(job.Ticket.N, mergerWS, mergerWorktree, diggerBranch, diggerWorktree); ok {
+		return res
+	}
+
+	p := o.ticketParams(RoleMerger, job, mergerWorktree)
+	p["DIGGER_BRANCH"] = diggerBranch
+	p["DIGGER_WORKTREE"] = diggerWorktree
+	p["MERGER_WORKTREE"] = mergerWorktree
 	p["TRUNK_HEAD"] = p["TRUNK_HASH"]
 
 	stdin, env := loadPrompt(o.Trunk, RoleMerger, p), envFrom(p)
@@ -216,6 +226,94 @@ func (o *Orchestrator) jobLead(job Job) AgentResult {
 
 		uiSys("🔄", "LEAD_RESPAWN", "unparsed JSON — retrying for clean output")
 	}
+}
+
+// mergerFastGate is the bottleneck-buster in front of the LLM merger. The merger
+// is serial (pool size 1) and is the slowest stage; when the change can be judged
+// deterministically there is no need to spend an agent on it. So when the trunk
+// ships an executable ./acceptance AND the digger's branch merges into trunk with
+// no conflicts, it runs `./acceptance <trunk> <digger-workspace>` from the trunk:
+//
+//   - exit 0 → land directly. The prepared merge commit already sits on mergerWS's
+//     branch, so a synthetic MERGED is returned and the coordinator ff-merges it
+//     into trunk exactly as it would an agent's result — the agent is skipped.
+//   - any other outcome (no script, merge conflict, non-zero exit) → mergerWS is
+//     left as a clean trunk clone and the caller falls through to the merger agent.
+//
+// The script's combined stdout+stderr is posted to the team chat as one message.
+// Disabled under --sim (no real git / scripts in a simulated run).
+func (o *Orchestrator) mergerFastGate(ticket int, mergerWS, mergerWorktree, diggerBranch, diggerWorktree string) (AgentResult, bool) {
+	if simulate || !hasAcceptanceGate(o.Trunk) {
+		return AgentResult{}, false
+	}
+
+	if !MergeBranchInto(mergerWorktree, diggerWorktree, diggerBranch) {
+		uiTicket("🚦", RoleMerger, ticket, "GATE_SKIP", "digger branch does not merge cleanly — handing to merger agent")
+
+		return AgentResult{}, false
+	}
+
+	out, code := runAcceptance(o.Trunk, diggerWorktree)
+	o.noteMessage(RoleMerger, ticket, mergerGateMessage(code, out))
+
+	if code == 0 {
+		uiTicket("✅", RoleMerger, ticket, "GATE_PASS", "acceptance accepted — landing without the merger agent")
+
+		return AgentResult{
+			Role:      RoleMerger,
+			Ticket:    ticket,
+			Workspace: mergerWS,
+			Events:    []map[string]any{{"type": "verdict", "verdict": string(VerdictMerged), "detail": "fast acceptance gate (exit 0) — landed without merger agent"}},
+		}, true
+	}
+
+	// Acceptance rejected the change: undo the gate merge so the agent starts from
+	// a clean trunk clone, then fall through to it.
+	ResetHardToOrigin(mergerWorktree)
+	uiTicket("🚦", RoleMerger, ticket, "GATE_FAIL", fmt.Sprintf("acceptance exit=%d — handing to merger agent", code))
+
+	return AgentResult{}, false
+}
+
+// runAcceptance runs the trunk's ./acceptance gate from the trunk, passing the old
+// (trunk) and new (digger workspace) tree paths. Returns its combined stdout+stderr
+// and exit code (-1 if it couldn't be launched).
+func runAcceptance(trunk, newWorkspace string) (string, int) {
+	cmd := exec.Command(acceptancePath(trunk), trunk, newWorkspace)
+	cmd.Dir = trunk
+
+	out, err := cmd.CombinedOutput()
+
+	if err == nil {
+		return string(out), 0
+	}
+
+	if ee, ok := err.(*exec.ExitError); ok {
+		return string(out), ee.ExitCode()
+	}
+
+	return string(out) + "\n" + err.Error(), -1
+}
+
+// mergerGateMessage renders the one team-chat line for an acceptance run: its
+// verdict, exit code, and output collapsed to a single line (messages.txt keeps
+// one entry per line, so embedded newlines become ⏎).
+func mergerGateMessage(code int, out string) string {
+	verdict := "rejected"
+
+	if code == 0 {
+		verdict = "accepted"
+	}
+
+	body := strings.TrimSpace(out)
+
+	if body == "" {
+		body = "(no output)"
+	}
+
+	body = strings.ReplaceAll(body, "\n", " ⏎ ")
+
+	return fmt.Sprintf("acceptance gate %s (exit %d): %s", verdict, code, body)
 }
 
 // sourceForTrigger maps an arbiter trigger verdict back to the role that raised it,
