@@ -243,9 +243,17 @@ func (o *Orchestrator) jobLead(job Job) AgentResult {
 // The script's combined stdout+stderr is posted to the team chat as one message.
 // Disabled under --sim (no real git / scripts in a simulated run).
 func (o *Orchestrator) mergerFastGate(ticket int, mergerWS, mergerWorktree, diggerBranch, diggerWorktree string) (AgentResult, bool) {
-	if simulate || !hasAcceptanceGate(o.Trunk) {
+	if simulate {
 		return AgentResult{}, false
 	}
+
+	if !hasAcceptanceGate(o.Trunk) {
+		uiTicket("🚦", RoleMerger, ticket, "GATE_NONE", "no executable ./acceptance in trunk — handing to merger agent")
+
+		return AgentResult{}, false
+	}
+
+	uiTicket("🚦", RoleMerger, ticket, "GATE", "found "+acceptancePath(o.Trunk)+" — trying fast merge of "+diggerBranch)
 
 	if !MergeBranchInto(mergerWorktree, diggerWorktree, diggerBranch) {
 		uiTicket("🚦", RoleMerger, ticket, "GATE_SKIP", "digger branch does not merge cleanly — handing to merger agent")
@@ -253,17 +261,34 @@ func (o *Orchestrator) mergerFastGate(ticket int, mergerWS, mergerWorktree, digg
 		return AgentResult{}, false
 	}
 
+	acceptArgs := []string{acceptancePath(o.Trunk), o.Trunk, diggerWorktree}
+	uiTicket("🔧", RoleMerger, ticket, "GATE_EXEC", strings.Join(acceptArgs, " "))
+
 	out, code := runAcceptance(o.Trunk, diggerWorktree)
 	o.noteMessage(RoleMerger, ticket, mergerGateMessage(code, out))
 
+	verdict := VerdictMerged
+	detail := "fast acceptance gate (exit 0) — landed without merger agent"
+
+	if code != 0 {
+		verdict = "GATE_REJECTED"
+		detail = fmt.Sprintf("acceptance exit=%d — handed to merger agent", code)
+	}
+
+	Try(func() {
+		writeGateRun(o.Root, ticket, mergerWS, acceptArgs, out, code, verdict, detail)
+	}).Catch(func(e *Exception) {
+		uiTicket("⚠️", RoleMerger, ticket, "GATE_LOG", e.Error())
+	})
+
 	if code == 0 {
-		uiTicket("✅", RoleMerger, ticket, "GATE_PASS", "acceptance accepted — landing without the merger agent")
+		uiTicket("✅", RoleMerger, ticket, "GATE_PASS", "acceptance exit=0 — landing without the merger agent")
 
 		return AgentResult{
 			Role:      RoleMerger,
 			Ticket:    ticket,
 			Workspace: mergerWS,
-			Events:    []map[string]any{{"type": "verdict", "verdict": string(VerdictMerged), "detail": "fast acceptance gate (exit 0) — landed without merger agent"}},
+			Events:    []map[string]any{{"type": "verdict", "verdict": string(VerdictMerged), "detail": detail}},
 		}, true
 	}
 

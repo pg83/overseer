@@ -8,10 +8,34 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 func runsDir(orchRoot string) string {
 	return filepath.Join(orchRoot, "runs")
+}
+
+// writeGateRun records the fast-merge gate's ./acceptance invocation as a run jsonl,
+// so the synthetic merger shows up in RUNS_DIR alongside agent merger runs (same
+// start / finish schema readers expect — PRIOR_RUNS, cost tooling, audits). The gate
+// skips the agent, so without this the merge decision would leave no per-run trail.
+// Best-effort: the caller wraps it so a logging failure never undoes a merge.
+func writeGateRun(orchRoot string, ticket int, ws string, args []string, output string, code int, verdict AgentVerdict, detail string) {
+	Throw(os.MkdirAll(runsDir(orchRoot), 0755))
+
+	runID := fmt.Sprintf("T-%d-%s-%s-%s", ticket, time.Now().UTC().Format("20060102-150405.000000000"), RoleMerger, ws)
+	f := Throw2(os.Create(filepath.Join(runsDir(orchRoot), runID+".jsonl")))
+	defer f.Close()
+
+	write := func(payload map[string]any) {
+		payload["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
+		b := Throw2(json.Marshal(payload))
+		Throw2(f.Write(append(b, '\n')))
+	}
+
+	write(map[string]any{"t": "start", "role": string(RoleMerger), "ticket": ticket, "ws": ws, "args": args, "gate": true})
+	write(map[string]any{"t": "acceptance", "exit": code, "output": output})
+	write(map[string]any{"t": "finish", "verdict": string(verdict), "detail": detail})
 }
 
 // Per-run state lives in a single jsonl file written by runAgentInner — one event per line,
