@@ -198,23 +198,6 @@ func MergeBranchInto(worktree, srcWorktree, branch string) bool {
 	return true
 }
 
-// ResetHardToOrigin discards everything in worktree back to the clone base
-// (origin/HEAD, falling back to origin/master) — used to undo a gate merge that
-// acceptance rejected so the merger agent starts from a clean trunk clone.
-func ResetHardToOrigin(worktree string) {
-	if simulate {
-		return
-	}
-
-	for _, ref := range []string{"origin/HEAD", "origin/master"} {
-		cmd := exec.Command("git", "-C", worktree, "reset", "--hard", ref)
-
-		if cmd.Run() == nil {
-			return
-		}
-	}
-}
-
 func CurrentTrunkHash(trunk string) string {
 	cmd := exec.Command("git", "-C", trunk, "rev-parse", "HEAD")
 	out, err := cmd.Output()

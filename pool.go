@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -172,8 +173,9 @@ func (o *Orchestrator) jobMerger(job Job) AgentResult {
 	diggerWorktree := wsPath(o.Root, diggerWS)
 	mergerWorktree := wsPath(o.Root, mergerWS)
 
-	// Fast gate: when it lands the change deterministically, skip the LLM merger.
-	if res, ok := o.mergerFastGate(job.Ticket.N, mergerWS, mergerWorktree, diggerBranch, diggerWorktree); ok {
+	// When the trunk ships ./acceptance, IT decides the merge — the LLM merger agent
+	// is never run. Only a missing script (or --sim) falls through to the agent below.
+	if res, ok := o.mergerAcceptance(job.Ticket.N, mergerWS, mergerWorktree, diggerBranch, diggerWorktree); ok {
 		return res
 	}
 
@@ -228,103 +230,131 @@ func (o *Orchestrator) jobLead(job Job) AgentResult {
 	}
 }
 
-// mergerFastGate is the bottleneck-buster in front of the LLM merger. The merger
-// is serial (pool size 1) and is the slowest stage; when the change can be judged
-// deterministically there is no need to spend an agent on it. So when the trunk
-// ships an executable ./acceptance AND the digger's branch merges into trunk with
-// no conflicts, it runs `./acceptance <trunk> <merged-tree>` from the trunk:
+// mergerAcceptance IS the merger whenever the trunk ships an executable ./acceptance:
+// it decides every merge deterministically and the LLM merger agent is never run.
+// The merger is serial (pool size 1) and the slowest stage, so a script verdict takes
+// the agent out of the loop entirely. It merges the digger's branch into a fresh trunk
+// clone, then runs `./acceptance <trunk> <merged-tree>` from the trunk, streaming the
+// script's output to the UI line by line as it appears (the run can be long):
 //
-//   - exit 0 → land directly. The prepared merge commit already sits on mergerWS's
-//     branch, so a synthetic MERGED is returned and the coordinator ff-merges it
-//     into trunk exactly as it would an agent's result — the agent is skipped.
-//   - any other outcome (no script, merge conflict, non-zero exit) → mergerWS is
-//     left as a clean trunk clone and the caller falls through to the merger agent.
+//   - clean merge + exit 0 → MERGED. The merge commit already sits on mergerWS's
+//     branch, so the coordinator ff-merges it into trunk exactly as it would an
+//     agent's result.
+//   - exit != 0            → MERGE_FAIL. Acceptance rejected the merged tree; that IS
+//     the verdict — no second opinion from an agent.
+//   - merge conflict       → MERGE_FAIL. The branch does not apply to current trunk.
 //
-// The NEW tree handed to acceptance is the MERGED worktree (current trunk + the
-// digger's branch), NOT the digger's standalone workspace: that workspace was
-// cloned off an older trunk and, judged alone, looks like a regression whenever
-// trunk has advanced under it — but what actually lands is the merge. So acceptance
-// must judge the merge, mirroring exactly what the merger agent compares (trunk
-// baseline vs merged tree). The script's combined stdout+stderr is posted to the
-// team chat as one message. Disabled under --sim (no real git / scripts).
-func (o *Orchestrator) mergerFastGate(ticket int, mergerWS, mergerWorktree, diggerBranch, diggerWorktree string) (AgentResult, bool) {
-	if simulate {
+// MERGE_FAIL routes through the arbiter exactly like an agent merge-fail (the digger
+// rebases onto current trunk and retries with the acceptance output as feedback). The
+// NEW tree handed to acceptance is the MERGED worktree (current trunk + the digger's
+// branch) — the exact landing candidate — not the digger's possibly-stale standalone
+// workspace. Returns ok=false ONLY when there is no ./acceptance (or under --sim); the
+// caller then runs the LLM merger agent.
+func (o *Orchestrator) mergerAcceptance(ticket int, mergerWS, mergerWorktree, diggerBranch, diggerWorktree string) (AgentResult, bool) {
+	if simulate || !hasAcceptanceGate(o.Trunk) {
 		return AgentResult{}, false
 	}
 
-	if !hasAcceptanceGate(o.Trunk) {
-		uiTicket("🚦", RoleMerger, ticket, "GATE_NONE", "no executable ./acceptance in trunk — handing to merger agent")
-
-		return AgentResult{}, false
-	}
-
-	uiTicket("🚦", RoleMerger, ticket, "GATE", "found "+acceptancePath(o.Trunk)+" — trying fast merge of "+diggerBranch)
+	uiTicket("🚦", RoleMerger, ticket, "GATE", "found "+acceptancePath(o.Trunk)+" — merging "+diggerBranch)
 
 	if !MergeBranchInto(mergerWorktree, diggerWorktree, diggerBranch) {
-		uiTicket("🚦", RoleMerger, ticket, "GATE_SKIP", "digger branch does not merge cleanly — handing to merger agent")
+		detail := "digger branch " + diggerBranch + " does not merge cleanly into current trunk (conflict)"
+		uiTicket("❌", RoleMerger, ticket, "MERGE_FAIL", detail)
 
-		return AgentResult{}, false
+		return mergerVerdict(ticket, mergerWS, VerdictMergeFail, detail), true
 	}
 
-	// Judge the MERGED tree (the actual landing candidate), not the digger's
-	// possibly-stale standalone workspace.
 	acceptArgs := []string{acceptancePath(o.Trunk), o.Trunk, mergerWorktree}
-	uiTicket("🔧", RoleMerger, ticket, "GATE_EXEC", strings.Join(acceptArgs, " "))
+	uiTicket("🔧", RoleMerger, ticket, "ACCEPTANCE", strings.Join(acceptArgs, " "))
 
-	out, code := runAcceptance(o.Trunk, mergerWorktree)
+	out, code := o.runAcceptance(ticket, mergerWorktree)
 	o.noteMessage(RoleMerger, ticket, mergerGateMessage(code, out))
 
-	verdict := VerdictMerged
-	detail := "fast acceptance gate (exit 0) — landed without merger agent"
+	verdict, detail := VerdictMerged, "acceptance exit=0 — landed"
+	emoji, kind := "✅", "MERGED"
 
 	if code != 0 {
-		verdict = "GATE_REJECTED"
-		detail = fmt.Sprintf("acceptance exit=%d — handed to merger agent", code)
+		verdict = VerdictMergeFail
+		detail = fmt.Sprintf("acceptance exit=%d — merged tree rejected:\n%s", code, tailLines(out, 40))
+		emoji, kind = "❌", "MERGE_FAIL"
 	}
 
 	Try(func() {
 		writeGateRun(o.Root, ticket, mergerWS, acceptArgs, out, code, verdict, detail)
 	}).Catch(func(e *Exception) {
-		uiTicket("⚠️", RoleMerger, ticket, "GATE_LOG", e.Error())
+		uiTicket("⚠️", RoleMerger, ticket, "ACCEPTANCE_LOG", e.Error())
 	})
 
-	if code == 0 {
-		uiTicket("✅", RoleMerger, ticket, "GATE_PASS", "acceptance exit=0 — landing without the merger agent")
+	uiTicket(emoji, RoleMerger, ticket, kind, fmt.Sprintf("acceptance exit=%d", code))
 
-		return AgentResult{
-			Role:      RoleMerger,
-			Ticket:    ticket,
-			Workspace: mergerWS,
-			Events:    []map[string]any{{"type": "verdict", "verdict": string(VerdictMerged), "detail": detail}},
-		}, true
-	}
-
-	// Acceptance rejected the change: undo the gate merge so the agent starts from
-	// a clean trunk clone, then fall through to it.
-	ResetHardToOrigin(mergerWorktree)
-	uiTicket("🚦", RoleMerger, ticket, "GATE_FAIL", fmt.Sprintf("acceptance exit=%d — handing to merger agent", code))
-
-	return AgentResult{}, false
+	return mergerVerdict(ticket, mergerWS, verdict, detail), true
 }
 
-// runAcceptance runs the trunk's ./acceptance gate from the trunk, passing the old
-// (trunk) and new (digger workspace) tree paths. Returns its combined stdout+stderr
-// and exit code (-1 if it couldn't be launched).
-func runAcceptance(trunk, newWorkspace string) (string, int) {
-	cmd := exec.Command(acceptancePath(trunk), trunk, newWorkspace)
-	cmd.Dir = trunk
+// mergerVerdict synthesizes the merger's result for the coordinator: a single verdict
+// event (MERGED → onMerger ff-merges mergerWS's branch into trunk; MERGE_FAIL → onMerger
+// routes it to the arbiter with the detail as the digger's rebase feedback).
+func mergerVerdict(ticket int, ws string, v AgentVerdict, detail string) AgentResult {
+	return AgentResult{
+		Role:      RoleMerger,
+		Ticket:    ticket,
+		Workspace: ws,
+		Events:    []map[string]any{{"type": "verdict", "verdict": string(v), "detail": detail}},
+	}
+}
 
-	out, err := cmd.CombinedOutput()
+// runAcceptance runs the trunk's ./acceptance from the trunk, passing the old (trunk)
+// and new (merged-tree) paths, streaming its merged stdout+stderr to the UI one line
+// at a time as it is produced — the script can run for many minutes, and a single
+// buffered dump at the end looks like a hang. Returns the full captured output and the
+// exit code (-1 if it couldn't be launched). EOF on the read end (hence return) only
+// happens once acceptance and every child it spawned have closed the write end.
+func (o *Orchestrator) runAcceptance(ticket int, mergedTree string) (string, int) {
+	cmd := exec.Command(acceptancePath(o.Trunk), o.Trunk, mergedTree)
+	cmd.Dir = o.Trunk
+
+	pr, pw := Throw3(os.Pipe())
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	Throw(cmd.Start())
+	pw.Close() // parent drops its write end; pr sees EOF when the child tree closes it
+
+	var buf strings.Builder
+
+	scanner := bufio.NewScanner(pr)
+	scanner.Buffer(make([]byte, 1<<20), 16<<20)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+		ui("·", RoleMerger, ticket, "acceptance", line)
+	}
+
+	pr.Close()
+	err := cmd.Wait()
 
 	if err == nil {
-		return string(out), 0
+		return buf.String(), 0
 	}
 
 	if ee, ok := err.(*exec.ExitError); ok {
-		return string(out), ee.ExitCode()
+		return buf.String(), ee.ExitCode()
 	}
 
-	return string(out) + "\n" + err.Error(), -1
+	return buf.String() + err.Error() + "\n", -1
+}
+
+// tailLines returns the last n lines of s (all of it when shorter), for embedding a
+// readable failure excerpt in a MERGE_FAIL detail without dragging the whole log in.
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // mergerGateMessage renders the one team-chat line for an acceptance run: its
