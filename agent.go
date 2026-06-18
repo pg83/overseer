@@ -107,6 +107,12 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 	}
 
 	for attempt := 1; ; attempt++ {
+		// Shutdown in progress: don't spawn another harness (and don't retry). The
+		// caller's respawn loop also checks StopCtx, so this just returns quietly.
+		if o.StopCtx.Err() != nil {
+			return AgentResult{Role: role, Ticket: ticket, Workspace: wsID}
+		}
+
 		var res AgentResult
 
 		exc := Try(func() {
@@ -114,7 +120,7 @@ func (o *Orchestrator) runAgent(role AgentRole, ticket int, wsID, stdin string, 
 		})
 
 		if exc != nil {
-			// Shutdown in progress: the exit-time subtree kill SIGKILLs in-flight
+			// Shutdown raced in mid-run: the exit-time subtree kill SIGKILLs in-flight
 			// harnesses, so a Wait error here is expected teardown, not a real fault —
 			// return quietly instead of escalating to fatal().
 			if o.StopCtx.Err() != nil {

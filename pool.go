@@ -89,6 +89,10 @@ func (o *Orchestrator) jobTasker(job Job) AgentResult {
 	for {
 		res := o.runAgent(RoleTasker, job.Ticket.N, ws, stdin, env)
 
+		if o.StopCtx.Err() != nil {
+			return res
+		}
+
 		if taskerPlanContent(res.Events) != "" || hasReplanEvent(res.Events) {
 			res.Workspace = ws
 
@@ -115,6 +119,11 @@ func (o *Orchestrator) jobDigger(job Job) AgentResult {
 		}
 
 		res := o.runAgent(RoleDigger, job.Ticket.N, ws, loadPrompt(o.Trunk, RoleDigger, p), envFrom(p))
+
+		if o.StopCtx.Err() != nil {
+			return res
+		}
+
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictReady || v == VerdictCantDo || v == VerdictAlgedonic {
@@ -134,6 +143,11 @@ func (o *Orchestrator) jobReviewer(job Job) AgentResult {
 
 	for {
 		res := o.runAgent(RoleReviewer, job.Ticket.N, ws, stdin, env)
+
+		if o.StopCtx.Err() != nil {
+			return res
+		}
+
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictApprove || v == VerdictRework || v == VerdictDiscard {
@@ -153,6 +167,11 @@ func (o *Orchestrator) jobArbiter(job Job) AgentResult {
 
 	for {
 		res := o.runAgent(RoleArbiter, job.Ticket.N, ws, stdin, env)
+
+		if o.StopCtx.Err() != nil {
+			return res
+		}
+
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictContinue || v == VerdictEscalate {
@@ -189,6 +208,11 @@ func (o *Orchestrator) jobMerger(job Job) AgentResult {
 
 	for {
 		res := o.runAgent(RoleMerger, job.Ticket.N, mergerWS, stdin, env)
+
+		if o.StopCtx.Err() != nil {
+			return res
+		}
+
 		v, _ := lastVerdict(res.Events)
 
 		if v == VerdictMerged || v == VerdictMergeFail {
@@ -219,6 +243,10 @@ func (o *Orchestrator) jobLead(job Job) AgentResult {
 
 	for {
 		res := o.runAgent(RoleLead, 0, ws, stdin, env)
+
+		if o.StopCtx.Err() != nil {
+			return res
+		}
 
 		if !hasJSONInUnparsed(res.Events) {
 			res.Workspace = ws
