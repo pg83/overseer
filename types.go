@@ -263,6 +263,10 @@ type Orchestrator struct {
 	// queues it as a mandatory operator nudge for the first lead pass.
 	bootReplan string
 
+	// fire lists tickets the operator passed via --fire: at boot their deps are
+	// cleared so the dispatch loop picks them up immediately, bypassing dep gating.
+	fire []int
+
 	// Bindings is the role → (harness, model) resolution table — see
 	// harnessModelForRole. "default" required; the rest optional overrides.
 	Bindings map[string]HarnessModel

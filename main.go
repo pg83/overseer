@@ -74,6 +74,20 @@ func runMain(argv []string) {
 
 	replanDirective := fs.String("replan", "", "operator directive: force one lead pass at boot, injected as a mandatory instruction")
 
+	var fireList []int
+
+	fs.Func("fire", "ticket to 'fire' at boot: clear its deps so the dispatch loop picks it up immediately, bypassing dependency gating. Accepts N or T-N; repeatable.", func(v string) error {
+		n := jsonInt(v)
+
+		if n <= 0 {
+			return fmt.Errorf("--fire %q: not a ticket number", v)
+		}
+
+		fireList = append(fireList, n)
+
+		return nil
+	})
+
 	uiMode := fs.String("ui", "log", "ui mode: log (scrolling lines) | tui (interactive tcell tabs)")
 
 	jailBin := fs.String("jail-bin", "", "external jail binary (PATH-resolved). Empty = use built-in `overseer jail`.")
@@ -157,6 +171,7 @@ func runMain(argv []string) {
 
 	o := NewOrchestrator(*root, *trunk, bindings, jail, extraRW)
 	o.bootReplan = strings.TrimSpace(*replanDirective)
+	o.fire = fireList
 
 	go func() {
 		sigs := make(chan os.Signal, 1)

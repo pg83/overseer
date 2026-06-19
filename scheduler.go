@@ -67,6 +67,8 @@ func (o *Orchestrator) Run() {
 
 	o.startPools()
 
+	o.applyFire()
+
 	o.bootDirectives()
 
 	o.dispatch()
@@ -85,6 +87,33 @@ func (o *Orchestrator) Run() {
 			o.safe("HANDLE", func() { o.handleResult(res) })
 			o.safe("DISPATCH", o.dispatch)
 		}
+	}
+}
+
+// applyFire clears the deps of every --fire ticket at boot, releasing a ticket
+// parked behind unsatisfied dependencies straight to the dispatch loop. It is an
+// operator override of the normal dep gating; terminal / unknown tickets are
+// skipped. Runs before bootDirectives/dispatch, while everything is still STOPPED.
+func (o *Orchestrator) applyFire() {
+	for _, n := range o.fire {
+		t, ok := o.findTicket(n)
+
+		if !ok {
+			uiSys("⚠️", "FIRE_SKIP", fmt.Sprintf("T-%d not found", n))
+			continue
+		}
+
+		if t.Phase.Terminal() {
+			uiSys("⚠️", "FIRE_SKIP", fmt.Sprintf("T-%d is terminal (%s)", n, t.Phase))
+			continue
+		}
+
+		if len(t.Deps) > 0 {
+			o.appendLog(LogEvent{"k": "update", "n": n, "deps": []int{}})
+		}
+
+		o.recordEvent(n, "FIRED", "operator --fire: deps cleared")
+		uiTicket("🔥", roleForPhase(t.Phase), n, "FIRED", "deps cleared — dispatching")
 	}
 }
 
